@@ -8,7 +8,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Literal
+from typing import Optional, Literal, Dict, Any
 import pandas as pd
 import io
 import sys
@@ -18,9 +18,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from ml.profiler import profile_dataset
-from ml.trainer import train_classification, train_regression
+from ml.trainer import train_classification, train_regression, compare_models
 from ml.evaluator import evaluate_dataset
 from utils.logging import create_run_id, log_run
+from agents.planner_agent import plan_pipeline
+from schemas.pipeline_schema import UserIntent
 
 
 app = FastAPI(title="Intent2Model API", version="1.0.0")
@@ -36,6 +38,7 @@ app.add_middleware(
 
 # In-memory storage for uploaded datasets (in production, use proper storage)
 dataset_cache = {}
+trained_models_cache = {}  # Store trained models for prediction
 
 
 class TrainRequest(BaseModel):
@@ -150,11 +153,41 @@ async def train_model(request: TrainRequest):
         metric = "r2"  # Default fallback
     
     try:
-        # Train model
-        if task == "classification":
-            train_result = train_classification(df, request.target, metric)
+        # Get dataset profile for planning
+        profile = profile_dataset(df)
+        
+        # Use LLM planner to generate optimal pipeline config
+        user_intent = UserIntent(
+            target_column=request.target,
+            task_type=task,
+            priority_metric=metric
+        )
+        
+        try:
+            pipeline_config = plan_pipeline(profile, user_intent, llm_provider="gemini")
+            # Use LLM-generated config
+            config = {
+                "task": pipeline_config.task,
+                "preprocessing": pipeline_config.preprocessing,
+                "model": pipeline_config.model_candidates[0] if pipeline_config.model_candidates else "random_forest"
+            }
+            use_model_comparison = len(pipeline_config.model_candidates) > 1
+        except Exception as e:
+            # Fallback to default config if LLM fails
+            print(f"LLM planning failed: {e}. Using default config.")
+            config = None
+            use_model_comparison = False
+        
+        # Train model(s)
+        if use_model_comparison and pipeline_config.model_candidates:
+            # Try multiple models and pick the best
+            train_result = compare_models(df, request.target, task, metric, pipeline_config.model_candidates, config)
         else:
-            train_result = train_regression(df, request.target, metric)
+            # Single model training
+            if task == "classification":
+                train_result = train_classification(df, request.target, metric, config)
+            else:
+                train_result = train_regression(df, request.target, metric, config)
         
         # Evaluate dataset
         eval_result = evaluate_dataset(df, request.target, task)
@@ -182,6 +215,15 @@ async def train_model(request: TrainRequest):
             }
         )
         
+        # Store trained model for prediction
+        trained_models_cache[run_id] = {
+            "model": train_result["best_model"],
+            "target": request.target,
+            "task": task,
+            "feature_columns": list(df.drop(columns=[request.target]).columns),
+            "label_encoder": train_result.get("label_encoder") if task == "classification" else None
+        }
+        
         return {
             "run_id": run_id,
             "metrics": train_result["metrics"],
@@ -190,10 +232,93 @@ async def train_model(request: TrainRequest):
             "warnings": eval_result["warnings"],
             "imbalance_ratio": eval_result.get("imbalance_ratio"),
             "leakage_columns": eval_result["leakage_columns"],
-            "feature_importance": train_result.get("feature_importance")
+            "feature_importance": train_result.get("feature_importance"),
+            "model_comparison": train_result.get("model_comparison"),
+            "pipeline_config": {
+                "preprocessing": config.get("preprocessing", []) if config else [],
+                "model": train_result.get("model_name", config.get("model", "unknown")) if config else "unknown"
+            }
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error training model: {str(e)}")
+        error_msg = str(e)
+        # Convert technical errors to user-friendly messages
+        if "could not convert string to float" in error_msg or "ValueError" in error_msg:
+            user_msg = f"the target column '{request.target}' contains text values. make sure it's a valid column name."
+        elif "All the" in error_msg and "fits failed" in error_msg:
+            user_msg = f"couldn't train with '{request.target}'. the data might not be suitable for this type of model. try a different column?"
+        elif "not found" in error_msg.lower():
+            user_msg = f"column '{request.target}' not found. available columns: {', '.join(list(df.columns)[:5])}"
+        else:
+            user_msg = f"something went wrong training the model. try a different column or check your data."
+        raise HTTPException(status_code=500, detail=user_msg)
+
+
+class PredictRequest(BaseModel):
+    run_id: str
+    features: Dict[str, Any]
+
+
+@app.post("/predict")
+async def predict(request: PredictRequest):
+    """
+    Make predictions with a trained model.
+    
+    Request body:
+        - run_id: Run ID from training
+        - features: Dictionary of feature values
+        
+    Returns:
+        Prediction result
+    """
+    if request.run_id not in trained_models_cache:
+        raise HTTPException(status_code=404, detail="Model not found. Train a model first.")
+    
+    model_info = trained_models_cache[request.run_id]
+    model = model_info["model"]
+    feature_columns = model_info["feature_columns"]
+    task = model_info["task"]
+    label_encoder = model_info.get("label_encoder")
+    
+    # Prepare input data
+    try:
+        import pandas as pd
+        # Create DataFrame with features
+        input_data = pd.DataFrame([request.features])
+        
+        # Ensure all required features are present
+        missing_features = set(feature_columns) - set(input_data.columns)
+        if missing_features:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing features: {', '.join(missing_features)}. Required: {', '.join(feature_columns)}"
+            )
+        
+        # Reorder columns to match training
+        input_data = input_data[feature_columns]
+        
+        # Make prediction
+        prediction = model.predict(input_data)[0]
+        
+        # If classification, decode label
+        if task == "classification" and label_encoder is not None:
+            prediction_label = label_encoder.inverse_transform([prediction])[0]
+            prediction_proba = None
+            try:
+                proba = model.predict_proba(input_data)[0]
+                prediction_proba = dict(zip(label_encoder.classes_, proba.tolist()))
+            except:
+                pass
+            return {
+                "prediction": str(prediction_label),
+                "prediction_encoded": int(prediction),
+                "probabilities": prediction_proba
+            }
+        else:
+            return {
+                "prediction": float(prediction)
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
 
 if __name__ == "__main__":

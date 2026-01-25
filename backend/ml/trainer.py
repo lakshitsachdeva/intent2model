@@ -47,9 +47,17 @@ def train_classification(
             "model": "random_forest"
         }
     
-    # Prepare data
-    X = df.drop(columns=[target])
-    y = df[target]
+    # Check if target is categorical (for classification)
+    le = None
+    if y.dtype == 'object' or y.dtype.name == 'category':
+        # Encode target labels
+        from sklearn.preprocessing import LabelEncoder
+        le = LabelEncoder()
+        y_encoded = le.fit_transform(y)
+        y_classes = le.classes_
+    else:
+        y_encoded = y
+        y_classes = None
     
     # Get column types
     profile = profile_dataset(df)
@@ -71,7 +79,7 @@ def train_classification(
         "precision": "precision_macro",
         "recall": "recall_macro",
         "f1": "f1_macro",
-        "roc_auc": "roc_auc_ovr" if len(np.unique(y)) > 2 else "roc_auc"
+        "roc_auc": "roc_auc_ovr" if len(np.unique(y_encoded)) > 2 else "roc_auc"
     }
     
     cv_scoring = scoring_map.get(metric, "accuracy")
@@ -79,12 +87,12 @@ def train_classification(
     # Cross-validation
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     cv_results = cross_validate(
-        pipeline, X, y, cv=cv, scoring=cv_scoring, return_train_score=True
+        pipeline, X, y_encoded, cv=cv, scoring=cv_scoring, return_train_score=True
     )
     cv_scores = cv_results["test_score"].tolist()
     
     # Train final model on full data
-    pipeline.fit(X, y)
+    pipeline.fit(X, y_encoded)
     
     # Calculate all metrics on full training set
     y_pred = pipeline.predict(X)
@@ -95,19 +103,19 @@ def train_classification(
         pass
     
     metrics = {
-        "accuracy": accuracy_score(y, y_pred),
-        "precision": precision_score(y, y_pred, average="macro", zero_division=0),
-        "recall": recall_score(y, y_pred, average="macro", zero_division=0),
-        "f1": f1_score(y, y_pred, average="macro", zero_division=0),
+        "accuracy": accuracy_score(y_encoded, y_pred),
+        "precision": precision_score(y_encoded, y_pred, average="macro", zero_division=0),
+        "recall": recall_score(y_encoded, y_pred, average="macro", zero_division=0),
+        "f1": f1_score(y_encoded, y_pred, average="macro", zero_division=0),
     }
     
     # Add ROC AUC if binary or multiclass with probabilities
     if y_pred_proba is not None:
         try:
-            if len(np.unique(y)) == 2:
-                metrics["roc_auc"] = roc_auc_score(y, y_pred_proba[:, 1])
+            if len(np.unique(y_encoded)) == 2:
+                metrics["roc_auc"] = roc_auc_score(y_encoded, y_pred_proba[:, 1])
             else:
-                metrics["roc_auc"] = roc_auc_score(y, y_pred_proba, multi_class="ovr", average="macro")
+                metrics["roc_auc"] = roc_auc_score(y_encoded, y_pred_proba, multi_class="ovr", average="macro")
         except:
             metrics["roc_auc"] = None
     
@@ -150,7 +158,8 @@ def train_classification(
         "cv_scores": cv_scores,
         "cv_mean": np.mean(cv_scores),
         "cv_std": np.std(cv_scores),
-        "feature_importance": feature_importance
+        "feature_importance": feature_importance,
+        "label_encoder": le  # Return encoder for prediction
     }
 
 
@@ -276,3 +285,76 @@ def train_regression(
         "cv_std": np.std(cv_scores),
         "feature_importance": feature_importance
     }
+
+
+def compare_models(
+    df: pd.DataFrame,
+    target: str,
+    task: str,
+    metric: str,
+    model_candidates: List[str],
+    base_config: Optional[Dict[str, Any]] = None
+) -> Dict:
+    """
+    Try multiple models and return the best one.
+    
+    Args:
+        df: Input DataFrame
+        target: Target column name
+        task: "classification" or "regression"
+        metric: Metric to optimize
+        model_candidates: List of model names to try
+        base_config: Base pipeline configuration
+        
+    Returns:
+        Dictionary with best model results and comparison
+    """
+    results = []
+    
+    for model_name in model_candidates:
+        try:
+            if base_config:
+                config = base_config.copy()
+            else:
+                config = {
+                    "task": task,
+                    "preprocessing": ["standard_scaler", "one_hot"],
+                    "model": model_name
+                }
+            config["model"] = model_name
+            
+            if task == "classification":
+                result = train_classification(df, target, metric, config)
+            else:
+                result = train_regression(df, target, metric, config)
+            
+            # Get the primary metric value
+            primary_metric_value = result["metrics"].get(metric, result["cv_mean"])
+            result["model_name"] = model_name
+            result["primary_metric"] = primary_metric_value
+            results.append(result)
+        except Exception as e:
+            print(f"Model {model_name} failed: {e}")
+            continue
+    
+    if not results:
+        raise ValueError("All models failed to train")
+    
+    # Sort by primary metric (higher is better for most metrics, except rmse/mae)
+    reverse = metric not in ["rmse", "mae"]
+    results.sort(key=lambda x: x["primary_metric"], reverse=reverse)
+    
+    best_result = results[0]
+    best_result["model_comparison"] = {
+        "tried_models": [r["model_name"] for r in results],
+        "best_model": best_result["model_name"],
+        "all_results": [
+            {
+                "model": r["model_name"],
+                "metric": r["primary_metric"]
+            }
+            for r in results
+        ]
+    }
+    
+    return best_result
