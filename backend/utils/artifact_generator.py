@@ -245,7 +245,6 @@ def generate_notebook(
                         "print('Model saved successfully!')"
                     ]
                 )
-                ]
             },
             {
                 "cell_type": "markdown",
