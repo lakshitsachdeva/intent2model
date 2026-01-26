@@ -175,20 +175,21 @@ def generate_notebook(
                 "cell_type": "code",
                 "execution_count": None,
                 "metadata": {},
-                "source": [
-                    "# Train the model\n",
-                    "pipeline.fit(X_train, y_train)\n",
-                    "\n",
-                    "# Make predictions\n",
-                    "y_pred = pipeline.predict(X_test)\n",
-                    "\n",
-                    "# Evaluate\n",
-                ] + (
-                    ["score = accuracy_score(y_test, y_pred)\n", "print(f'Accuracy: {score:.4f}')\n", "\n", "print(classification_report(y_test, y_pred))"] 
-                    if task == 'classification' 
-                    else ["score = r2_score(y_test, y_pred)\n", "print(f'R2 Score: {score:.4f}')\n", "\n", "print(f'RMSE: {mean_squared_error(y_test, y_pred, squared=False):.4f}')"]
+                "source": (
+                    [
+                        "# Train the model\n",
+                        "pipeline.fit(X_train, y_train)\n",
+                        "\n",
+                        "# Make predictions\n",
+                        "y_pred = pipeline.predict(X_test)\n",
+                        "\n",
+                        "# Evaluate\n",
+                    ] + (
+                        ["score = accuracy_score(y_test, y_pred)\n", "print(f'Accuracy: {score:.4f}')\n", "\n", "print(classification_report(y_test, y_pred))"] 
+                        if task == 'classification' 
+                        else ["score = r2_score(y_test, y_pred)\n", "print(f'R2 Score: {score:.4f}')\n", "\n", "print(f'RMSE: {mean_squared_error(y_test, y_pred, squared=False):.4f}')"]
+                    )
                 )
-                ]
             },
             {
                 "cell_type": "markdown",
