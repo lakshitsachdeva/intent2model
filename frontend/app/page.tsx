@@ -313,9 +313,17 @@ export default function Home() {
   }
 
   const trainModel = async (target: string) => {
+    // AUTONOMOUS: If dataset missing, try to recover automatically
     if (!datasetId) {
-      addMessage('assistant', 'Dataset not found. Please upload a CSV first.', 'error')
-      return
+      // Try to get dataset from localStorage or use most recent
+      const savedDatasetId = localStorage.getItem('datasetId')
+      if (savedDatasetId) {
+        setDatasetId(savedDatasetId)
+        addMessage('assistant', 'Recovered dataset automatically. Continuing...', 'info')
+      } else {
+        addMessage('assistant', 'No dataset found. Please upload a CSV first.', 'error')
+        return
+      }
     }
 
     addMessage('assistant', `Training model to predict "${target}"...`, 'training')
@@ -356,7 +364,16 @@ export default function Home() {
         
         addMessage('assistant', `Want to make predictions? Just ask!`, 'info')
       } else {
-        addMessage('assistant', data.detail || `Couldn't train with "${target}"`, 'error')
+        // AUTONOMOUS: Try to recover from error
+        const errorMsg = data.detail || `Couldn't train with "${target}"`
+        
+        // If dataset not found, try to recover
+        if (errorMsg.includes('Dataset not found') || errorMsg.includes('No dataset')) {
+          addMessage('assistant', 'Dataset was lost. Please upload your CSV again.', 'error')
+        } else {
+          // For other errors, show the LLM-analyzed error message
+          addMessage('assistant', errorMsg, 'error')
+        }
       }
     } catch (error) {
       addMessage('assistant', 'Training failed. Check your data?', 'error')

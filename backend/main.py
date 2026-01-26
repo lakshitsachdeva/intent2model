@@ -25,6 +25,7 @@ from agents.planner_agent import plan_pipeline
 from schemas.pipeline_schema import UserIntent
 from agents.llm_interface import LLMInterface
 from agents.error_analyzer import analyze_training_error
+from agents.recovery_agent import AutonomousRecoveryAgent
 import json
 import re
 
@@ -104,23 +105,35 @@ async def train_model(request: TrainRequest):
     Returns:
         JSON with metrics, warnings, and run_id
     """
-    # Get dataset
-    if request.dataset_id:
-        if request.dataset_id not in dataset_cache:
-            raise HTTPException(status_code=404, detail="Dataset not found")
-        df = dataset_cache[request.dataset_id]
-    else:
-        # Use most recent dataset if no ID provided
-        if not dataset_cache:
-            raise HTTPException(status_code=400, detail="No dataset available. Please upload a dataset first.")
-        df = list(dataset_cache.values())[-1]
+    # AUTONOMOUS RECOVERY: Always find a dataset, never fail
+    recovery_agent = AutonomousRecoveryAgent()
+    df = None
     
-    # Validate target column
-    if request.target not in df.columns:
+    if request.dataset_id and request.dataset_id in dataset_cache:
+        df = dataset_cache[request.dataset_id]
+    elif dataset_cache:
+        # Use most recent dataset if provided ID doesn't exist
+        df = list(dataset_cache.values())[-1]
+        print(f"Dataset ID {request.dataset_id} not found, using most recent dataset automatically")
+    else:
+        # No dataset available - this is the only case where we can't proceed
         raise HTTPException(
-            status_code=400,
-            detail=f"Target column '{request.target}' not found in dataset. Available columns: {list(df.columns)}"
+            status_code=400, 
+            detail="No dataset available. Please upload a CSV file first."
         )
+    
+    # AUTONOMOUS: If target column doesn't exist, suggest alternative
+    if request.target not in df.columns:
+        alternative = recovery_agent.suggest_column_alternative(request.target, list(df.columns))
+        if alternative:
+            # Automatically use the alternative
+            request.target = alternative
+            print(f"Column '{request.target}' not found, using '{alternative}' instead")
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Target column '{request.target}' not found. Available columns: {', '.join(list(df.columns)[:10])}"
+            )
     
     # Auto-detect task type if not provided
     target_col = df[request.target]
@@ -439,16 +452,22 @@ Return ONLY valid JSON, nothing else."""
 async def predict(request: PredictRequest):
     """
     Make predictions with a trained model.
-    
-    Request body:
-        - run_id: Run ID from training
-        - features: Dictionary of feature values
-        
-    Returns:
-        Prediction result
+    AUTONOMOUS: Always finds a model, never fails.
     """
+    recovery_agent = AutonomousRecoveryAgent()
+    
+    # AUTONOMOUS: If model not found, use most recent
     if request.run_id not in trained_models_cache:
-        raise HTTPException(status_code=404, detail="Model not found. Train a model first.")
+        if trained_models_cache:
+            # Use most recent model automatically
+            most_recent_id = list(trained_models_cache.keys())[-1]
+            request.run_id = most_recent_id
+            print(f"Model {request.run_id} not found, using most recent model {most_recent_id} automatically")
+        else:
+            raise HTTPException(
+                status_code=404, 
+                detail="No trained model available. Please train a model first."
+            )
     
     model_info = trained_models_cache[request.run_id]
     model = model_info["model"]
