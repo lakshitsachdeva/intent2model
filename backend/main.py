@@ -385,7 +385,11 @@ async def train_model(request: TrainRequest):
             "target": request.target,
             "task": task,
             "feature_columns": list(df.drop(columns=[request.target]).columns),
-            "label_encoder": train_result.get("label_encoder") if task == "classification" else None
+            "label_encoder": train_result.get("label_encoder") if task == "classification" else None,
+            "config": config,
+            "df": df,  # Store for artifact generation
+            "metrics": train_result["metrics"],
+            "feature_importance": train_result.get("feature_importance")
         }
         
         return {

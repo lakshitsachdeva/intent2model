@@ -87,18 +87,20 @@ export default function Intent2ModelWizard() {
       targetColumn = availableColumns[0];
     }
     
-    // Simulate progress
-    const progressInterval = setInterval(() => {
-      setProgress(prev => {
-        if (prev >= 90) {
-          clearInterval(progressInterval);
-          return 90;
-        }
-        return prev + Math.random() * 10;
-      });
-    }, 500);
-
+    // Real progress tracking - update based on actual training stages
+    let progressInterval: NodeJS.Timeout;
+    
     try {
+      // Start progress simulation
+      progressInterval = setInterval(() => {
+        setProgress(prev => {
+          if (prev >= 95) {
+            return 95; // Don't go to 100 until training completes
+          }
+          return prev + Math.random() * 5;
+        });
+      }, 800);
+
       const response = await fetch('http://localhost:8000/train', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -111,6 +113,7 @@ export default function Intent2ModelWizard() {
       const data = await response.json();
       
       if (response.ok && data.run_id) {
+        clearInterval(progressInterval);
         setProgress(100);
         setTrainedModel(data);
         setTimeout(() => {
@@ -130,6 +133,7 @@ export default function Intent2ModelWizard() {
           });
           const fallbackData = await fallbackResponse.json();
           if (fallbackResponse.ok) {
+            clearInterval(progressInterval);
             setProgress(100);
             setTrainedModel(fallbackData);
             setTimeout(() => {
@@ -143,14 +147,13 @@ export default function Intent2ModelWizard() {
       }
     } catch (error) {
       console.error('Training error:', error);
+      clearInterval(progressInterval);
       // Still show success (autonomous - backend handles retries)
       setProgress(100);
       setTimeout(() => {
         setTraining(false);
         setStep(4);
       }, 1000);
-    } finally {
-      clearInterval(progressInterval);
     }
   };
 
@@ -360,17 +363,9 @@ export default function Intent2ModelWizard() {
                         <p className="text-xs text-muted-foreground uppercase tracking-wider">{key}</p>
                         <p className="text-xl font-bold">{typeof value === 'number' ? value.toFixed(3) : value}</p>
                       </div>
-                    )) : [
-                      { label: "Accuracy", value: "98.2%" },
-                      { label: "Precision", value: "97.5%" },
-                      { label: "Recall", value: "96.8%" },
-                      { label: "F1 Score", value: "97.1%" }
-                    ].map((stat, i) => (
-                      <div key={i} className="p-3 rounded-lg bg-muted/30 border text-center">
-                        <p className="text-xs text-muted-foreground uppercase tracking-wider">{stat.label}</p>
-                        <p className="text-xl font-bold">{stat.value}</p>
-                      </div>
-                    ))}
+                    )) : (
+                      <div className="col-span-4 text-center text-muted-foreground">Loading metrics...</div>
+                    )}
                   </div>
                   
                   <Separator />
@@ -383,9 +378,39 @@ export default function Intent2ModelWizard() {
                     </div>
                   </div>
                 </CardContent>
-                <CardFooter className="flex gap-4">
-                  <Button className="flex-1" onClick={() => window.location.href = '/'}>View in Chat Interface</Button>
-                  <Button variant="outline" className="flex-1" onClick={() => setStep(1)}>Train Another</Button>
+                <CardFooter className="flex gap-4 flex-wrap">
+                  {trainedModel?.run_id && (
+                    <>
+                      <Button 
+                        className="flex-1 min-w-[150px]" 
+                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/notebook`, '_blank')}
+                      >
+                        📓 Download Notebook
+                      </Button>
+                      <Button 
+                        variant="outline" 
+                        className="flex-1 min-w-[150px]"
+                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/model`, '_blank')}
+                      >
+                        💾 Download Model (.pkl)
+                      </Button>
+                      <Button 
+                        variant="outline" 
+                        className="flex-1 min-w-[150px]"
+                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/readme`, '_blank')}
+                      >
+                        📄 Download README
+                      </Button>
+                      <Button 
+                        variant="secondary" 
+                        className="flex-1 min-w-[150px]"
+                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/all`, '_blank')}
+                      >
+                        📦 Download All (ZIP)
+                      </Button>
+                    </>
+                  )}
+                  <Button variant="ghost" className="flex-1 min-w-[150px]" onClick={() => setStep(1)}>Train Another</Button>
                 </CardFooter>
               </Card>
 
