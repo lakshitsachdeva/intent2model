@@ -155,23 +155,42 @@ async def upload_dataset(file: UploadFile = File(...)):
             "message": "Dataset uploaded successfully"
         }
     except Exception as e:
-        # AUTONOMOUS: Even if everything fails, create a working dataset
-        print(f"⚠️  Upload error: {e}. Creating fallback dataset.")
-        fallback_df = pd.DataFrame({
-            'feature1': [1, 2, 3, 4, 5],
-            'feature2': [10, 20, 30, 40, 50],
-            'target': [0, 1, 0, 1, 0]
-        })
-        dataset_id = create_run_id()
-        dataset_cache[dataset_id] = fallback_df
+        # AUTONOMOUS: Try one more time with most permissive settings
+        print(f"⚠️  Upload error: {e}. Trying one more time with permissive settings.")
+        try:
+            contents = await file.read()
+            df = pd.read_csv(
+                io.BytesIO(contents), 
+                encoding='latin-1', 
+                on_bad_lines='skip',
+                low_memory=False,
+                dtype=str  # Read everything as string first
+            )
+            # Convert numeric columns back
+            for col in df.columns:
+                try:
+                    df[col] = pd.to_numeric(df[col], errors='ignore')
+                except:
+                    pass
+            
+            if not df.empty:
+                profile = profile_dataset(df)
+                dataset_id = create_run_id()
+                dataset_cache[dataset_id] = df
+                return {
+                    "dataset_id": dataset_id,
+                    "profile": profile,
+                    "message": "Dataset uploaded successfully"
+                }
+        except:
+            pass
         
-        profile = profile_dataset(fallback_df)
-        
-        return {
-            "dataset_id": dataset_id,
-            "profile": profile,
-            "message": "Dataset processed (using fallback due to upload issues)"
-        }
+        # Last resort: create minimal dataset but DON'T use it - return error instead
+        # This forces user to upload a real file
+        raise HTTPException(
+            status_code=400,
+            detail="Could not process the file. Please ensure it's a valid CSV, JSON, or XLSX file."
+        )
 
 
 @app.post("/train")
