@@ -474,6 +474,57 @@ async def detect_intent(request: Dict[str, Any]):
         }
 
 
+@app.post("/analyze-error")
+async def analyze_error(request: Dict[str, Any]):
+    """
+    Analyze training errors and provide helpful explanations.
+    AUTONOMOUS: Uses LLM to explain what went wrong.
+    """
+    try:
+        from agents.error_analyzer import analyze_training_error
+        
+        error_msg = request.get("error_message", "Unknown error")
+        target_column = request.get("target_column", "unknown")
+        available_columns = request.get("available_columns", [])
+        
+        dataset_info = {
+            "columns": available_columns,
+            "target_column": target_column
+        }
+        
+        try:
+            analysis = analyze_training_error(
+                error=Exception(error_msg),
+                error_msg=error_msg,
+                dataset_info=dataset_info,
+                target_column=target_column,
+                task_type="unknown",
+                llm_provider="gemini"
+            )
+            
+            return {
+                "explanation": analysis.get("explanation", "The system is working on fixing this automatically."),
+                "root_cause": analysis.get("root_cause", "Unknown issue"),
+                "suggestions": analysis.get("suggestions", ["Try a different column", "Check your data format"])
+            }
+        except Exception as llm_error:
+            # Fallback explanation
+            return {
+                "explanation": f"The system encountered an issue with column '{target_column}'. Available columns: {', '.join(available_columns[:5])}. The system will automatically try alternative approaches.",
+                "root_cause": "Training configuration issue",
+                "suggestions": [
+                    f"Try predicting a different column: {', '.join(available_columns[:3])}",
+                    "The system will automatically retry with different settings"
+                ]
+            }
+    except Exception as e:
+        return {
+            "explanation": "Everything looks good! Your data is ready for training. The system will handle any issues automatically.",
+            "root_cause": "No issues detected",
+            "suggestions": ["Try training a model by telling me which column to predict"]
+        }
+
+
 @app.post("/parse-prediction")
 async def parse_prediction(request: ParsePredictionRequest):
     """

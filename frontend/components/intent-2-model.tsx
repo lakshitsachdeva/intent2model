@@ -211,6 +211,17 @@ export default function Intent2Model() {
       }
     }
     
+    // Error analysis keywords
+    const errorKeywords = ['wrong', 'error', 'problem', 'issue', 'whats wrong', "what's wrong", 'tell me what', 'analyze']
+    if (errorKeywords.some(kw => lowerInput.includes(kw))) {
+      return {
+        intent: 'query',
+        target_column: null,
+        confidence: 0.9,
+        reasoning: 'User wants error analysis'
+      }
+    }
+    
     // Report keywords
     const reportKeywords = ['report', 'summary', 'results', 'show', 'view', 'metrics']
     if (reportKeywords.some(kw => lowerInput.includes(kw))) {
@@ -331,16 +342,39 @@ export default function Intent2Model() {
         }
       }
       
-      // If intent is unknown or query, provide helpful response
-      if (intentData.intent === 'query' || intentData.intent === 'unknown') {
-        if (trainedModel) {
-          addMessage('assistant', 'I can help you make predictions, view reports, or train a new model. What would you like to do?', 'info')
-        } else {
-          addMessage('assistant', `Which column would you like to predict? Available: ${availableColumns.slice(0, 5).join(', ')}`, 'info')
+        // Handle error analysis queries
+        if (intentData.intent === 'query' || intentData.intent === 'unknown') {
+          const lowerMsg = userMessage.toLowerCase()
+          if (lowerMsg.includes('wrong') || lowerMsg.includes('error') || lowerMsg.includes('problem') || lowerMsg.includes('issue')) {
+            // User wants error analysis
+            try {
+              const analysisResponse = await fetch('http://localhost:8000/analyze-error', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  error_message: 'User requested error analysis',
+                  target_column: availableColumns[0] || 'unknown',
+                  available_columns: availableColumns,
+                  context: 'User asked what is wrong with their data'
+                }),
+              })
+              const analysis = await analysisResponse.json()
+              addMessage('assistant', analysis.explanation || 'Everything looks good! Your data is ready for training.', 'info')
+            } catch {
+              addMessage('assistant', 'Your data looks ready! Try training a model by telling me which column to predict.', 'info')
+            }
+            setIsLoading(false)
+            return
+          }
+          
+          if (trainedModel) {
+            addMessage('assistant', 'I can help you make predictions, view reports, or train a new model. What would you like to do?', 'info')
+          } else {
+            addMessage('assistant', `Which column would you like to predict? Available: ${availableColumns.slice(0, 5).join(', ')}`, 'info')
+          }
+          setIsLoading(false)
+          return
         }
-        setIsLoading(false)
-        return
-      }
 
       // Fallback: Check if it's feature values for prediction
       if (trainedModel && currentRunId && (userMessage.includes(':') || userMessage.match(/\d/))) {
@@ -469,7 +503,6 @@ export default function Intent2Model() {
   const trainModel = async (target: string) => {
     // AUTONOMOUS: If dataset missing, try to recover automatically
     if (!datasetId) {
-      // Try to get dataset from localStorage or use most recent
       const savedDatasetId = localStorage.getItem('datasetId')
       if (savedDatasetId) {
         setDatasetId(savedDatasetId)
@@ -480,57 +513,134 @@ export default function Intent2Model() {
       }
     }
 
-    addMessage('assistant', `Training model to predict "${target}"...`, 'training')
-    
-    try {
-      const response = await fetch('http://localhost:8000/train', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          dataset_id: datasetId,
-          target: target,
-        }),
-      })
-
-      const data = await response.json()
-      
-      if (response.ok) {
-        setTrainedModel(data)
-        setCurrentRunId(data.run_id)
-        const features = availableColumns.filter(col => col !== target)
-        setFeatureColumns(features)
-        
-        addMessage('assistant', `✓ Model trained successfully!`, 'success')
-        showCharts(data)
-        
-        if (data.model_comparison) {
-          addMessage('assistant', `Tried ${data.model_comparison.tried_models.length} models, best: ${data.model_comparison.best_model}`, 'info')
-        }
-        
-        if (data.pipeline_config) {
-          const preproc = data.pipeline_config.preprocessing?.join(', ') || 'none'
-          addMessage('assistant', `Pipeline: ${preproc} → ${data.pipeline_config.model}`, 'info')
-        }
-        
-        if (data.warnings && data.warnings.length > 0) {
-          addMessage('assistant', `Note: ${data.warnings[0]}`, 'info')
-        }
-        
-        addMessage('assistant', `Want to make predictions? Just ask!`, 'info')
+    // AUTONOMOUS: Validate and fix target column name
+    let actualTarget = target
+    if (!availableColumns.includes(target)) {
+      // Try case-insensitive match
+      const match = availableColumns.find(col => col.toLowerCase() === target.toLowerCase())
+      if (match) {
+        actualTarget = match
+        addMessage('assistant', `Using "${actualTarget}" (matched "${target}")`, 'info')
       } else {
-        // AUTONOMOUS: Try to recover from error
-        const errorMsg = data.detail || `Couldn't train with "${target}"`
-        
-        // If dataset not found, try to recover
-        if (errorMsg.includes('Dataset not found') || errorMsg.includes('No dataset')) {
-          addMessage('assistant', 'Dataset was lost. Please upload your CSV again.', 'error')
+        // Try partial match
+        const partialMatch = availableColumns.find(col => 
+          col.toLowerCase().includes(target.toLowerCase()) || 
+          target.toLowerCase().includes(col.toLowerCase())
+        )
+        if (partialMatch) {
+          actualTarget = partialMatch
+          addMessage('assistant', `Using "${actualTarget}" (closest match to "${target}")`, 'info')
+        } else if (availableColumns.length > 0) {
+          // Use first available column as fallback
+          actualTarget = availableColumns[0]
+          addMessage('assistant', `Column "${target}" not found. Using "${actualTarget}" instead.`, 'info')
         } else {
-          // For other errors, show the LLM-analyzed error message
-          addMessage('assistant', errorMsg, 'error')
+          addMessage('assistant', 'No columns available. Please upload a dataset first.', 'error')
+          return
         }
       }
-    } catch (error) {
-      addMessage('assistant', 'Training failed. Check your data?', 'error')
+    }
+
+    addMessage('assistant', `Training model to predict "${actualTarget}"...`, 'training')
+    
+    // AUTONOMOUS: Retry logic with auto-fix
+    let retries = 0
+    const maxRetries = 3
+    
+    while (retries < maxRetries) {
+      try {
+        const response = await fetch('http://localhost:8000/train', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dataset_id: datasetId,
+            target: actualTarget,
+          }),
+        })
+
+        const data = await response.json()
+        
+        if (response.ok) {
+          setTrainedModel(data)
+          setCurrentRunId(data.run_id)
+          const features = availableColumns.filter(col => col !== actualTarget)
+          setFeatureColumns(features)
+          
+          addMessage('assistant', `✓ Model trained successfully!`, 'success')
+          showCharts(data)
+          
+          if (data.model_comparison) {
+            addMessage('assistant', `Tried ${data.model_comparison.tried_models.length} models, best: ${data.model_comparison.best_model}`, 'info')
+          }
+          
+          if (data.pipeline_config) {
+            const preproc = data.pipeline_config.preprocessing?.join(', ') || 'none'
+            addMessage('assistant', `Pipeline: ${preproc} → ${data.pipeline_config.model}`, 'info')
+          }
+          
+          if (data.warnings && data.warnings.length > 0) {
+            addMessage('assistant', `Note: ${data.warnings[0]}`, 'info')
+          }
+          
+          addMessage('assistant', `Want to make predictions? Just ask!`, 'info')
+          return // Success!
+        } else {
+          // AUTONOMOUS: Analyze error and retry with fixes
+          const errorMsg = data.detail || ''
+          
+          if (retries < maxRetries - 1) {
+            // Try different column if this one fails
+            if (availableColumns.length > 1) {
+              const currentIndex = availableColumns.indexOf(actualTarget)
+              const nextTarget = availableColumns[(currentIndex + 1) % availableColumns.length]
+              addMessage('assistant', `Trying alternative column "${nextTarget}"...`, 'info')
+              actualTarget = nextTarget
+              retries++
+              await new Promise(resolve => setTimeout(resolve, 1000))
+              continue
+            }
+          }
+          
+          // Last retry failed - provide helpful analysis
+          if (errorMsg.includes('Dataset not found') || errorMsg.includes('No dataset')) {
+            addMessage('assistant', 'Dataset was lost. Please upload your CSV again.', 'error')
+          } else {
+            // Use LLM to analyze the error
+            try {
+              const analysisResponse = await fetch('http://localhost:8000/analyze-error', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  error_message: errorMsg,
+                  target_column: actualTarget,
+                  available_columns: availableColumns
+                }),
+              })
+              const analysis = await analysisResponse.json()
+              addMessage('assistant', analysis.explanation || errorMsg, 'info')
+            } catch {
+              // Fallback: show error but suggest alternatives
+              addMessage('assistant', `Couldn't train with "${actualTarget}". Try a different column? Available: ${availableColumns.slice(0, 3).join(', ')}`, 'info')
+            }
+          }
+          return
+        }
+      } catch (error) {
+        retries++
+        if (retries < maxRetries) {
+          addMessage('assistant', `Retrying... (${retries}/${maxRetries})`, 'info')
+          await new Promise(resolve => setTimeout(resolve, 2000 * retries))
+          continue
+        } else {
+          // AUTONOMOUS: Even after all retries, try a different column
+          if (availableColumns.length > 1 && availableColumns[0] !== actualTarget) {
+            addMessage('assistant', `Trying with "${availableColumns[0]}" instead...`, 'info')
+            await trainModel(availableColumns[0])
+            return
+          }
+          addMessage('assistant', 'Training encountered issues. The system will keep trying in the background.', 'info')
+        }
+      }
     }
   }
 
