@@ -98,27 +98,24 @@ def generate_notebook(
                 "cell_type": "code",
                 "execution_count": None,
                 "metadata": {},
-                "source": [
-                    f"# Separate features and target\n",
-                    f"X = df.drop(columns=['{target}'])\n",
-                    f"y = df['{target}']\n",
-                    "\n",
-                    "# Handle categorical target if needed\n",
-                ]
-            )
-            if task == 'classification':
-                notebook["cells"][4]["source"].extend([
-                    "le = LabelEncoder()\n",
-                    "y = le.fit_transform(y.astype(str))\n"
-                ])
-            notebook["cells"][4]["source"].extend([
-                    "\n",
-                    "# Split data\n",
-                    "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)\n",
-                    "\n",
-                    "print(f'Training set: {X_train.shape}')\n",
-                    "print(f'Test set: {X_test.shape}')"
-                ]
+                "source": (
+                    [
+                        f"# Separate features and target\n",
+                        f"X = df.drop(columns=['{target}'])\n",
+                        f"y = df['{target}']\n",
+                        "\n",
+                        "# Handle categorical target if needed\n",
+                    ] + 
+                    (["le = LabelEncoder()\n", "y = le.fit_transform(y.astype(str))\n"] if task == 'classification' else []) +
+                    [
+                        "\n",
+                        "# Split data\n",
+                        "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)\n",
+                        "\n",
+                        "print(f'Training set: {X_train.shape}')\n",
+                        "print(f'Test set: {X_test.shape}')"
+                    ]
+                )
             },
             {
                 "cell_type": "markdown",
