@@ -51,6 +51,7 @@ export default function Intent2ModelWizard() {
       const response = await fetch('http://localhost:8000/upload', {
         method: 'POST',
         body: formData,
+        // Don't set Content-Type header - browser will set it with boundary for FormData
       });
 
       const data = await response.json();
