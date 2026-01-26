@@ -1,4 +1,4 @@
-import Intent2Model from "@/components/intent-2-model";
+import Intent2ModelWizard from "@/components/intent-2-model-wizard";
 
 export default function Home() {
   return (
@@ -23,7 +23,7 @@ export default function Home() {
       </nav>
 
       <main className="flex-1 py-12 px-4 sm:px-6 lg:px-8">
-        <Intent2Model />
+        <Intent2ModelWizard />
       </main>
 
       <footer className="border-t py-8 bg-white dark:bg-black">
