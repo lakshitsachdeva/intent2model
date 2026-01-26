@@ -27,8 +27,13 @@ from agents.llm_interface import LLMInterface
 from agents.error_analyzer import analyze_training_error
 from agents.recovery_agent import AutonomousRecoveryAgent
 from agents.intent_detector import IntentDetectionAgent
+from utils.artifact_generator import generate_notebook, generate_readme, save_model_pickle, generate_chart_image
+from fastapi.responses import FileResponse, Response
 import json
 import re
+import os
+import tempfile
+import base64
 
 
 app = FastAPI(title="Intent2Model API", version="1.0.0")
