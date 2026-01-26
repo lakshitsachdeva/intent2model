@@ -417,7 +417,7 @@ class ParsePredictionRequest(BaseModel):
 async def detect_intent(request: Dict[str, Any]):
     """
     Detect user intent from natural language using LLM.
-    AUTONOMOUS: LLM makes all decisions.
+    AUTONOMOUS: LLM makes all decisions, with fallback.
     """
     try:
         agent = IntentDetectionAgent()
@@ -429,12 +429,48 @@ async def detect_intent(request: Dict[str, Any]):
         
         return intent_result
     except Exception as e:
-        # Fallback to simple detection
+        # AUTONOMOUS: Fallback to rule-based detection
+        print(f"Intent detection LLM failed: {e}. Using fallback.")
+        user_input = request.get("user_input", "").lower().strip()
+        context = request.get("context", {})
+        available_columns = context.get("available_columns", [])
+        
+        # Prediction keywords
+        predict_keywords = ["predict", "prediction", "yes", "sure", "ok", "okay", "want to make", "make prediction"]
+        if any(kw in user_input for kw in predict_keywords):
+            return {
+                "intent": "predict",
+                "target_column": None,
+                "confidence": 0.8,
+                "reasoning": "Fallback: Contains prediction keywords"
+            }
+        
+        # Report keywords
+        report_keywords = ["report", "summary", "results", "show", "view"]
+        if any(kw in user_input for kw in report_keywords):
+            return {
+                "intent": "report",
+                "target_column": None,
+                "confidence": 0.8,
+                "reasoning": "Fallback: Contains report keywords"
+            }
+        
+        # Check if it's a column name
+        for col in available_columns:
+            if col.lower() == user_input:
+                return {
+                    "intent": "train",
+                    "target_column": col,
+                    "confidence": 0.9,
+                    "reasoning": f"Fallback: Matches column name: {col}"
+                }
+        
+        # Default
         return {
-            "intent": "unknown",
-            "target_column": None,
-            "confidence": 0.0,
-            "reasoning": f"Error: {str(e)}"
+            "intent": "train",
+            "target_column": request.get("user_input", "").strip(),
+            "confidence": 0.5,
+            "reasoning": "Fallback: Default to train intent"
         }
 
 

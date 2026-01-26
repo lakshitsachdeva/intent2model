@@ -188,6 +188,61 @@ export default function Intent2Model() {
            text.split(' ').length > 5
   }
 
+  // AUTONOMOUS: Fallback intent detection if LLM is unavailable
+  const detectIntentFallback = (
+    userInput: string,
+    availableColumns: string[],
+    hasTrainedModel: boolean
+  ): { intent: string; target_column: string | null; confidence: number; reasoning: string } => {
+    const lowerInput = userInput.toLowerCase().trim()
+    
+    // Prediction keywords (high priority)
+    const predictKeywords = [
+      'predict', 'prediction', 'yes', 'sure', 'ok', 'okay', 
+      'want to make', 'make prediction', "let's predict", 'lets predict',
+      'want to predict', 'can you predict'
+    ]
+    if (predictKeywords.some(kw => lowerInput.includes(kw))) {
+      return {
+        intent: 'predict',
+        target_column: null,
+        confidence: 0.8,
+        reasoning: 'Contains prediction keywords'
+      }
+    }
+    
+    // Report keywords
+    const reportKeywords = ['report', 'summary', 'results', 'show', 'view', 'metrics']
+    if (reportKeywords.some(kw => lowerInput.includes(kw))) {
+      return {
+        intent: 'report',
+        target_column: null,
+        confidence: 0.8,
+        reasoning: 'Contains report keywords'
+      }
+    }
+    
+    // Check if it's a column name
+    for (const col of availableColumns) {
+      if (col.toLowerCase() === lowerInput) {
+        return {
+          intent: 'train',
+          target_column: col,
+          confidence: 0.9,
+          reasoning: `Matches column name: ${col}`
+        }
+      }
+    }
+    
+    // Default: treat as train
+    return {
+      intent: 'train',
+      target_column: userInput.trim(),
+      confidence: 0.5,
+      reasoning: 'Default to train intent'
+    }
+  }
+
   const handleSend = async () => {
     if (!input.trim() || isLoading) return
 
@@ -203,7 +258,8 @@ export default function Intent2Model() {
         return
       }
 
-      // AUTONOMOUS: Use LLM to detect intent
+      // AUTONOMOUS: Use LLM to detect intent with fallback
+      let intentData = null
       try {
         const intentResponse = await fetch('http://localhost:8000/detect-intent', {
           method: 'POST',
@@ -218,65 +274,72 @@ export default function Intent2Model() {
           }),
         })
 
-        const intentData = await intentResponse.json()
-        
-        // Handle based on detected intent
-        if (intentData.intent === 'predict') {
-          if (!trainedModel || !currentRunId) {
-            addMessage('assistant', 'Train a model first, then I can make predictions', 'info')
-            setIsLoading(false)
-            return
-          }
-          if (!featureColumns || featureColumns.length === 0) {
-            addMessage('assistant', 'Model is ready but feature columns are missing. Please train again.', 'error')
-            setIsLoading(false)
-            return
-          }
-          setShowPredictionModal(true)
-          setIsLoading(false)
-          return
-        }
-        
-        if (intentData.intent === 'report') {
-          if (trainedModel) {
-            showModelReport()
-          } else {
-            addMessage('assistant', 'Train a model first by telling me which column to predict', 'info')
-          }
-          setIsLoading(false)
-          return
-        }
-        
-        if (intentData.intent === 'train') {
-          const target = intentData.target_column || userMessage.trim()
-          if (target && availableColumns.includes(target)) {
-            await trainModel(target)
-            setIsLoading(false)
-            return
-          } else if (availableColumns.length > 0) {
-            await trainModel(availableColumns[0])
-            setIsLoading(false)
-            return
-          } else {
-            addMessage('assistant', 'Tell me which column to predict', 'info')
-            setIsLoading(false)
-            return
-          }
-        }
-        
-        // If intent is unknown or query, provide helpful response
-        if (intentData.intent === 'query' || intentData.intent === 'unknown') {
-          if (trainedModel) {
-            addMessage('assistant', 'I can help you make predictions, view reports, or train a new model. What would you like to do?', 'info')
-          } else {
-            addMessage('assistant', `Which column would you like to predict? Available: ${availableColumns.slice(0, 5).join(', ')}`, 'info')
-          }
-          setIsLoading(false)
-          return
+        if (intentResponse.ok) {
+          intentData = await intentResponse.json()
         }
       } catch (intentError) {
-        // Fallback to old logic if LLM intent detection fails
-        console.error('Intent detection failed:', intentError)
+        // AUTONOMOUS: Silently fallback - never show error to user
+        console.log('Intent detection unavailable, using fallback logic')
+      }
+
+      // AUTONOMOUS: Use fallback detection if LLM failed
+      if (!intentData) {
+        intentData = detectIntentFallback(userMessage, availableColumns, trainedModel)
+      }
+        
+      // Handle based on detected intent
+      if (intentData.intent === 'predict') {
+        if (!trainedModel || !currentRunId) {
+          addMessage('assistant', 'Train a model first, then I can make predictions', 'info')
+          setIsLoading(false)
+          return
+        }
+        if (!featureColumns || featureColumns.length === 0) {
+          addMessage('assistant', 'Model is ready but feature columns are missing. Please train again.', 'error')
+          setIsLoading(false)
+          return
+        }
+        setShowPredictionModal(true)
+        setIsLoading(false)
+        return
+      }
+      
+      if (intentData.intent === 'report') {
+        if (trainedModel) {
+          showModelReport()
+        } else {
+          addMessage('assistant', 'Train a model first by telling me which column to predict', 'info')
+        }
+        setIsLoading(false)
+        return
+      }
+      
+      if (intentData.intent === 'train') {
+        const target = intentData.target_column || userMessage.trim()
+        if (target && availableColumns.includes(target)) {
+          await trainModel(target)
+          setIsLoading(false)
+          return
+        } else if (availableColumns.length > 0) {
+          await trainModel(availableColumns[0])
+          setIsLoading(false)
+          return
+        } else {
+          addMessage('assistant', 'Tell me which column to predict', 'info')
+          setIsLoading(false)
+          return
+        }
+      }
+      
+      // If intent is unknown or query, provide helpful response
+      if (intentData.intent === 'query' || intentData.intent === 'unknown') {
+        if (trainedModel) {
+          addMessage('assistant', 'I can help you make predictions, view reports, or train a new model. What would you like to do?', 'info')
+        } else {
+          addMessage('assistant', `Which column would you like to predict? Available: ${availableColumns.slice(0, 5).join(', ')}`, 'info')
+        }
+        setIsLoading(false)
+        return
       }
 
       // Fallback: Check if it's feature values for prediction
