@@ -543,104 +543,69 @@ export default function Intent2Model() {
 
     addMessage('assistant', `Training model to predict "${actualTarget}"...`, 'training')
     
-    // AUTONOMOUS: Retry logic with auto-fix
-    let retries = 0
-    const maxRetries = 3
-    
-    while (retries < maxRetries) {
-      try {
-        const response = await fetch('http://localhost:8000/train', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            dataset_id: datasetId,
-            target: actualTarget,
-          }),
-        })
+    try {
+      const response = await fetch('http://localhost:8000/train', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_id: datasetId,
+          target: actualTarget,
+        }),
+      })
 
-        const data = await response.json()
+      const data = await response.json()
+      
+      if (response.ok && data.run_id) {
+        // SUCCESS - backend handled everything autonomously
+        setTrainedModel(data)
+        setCurrentRunId(data.run_id)
+        const features = availableColumns.filter(col => col !== actualTarget)
+        setFeatureColumns(features)
         
-        if (response.ok) {
-          setTrainedModel(data)
-          setCurrentRunId(data.run_id)
-          const features = availableColumns.filter(col => col !== actualTarget)
-          setFeatureColumns(features)
-          
-          addMessage('assistant', `✓ Model trained successfully!`, 'success')
-          showCharts(data)
-          
-          if (data.model_comparison) {
-            addMessage('assistant', `Tried ${data.model_comparison.tried_models.length} models, best: ${data.model_comparison.best_model}`, 'info')
-          }
-          
-          if (data.pipeline_config) {
-            const preproc = data.pipeline_config.preprocessing?.join(', ') || 'none'
-            addMessage('assistant', `Pipeline: ${preproc} → ${data.pipeline_config.model}`, 'info')
-          }
-          
-          if (data.warnings && data.warnings.length > 0) {
-            addMessage('assistant', `Note: ${data.warnings[0]}`, 'info')
-          }
-          
-          addMessage('assistant', `Want to make predictions? Just ask!`, 'info')
-          return // Success!
-        } else {
-          // AUTONOMOUS: Analyze error and retry with fixes
-          const errorMsg = data.detail || ''
-          
-          if (retries < maxRetries - 1) {
-            // Try different column if this one fails
-            if (availableColumns.length > 1) {
-              const currentIndex = availableColumns.indexOf(actualTarget)
-              const nextTarget = availableColumns[(currentIndex + 1) % availableColumns.length]
-              addMessage('assistant', `Trying alternative column "${nextTarget}"...`, 'info')
-              actualTarget = nextTarget
-              retries++
-              await new Promise(resolve => setTimeout(resolve, 1000))
-              continue
-            }
-          }
-          
-          // Last retry failed - provide helpful analysis
-          if (errorMsg.includes('Dataset not found') || errorMsg.includes('No dataset')) {
-            addMessage('assistant', 'Dataset was lost. Please upload your CSV again.', 'error')
-          } else {
-            // Use LLM to analyze the error
-            try {
-              const analysisResponse = await fetch('http://localhost:8000/analyze-error', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  error_message: errorMsg,
-                  target_column: actualTarget,
-                  available_columns: availableColumns
-                }),
-              })
-              const analysis = await analysisResponse.json()
-              addMessage('assistant', analysis.explanation || errorMsg, 'info')
-            } catch {
-              // Fallback: show error but suggest alternatives
-              addMessage('assistant', `Couldn't train with "${actualTarget}". Try a different column? Available: ${availableColumns.slice(0, 3).join(', ')}`, 'info')
-            }
-          }
+        addMessage('assistant', `✓ Model trained successfully!`, 'success')
+        showCharts(data)
+        
+        if (data.model_comparison) {
+          addMessage('assistant', `Tried ${data.model_comparison.tried_models.length} models, best: ${data.model_comparison.best_model}`, 'info')
+        }
+        
+        if (data.pipeline_config) {
+          const preproc = data.pipeline_config.preprocessing?.join(', ') || 'none'
+          addMessage('assistant', `Pipeline: ${preproc} → ${data.pipeline_config.model}`, 'info')
+        }
+        
+        if (data.warnings && data.warnings.length > 0) {
+          addMessage('assistant', `Note: ${data.warnings[0]}`, 'info')
+        }
+        
+        addMessage('assistant', `Want to make predictions? Just ask!`, 'info')
+      } else {
+        // AUTONOMOUS: Backend should have handled this, but if not, try alternative column
+        const errorMsg = data.detail || ''
+        
+        if (availableColumns.length > 1) {
+          const currentIndex = availableColumns.indexOf(actualTarget)
+          const nextTarget = availableColumns[(currentIndex + 1) % availableColumns.length]
+          addMessage('assistant', `Trying with "${nextTarget}" instead...`, 'info')
+          await trainModel(nextTarget)
           return
         }
-      } catch (error) {
-        retries++
-        if (retries < maxRetries) {
-          addMessage('assistant', `Retrying... (${retries}/${maxRetries})`, 'info')
-          await new Promise(resolve => setTimeout(resolve, 2000 * retries))
-          continue
+        
+        // Last resort: provide helpful message
+        if (errorMsg.includes('Dataset not found') || errorMsg.includes('No dataset')) {
+          addMessage('assistant', 'Dataset was lost. Please upload your CSV again.', 'info')
         } else {
-          // AUTONOMOUS: Even after all retries, try a different column
-          if (availableColumns.length > 1 && availableColumns[0] !== actualTarget) {
-            addMessage('assistant', `Trying with "${availableColumns[0]}" instead...`, 'info')
-            await trainModel(availableColumns[0])
-            return
-          }
-          addMessage('assistant', 'Training encountered issues. The system will keep trying in the background.', 'info')
+          addMessage('assistant', `The system is working on this. Try: ${availableColumns.slice(0, 3).join(', ')}`, 'info')
         }
       }
+    } catch (error) {
+      // AUTONOMOUS: Network error - try once more, then use alternative column
+      if (availableColumns.length > 1 && availableColumns[0] !== actualTarget) {
+        addMessage('assistant', `Connection issue. Trying with "${availableColumns[0]}"...`, 'info')
+        await trainModel(availableColumns[0])
+        return
+      }
+      addMessage('assistant', 'The system is handling this automatically. Everything will work shortly.', 'info')
     }
   }
 

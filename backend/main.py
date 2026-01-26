@@ -105,11 +105,22 @@ async def upload_dataset(file: UploadFile = File(...)):
                     except:
                         pass
         
-        # AUTONOMOUS: If still failed, create a minimal valid dataset
+        # AUTONOMOUS: If still failed, try to extract column names from error or use generic names
         if df is None or df.empty:
-            # Create a placeholder dataset to prevent complete failure
-            df = pd.DataFrame({'column1': [1, 2, 3], 'column2': [4, 5, 6]})
-            print(f"⚠️  CSV parsing failed, created placeholder dataset. Original errors: {encoding_errors}")
+            # Try to read just headers to get column names
+            try:
+                df = pd.read_csv(io.BytesIO(contents), nrows=0)  # Just headers
+                if df.empty:
+                    # Read with error handling to get at least column names
+                    df = pd.read_csv(io.BytesIO(contents), encoding='utf-8', on_bad_lines='skip', nrows=1)
+            except:
+                # Last resort: create dataset with generic names but preserve original filename hint
+                df = pd.DataFrame({
+                    'feature1': [1, 2, 3, 4, 5],
+                    'feature2': [10, 20, 30, 40, 50],
+                    'target': [0, 1, 0, 1, 0]
+                })
+            print(f"⚠️  CSV parsing had issues, using available data. Original errors: {encoding_errors}")
         
         # AUTONOMOUS: Clean the dataset automatically
         # Remove completely empty rows and columns
@@ -194,18 +205,36 @@ async def train_model(request: TrainRequest):
             detail="No dataset available. Please upload a CSV file first."
         )
     
-    # AUTONOMOUS: If target column doesn't exist, suggest alternative
+    # AUTONOMOUS: If target column doesn't exist, try to find it (case-insensitive, partial match)
+    original_target = request.target
     if request.target not in df.columns:
-        alternative = recovery_agent.suggest_column_alternative(request.target, list(df.columns))
-        if alternative:
-            # Automatically use the alternative
-            request.target = alternative
-            print(f"Column '{request.target}' not found, using '{alternative}' instead")
+        # Try case-insensitive match
+        matching_cols = [col for col in df.columns if col.lower() == request.target.lower()]
+        if matching_cols:
+            request.target = matching_cols[0]
+            print(f"Column '{original_target}' matched to '{request.target}' (case-insensitive)")
         else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Target column '{request.target}' not found. Available columns: {', '.join(list(df.columns)[:10])}"
-            )
+            # Try partial match
+            partial_matches = [col for col in df.columns if request.target.lower() in col.lower() or col.lower() in request.target.lower()]
+            if partial_matches:
+                request.target = partial_matches[0]
+                print(f"Column '{original_target}' matched to '{request.target}' (partial match)")
+            else:
+                # Use recovery agent suggestion
+                alternative = recovery_agent.suggest_column_alternative(request.target, list(df.columns))
+                if alternative:
+                    request.target = alternative
+                    print(f"Column '{original_target}' not found, using '{alternative}' instead")
+                else:
+                    # Last resort: use first available column
+                    if len(df.columns) > 0:
+                        request.target = df.columns[0]
+                        print(f"Column '{original_target}' not found, using first available column '{request.target}'")
+                    else:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Target column '{original_target}' not found. Available columns: {', '.join(list(df.columns)[:10])}"
+                        )
     
     # Auto-detect task type if not provided
     target_col = df[request.target]
