@@ -73,7 +73,22 @@ class LLMInterface:
         try:
             import google.generativeai as genai
             genai.configure(api_key=self.api_key)
-            model = genai.GenerativeModel('gemini-pro')
+            
+            # Try different model names in order
+            model_names = ['gemini-pro', 'models/gemini-pro', 'gemini-1.5-pro', 'models/gemini-1.5-pro']
+            model = None
+            last_error = None
+            
+            for model_name in model_names:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    break
+                except Exception as e:
+                    last_error = e
+                    continue
+            
+            if model is None:
+                raise Exception(f"Could not initialize any Gemini model. Last error: {last_error}")
             
             full_prompt = prompt
             if system_prompt:

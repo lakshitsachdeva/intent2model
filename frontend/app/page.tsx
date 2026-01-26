@@ -1,8 +1,8 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { Upload, Send, Loader2, Sparkles, CheckCircle2, AlertCircle, BarChart3, TrendingUp, Zap } from 'lucide-react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line } from 'recharts'
+import { Upload, Send, Loader2, Sparkles, CheckCircle2, AlertCircle, BarChart3, TrendingUp, Zap, FileText, X, Brain, Database, Target, Activity } from 'lucide-react'
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts'
 
 interface Message {
   id: string
@@ -34,6 +34,7 @@ export default function Home() {
   const [featureColumns, setFeatureColumns] = useState<string[]>([])
   const [isPredicting, setIsPredicting] = useState(false)
   const [predictionFeatures, setPredictionFeatures] = useState<Record<string, string>>({})
+  const [showPredictionModal, setShowPredictionModal] = useState(false)
   const [messageCounter, setMessageCounter] = useState(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -63,17 +64,17 @@ export default function Home() {
       setDatasetId(data.dataset_id)
       setAvailableColumns(data.profile.numeric_cols.concat(data.profile.categorical_cols))
       
-      addMessage('assistant', `analyzed your dataset`, 'info')
+      addMessage('assistant', `✓ Analyzed your dataset`, 'info')
       addMessage('assistant', `${data.profile.n_rows} rows • ${data.profile.n_cols} columns`, 'info')
       
       if (data.profile.candidate_targets.length > 0) {
-        addMessage('assistant', `suggested targets: ${data.profile.candidate_targets.slice(0, 3).join(', ')}`, 'info')
-        addMessage('assistant', `which column should i predict?`, 'info')
+        addMessage('assistant', `Suggested targets: ${data.profile.candidate_targets.slice(0, 3).join(', ')}`, 'info')
+        addMessage('assistant', `Which column should I predict?`, 'info')
       } else {
-        addMessage('assistant', `what column do you want to predict?`, 'info')
+        addMessage('assistant', `What column do you want to predict?`, 'info')
       }
     } catch (error) {
-      addMessage('assistant', 'upload failed. try again?', 'error')
+      addMessage('assistant', 'Upload failed. Try again?', 'error')
     } finally {
       setIsUploading(false)
     }
@@ -120,89 +121,113 @@ export default function Home() {
 
     try {
       if (!datasetId) {
-        addMessage('assistant', 'upload a csv first', 'info')
+        addMessage('assistant', 'Upload a CSV first', 'info')
         setIsLoading(false)
         return
       }
 
       const lowerInput = userMessage.toLowerCase().trim()
 
-      // Check for prediction requests
-      if (lowerInput.includes('predict') || lowerInput.includes('what would') || lowerInput.includes('if i tell you')) {
+      if (lowerInput.includes('predict') || lowerInput.includes('what would') || lowerInput.includes('if i tell you') || lowerInput.includes('yes lets try') || lowerInput.includes('yes let')) {
         if (!trainedModel || !currentRunId) {
-          addMessage('assistant', 'train a model first, then i can make predictions', 'info')
+          addMessage('assistant', 'Train a model first, then I can make predictions', 'info')
           setIsLoading(false)
           return
         }
-        // Start prediction flow
-        addMessage('assistant', `sure! i need these features: ${featureColumns.join(', ')}. tell me the values one by one, or all at once like "sepal.length: 5.1, sepal.width: 3.5"`, 'info')
+        setShowPredictionModal(true)
         setIsLoading(false)
         return
       }
 
-      // Check if user is providing feature values for prediction
       if (trainedModel && currentRunId && (userMessage.includes(':') || userMessage.match(/\d/))) {
         await handlePrediction(userMessage)
         setIsLoading(false)
         return
       }
 
-      // Check if it's a natural language query
       if (isNaturalLanguageQuery(userMessage)) {
         if (lowerInput.includes('report') || lowerInput.includes('summary') || lowerInput.includes('results')) {
           if (trainedModel) {
             showModelReport()
           } else {
-            addMessage('assistant', 'train a model first by telling me which column to predict', 'info')
+            addMessage('assistant', 'Train a model first by telling me which column to predict', 'info')
           }
         } else if (lowerInput.includes('make') || lowerInput.includes('train') || lowerInput.includes('build')) {
           if (availableColumns.length > 0) {
             const target = availableColumns[0]
             await trainModel(target)
           } else {
-            addMessage('assistant', 'tell me which column to predict', 'info')
+            addMessage('assistant', 'Tell me which column to predict', 'info')
           }
         } else if (lowerInput.includes('all features') || lowerInput.includes('columns')) {
-          addMessage('assistant', `columns: ${availableColumns.join(', ')}`, 'info')
+          addMessage('assistant', `Columns: ${availableColumns.join(', ')}`, 'info')
         } else {
-          addMessage('assistant', 'try: "train model" or tell me a column name', 'info')
+          addMessage('assistant', 'Try: "train model" or tell me a column name', 'info')
         }
       } 
-      // Check if it's a column name
       else if (isColumnName(userMessage)) {
         await trainModel(userMessage.trim())
       }
-      // Try as column name
       else {
         await trainModel(userMessage.trim())
       }
     } catch (error) {
-      addMessage('assistant', 'something went wrong. try again?', 'error')
+      addMessage('assistant', 'Something went wrong. Try again?', 'error')
     } finally {
       setIsLoading(false)
     }
   }
 
-  const handlePrediction = async (userInput: string) => {
+  const handlePrediction = async (userInput?: string) => {
     setIsPredicting(true)
     try {
-      // Parse feature values from input
-      const features: Record<string, any> = {}
+      let features: Record<string, any> = {}
       
-      // Try to parse "key: value" format
-      const pairs = userInput.split(',').map(s => s.trim())
-      for (const pair of pairs) {
-        const [key, value] = pair.split(':').map(s => s.trim())
-        if (key && value) {
-          const numValue = parseFloat(value)
-          features[key] = isNaN(numValue) ? value : numValue
+      if (userInput) {
+        try {
+          const parseResponse = await fetch('http://localhost:8000/parse-prediction', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              user_input: userInput,
+              feature_columns: featureColumns,
+              run_id: currentRunId
+            }),
+          })
+          
+          const parseData = await parseResponse.json()
+          
+          if (parseData.complete) {
+            features = parseData.features
+          } else {
+            features = parseData.features
+            const missing = parseData.missing || []
+            if (missing.length > 0) {
+              addMessage('assistant', `Still need: ${missing.join(', ')}`, 'info')
+              setIsPredicting(false)
+              return
+            }
+          }
+        } catch (parseError) {
+          addMessage('assistant', 'Could not parse your input. Please use the form or try again.', 'error')
+          setShowPredictionModal(true)
+          setIsPredicting(false)
+          return
         }
+      } else {
+        features = {}
+        featureColumns.forEach(col => {
+          const value = predictionFeatures[col]?.trim()
+          if (value) {
+            const numValue = parseFloat(value)
+            features[col] = isNaN(numValue) ? value : numValue
+          }
+        })
       }
 
-      // Check if we have all required features
-      const missing = featureColumns.filter(col => !features[col])
+      const missing = featureColumns.filter(col => !features[col] && features[col] !== 0)
       if (missing.length > 0) {
-        addMessage('assistant', `still need: ${missing.join(', ')}`, 'info')
+        addMessage('assistant', `Still need: ${missing.join(', ')}`, 'info')
         setIsPredicting(false)
         return
       }
@@ -219,25 +244,26 @@ export default function Home() {
       const data = await response.json()
       
       if (response.ok) {
-        addMessage('assistant', `prediction: ${data.prediction}`, 'prediction', null, data)
+        setShowPredictionModal(false)
+        addMessage('assistant', `Prediction: ${data.prediction}`, 'prediction', null, data)
         if (data.probabilities) {
           const probText = Object.entries(data.probabilities)
             .map(([k, v]) => `${k}: ${((v as number) * 100).toFixed(1)}%`)
             .join('\n')
-          addMessage('assistant', `probabilities:\n${probText}`, 'info')
+          addMessage('assistant', `Probabilities:\n${probText}`, 'info')
         }
       } else {
-        addMessage('assistant', data.detail || 'prediction failed', 'error')
+        addMessage('assistant', data.detail || 'Prediction failed', 'error')
       }
     } catch (error) {
-      addMessage('assistant', 'prediction failed. check your input?', 'error')
+      addMessage('assistant', 'Prediction failed. Check your input?', 'error')
     } finally {
       setIsPredicting(false)
     }
   }
 
   const trainModel = async (target: string) => {
-    addMessage('assistant', `training model to predict "${target}"...`, 'training')
+    addMessage('assistant', `Training model to predict "${target}"...`, 'training')
     
     try {
       const response = await fetch('http://localhost:8000/train', {
@@ -254,40 +280,35 @@ export default function Home() {
       if (response.ok) {
         setTrainedModel(data)
         setCurrentRunId(data.run_id)
-        // Get feature columns (all columns except target)
         const features = availableColumns.filter(col => col !== target)
         setFeatureColumns(features)
         
-        addMessage('assistant', `model trained successfully`, 'success')
-        
-        // Show charts
+        addMessage('assistant', `✓ Model trained successfully!`, 'success')
         showCharts(data)
         
-        // Show model comparison if multiple models were tried
         if (data.model_comparison) {
-          addMessage('assistant', `tried ${data.model_comparison.tried_models.length} models, best: ${data.model_comparison.best_model}`, 'info')
+          addMessage('assistant', `Tried ${data.model_comparison.tried_models.length} models, best: ${data.model_comparison.best_model}`, 'info')
         }
         
         if (data.pipeline_config) {
           const preproc = data.pipeline_config.preprocessing?.join(', ') || 'none'
-          addMessage('assistant', `pipeline: ${preproc} → ${data.pipeline_config.model}`, 'info')
+          addMessage('assistant', `Pipeline: ${preproc} → ${data.pipeline_config.model}`, 'info')
         }
         
         if (data.warnings && data.warnings.length > 0) {
-          addMessage('assistant', `note: ${data.warnings[0]}`, 'info')
+          addMessage('assistant', `Note: ${data.warnings[0]}`, 'info')
         }
         
-        addMessage('assistant', `want to make predictions? just ask!`, 'info')
+        addMessage('assistant', `Want to make predictions? Just ask!`, 'info')
       } else {
-        addMessage('assistant', data.detail || `couldn't train with "${target}"`, 'error')
+        addMessage('assistant', data.detail || `Couldn't train with "${target}"`, 'error')
       }
     } catch (error) {
-      addMessage('assistant', 'training failed. check your data?', 'error')
+      addMessage('assistant', 'Training failed. Check your data?', 'error')
     }
   }
 
   const showCharts = (data: ModelResult) => {
-    // Metrics bar chart
     if (data.metrics) {
       const metricsData = Object.entries(data.metrics)
         .filter(([_, v]) => v !== null && v !== undefined)
@@ -296,10 +317,9 @@ export default function Home() {
           value: Number(value)
         }))
       
-      addMessage('assistant', 'performance metrics', 'chart', { type: 'metrics', data: metricsData }, data)
+      addMessage('assistant', 'Performance Metrics', 'chart', { type: 'metrics', data: metricsData }, data)
     }
 
-    // Feature importance chart
     if (data.feature_importance) {
       const featureData = Object.entries(data.feature_importance)
         .sort(([, a], [, b]) => (b as number) - (a as number))
@@ -309,23 +329,21 @@ export default function Home() {
           importance: Number(importance)
         }))
       
-      addMessage('assistant', 'feature importance', 'chart', { type: 'features', data: featureData }, data)
+      addMessage('assistant', 'Feature Importance', 'chart', { type: 'features', data: featureData }, data)
     }
 
-    // CV scores line chart
     if (data.cv_scores && data.cv_scores.length > 0) {
       const cvData = data.cv_scores.map((score, i) => ({
         fold: `Fold ${i + 1}`,
         score: Number(score)
       }))
-      addMessage('assistant', 'cross-validation scores', 'chart', { type: 'cv', data: cvData }, data)
+      addMessage('assistant', 'Cross-Validation Scores', 'chart', { type: 'cv', data: cvData }, data)
     }
   }
 
   const showModelReport = () => {
     if (!trainedModel) return
-    
-    addMessage('assistant', 'model report:', 'success')
+    addMessage('assistant', 'Model Report:', 'success')
     showCharts(trainedModel)
   }
 
@@ -336,40 +354,30 @@ export default function Home() {
     }
   }
 
-  const getMessageIcon = (type: string) => {
-    switch (type) {
-      case 'success':
-        return <CheckCircle2 className="w-4 h-4 text-green-500" />
-      case 'error':
-        return <AlertCircle className="w-4 h-4 text-red-500" />
-      case 'training':
-        return <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
-      case 'chart':
-        return <BarChart3 className="w-4 h-4 text-purple-500" />
-      case 'prediction':
-        return <Zap className="w-4 h-4 text-yellow-500" />
-      case 'info':
-        return <BarChart3 className="w-4 h-4 text-gray-400" />
-      default:
-        return null
-    }
-  }
-
   const renderChart = (chartData: any) => {
     if (!chartData || !chartData.data) return null
 
-    const COLORS = ['#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#ef4444', '#6366f1', '#14b8a6']
-
     if (chartData.type === 'metrics') {
       return (
-        <div className="mt-4 w-full">
-          <ResponsiveContainer width="100%" height={250}>
+        <div className="mt-6 w-full bg-gradient-to-br from-blue-50 to-indigo-50 p-6 rounded-xl border border-blue-100">
+          <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+            <BarChart3 className="w-5 h-5 text-indigo-600" />
+            Performance Metrics
+          </h3>
+          <ResponsiveContainer width="100%" height={280}>
             <BarChart data={chartData.data}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="name" />
-              <YAxis />
-              <Tooltip />
-              <Bar dataKey="value" fill="#8b5cf6" radius={[8, 8, 0, 0]} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
+              <XAxis dataKey="name" stroke="#64748b" fontSize={12} />
+              <YAxis stroke="#64748b" fontSize={12} />
+              <Tooltip 
+                contentStyle={{ 
+                  backgroundColor: '#fff', 
+                  border: '2px solid #e2e8f0',
+                  borderRadius: '12px',
+                  boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                }} 
+              />
+              <Bar dataKey="value" fill="#6366f1" radius={[8, 8, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -378,14 +386,25 @@ export default function Home() {
 
     if (chartData.type === 'features') {
       return (
-        <div className="mt-4 w-full">
-          <ResponsiveContainer width="100%" height={300}>
+        <div className="mt-6 w-full bg-gradient-to-br from-purple-50 to-pink-50 p-6 rounded-xl border border-purple-100">
+          <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+            <TrendingUp className="w-5 h-5 text-purple-600" />
+            Feature Importance
+          </h3>
+          <ResponsiveContainer width="100%" height={320}>
             <BarChart data={chartData.data} layout="vertical">
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis type="number" />
-              <YAxis dataKey="name" type="category" width={120} />
-              <Tooltip />
-              <Bar dataKey="importance" fill="#ec4899" radius={[0, 8, 8, 0]} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
+              <XAxis type="number" stroke="#64748b" fontSize={12} />
+              <YAxis dataKey="name" type="category" width={140} stroke="#64748b" fontSize={12} />
+              <Tooltip 
+                contentStyle={{ 
+                  backgroundColor: '#fff', 
+                  border: '2px solid #e2e8f0',
+                  borderRadius: '12px',
+                  boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                }} 
+              />
+              <Bar dataKey="importance" fill="#8b5cf6" radius={[0, 8, 8, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -394,14 +413,25 @@ export default function Home() {
 
     if (chartData.type === 'cv') {
       return (
-        <div className="mt-4 w-full">
-          <ResponsiveContainer width="100%" height={200}>
+        <div className="mt-6 w-full bg-gradient-to-br from-green-50 to-emerald-50 p-6 rounded-xl border border-green-100">
+          <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+            <Activity className="w-5 h-5 text-green-600" />
+            Cross-Validation Scores
+          </h3>
+          <ResponsiveContainer width="100%" height={240}>
             <LineChart data={chartData.data}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="fold" />
-              <YAxis />
-              <Tooltip />
-              <Line type="monotone" dataKey="score" stroke="#10b981" strokeWidth={3} dot={{ fill: '#10b981', r: 5 }} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
+              <XAxis dataKey="fold" stroke="#64748b" fontSize={12} />
+              <YAxis stroke="#64748b" fontSize={12} />
+              <Tooltip 
+                contentStyle={{ 
+                  backgroundColor: '#fff', 
+                  border: '2px solid #e2e8f0',
+                  borderRadius: '12px',
+                  boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+                }} 
+              />
+              <Line type="monotone" dataKey="score" stroke="#10b981" strokeWidth={3} dot={{ fill: '#10b981', r: 6 }} />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -412,153 +442,278 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-50 via-pink-50 to-blue-50 flex flex-col">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 flex flex-col">
       {/* Header */}
-      <header className="border-b border-purple-200/50 bg-white/90 backdrop-blur-xl sticky top-0 z-10 w-full shadow-lg">
-        <div className="max-w-5xl mx-auto px-6 py-5">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-purple-600 via-pink-600 to-blue-600 flex items-center justify-center shadow-xl">
-              <Sparkles className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">intent2model</h1>
-              <p className="text-xs text-gray-600 mt-0.5">just upload and chat</p>
-            </div>
-            {trainedModel && (
-              <div className="ml-auto flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-300 rounded-xl shadow-md">
-                <CheckCircle2 className="w-5 h-5 text-green-600" />
-                <span className="text-sm font-semibold text-green-700">model ready</span>
+      <header className="bg-white/80 backdrop-blur-xl border-b border-gray-200/50 sticky top-0 z-20 shadow-lg">
+        <div className="max-w-7xl mx-auto px-8 py-5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 flex items-center justify-center shadow-lg">
+                <Brain className="w-7 h-7 text-white" />
               </div>
-            )}
+              <div>
+                <h1 className="text-2xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">Intent2Model</h1>
+                <p className="text-sm text-gray-600 font-medium">LLM-Guided AutoML Platform</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              {datasetId && (
+                <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+                  <Database className="w-4 h-4 text-blue-600" />
+                  <span className="text-sm font-semibold text-blue-700">Dataset Loaded</span>
+                </div>
+              )}
+              {trainedModel && (
+                <div className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-300 rounded-lg shadow-sm">
+                  <CheckCircle2 className="w-5 h-5 text-green-600" />
+                  <span className="text-sm font-bold text-green-700">Model Ready</span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </header>
 
-      {/* Messages */}
-      <main className="flex-1 overflow-y-auto max-w-5xl w-full mx-auto px-6 py-6">
-        {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-center space-y-8 pt-20">
-            <div className="w-32 h-32 rounded-3xl bg-gradient-to-br from-purple-600 via-pink-600 to-blue-600 flex items-center justify-center shadow-2xl animate-pulse">
-              <Upload className="w-16 h-16 text-white" />
-            </div>
+      {/* Main Content */}
+      <div className="flex-1 flex max-w-7xl mx-auto w-full gap-6 p-6">
+        {/* Sidebar */}
+        <aside className="w-80 flex-shrink-0 space-y-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-gray-200 p-6">
+            <h2 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <Target className="w-5 h-5 text-indigo-600" />
+              Quick Actions
+            </h2>
             <div className="space-y-3">
-              <h2 className="text-4xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">drop your csv here</h2>
-              <p className="text-sm text-gray-600">or click to browse</p>
-            </div>
-            <label className="cursor-pointer group">
-              <input
-                type="file"
-                accept=".csv"
-                onChange={handleFileUpload}
-                className="hidden"
-                disabled={isUploading}
-              />
-              <div className="px-10 py-5 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-2xl text-sm font-bold hover:from-purple-700 hover:to-pink-700 transition-all shadow-xl hover:shadow-2xl group-hover:scale-110">
-                {isUploading ? 'uploading...' : 'choose file'}
-              </div>
-            </label>
-          </div>
-        )}
-
-        <div className="space-y-4 py-4">
-          {messages.map((message) => (
-            <div
-              key={message.id}
-              className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in`}
-            >
-              {message.role === 'assistant' && message.type && (
-                <div className="mr-3 mt-1">
-                  {getMessageIcon(message.type)}
-                </div>
-              )}
-              <div
-                className={`max-w-[80%] rounded-3xl px-6 py-4 shadow-lg ${
-                  message.role === 'user'
-                    ? 'bg-gradient-to-r from-gray-900 to-gray-800 text-white'
-                    : message.type === 'error'
-                    ? 'bg-red-50 border-2 border-red-300 text-red-900'
-                    : message.type === 'success'
-                    ? 'bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-300 text-green-900'
-                    : message.type === 'training'
-                    ? 'bg-gradient-to-r from-blue-50 to-cyan-50 border-2 border-blue-300 text-blue-900'
-                    : message.type === 'chart'
-                    ? 'bg-white border-2 border-purple-200 shadow-xl'
-                    : message.type === 'prediction'
-                    ? 'bg-gradient-to-r from-yellow-50 to-amber-50 border-2 border-yellow-300 text-amber-900'
-                    : 'bg-white border-2 border-gray-200 text-gray-800'
-                }`}
-              >
-                <p className="text-sm leading-relaxed whitespace-pre-wrap font-medium">{message.content}</p>
-                {message.type === 'chart' && message.chartData && renderChart(message.chartData)}
-                {message.type === 'prediction' && message.modelData && (
-                  <div className="mt-3 p-3 bg-yellow-100 rounded-xl border border-yellow-300">
-                    <div className="text-2xl font-bold text-yellow-900">{message.modelData.prediction}</div>
-                    {message.modelData.probabilities && (
-                      <div className="mt-2 space-y-1">
-                        {Object.entries(message.modelData.probabilities).map(([label, prob]) => (
-                          <div key={label} className="flex justify-between text-xs">
-                            <span>{label}:</span>
-                            <span className="font-bold">{((prob as number) * 100).toFixed(1)}%</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+              {!datasetId && (
+                <label className="block">
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                    disabled={isUploading}
+                  />
+                  <div className="w-full px-4 py-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl text-sm font-semibold hover:from-indigo-700 hover:to-purple-700 transition-all shadow-lg hover:shadow-xl cursor-pointer text-center">
+                    {isUploading ? 'Uploading...' : '📁 Upload Dataset'}
                   </div>
-                )}
-              </div>
+                </label>
+              )}
+              {trainedModel && (
+                <button
+                  onClick={() => setShowPredictionModal(true)}
+                  className="w-full px-4 py-3 bg-gradient-to-r from-green-600 to-emerald-600 text-white rounded-xl text-sm font-semibold hover:from-green-700 hover:to-emerald-700 transition-all shadow-lg hover:shadow-xl flex items-center justify-center gap-2"
+                >
+                  <Zap className="w-4 h-4" />
+                  Make Prediction
+                </button>
+              )}
+              {trainedModel && (
+                <button
+                  onClick={showModelReport}
+                  className="w-full px-4 py-3 bg-gradient-to-r from-blue-600 to-cyan-600 text-white rounded-xl text-sm font-semibold hover:from-blue-700 hover:to-cyan-700 transition-all shadow-lg hover:shadow-xl flex items-center justify-center gap-2"
+                >
+                  <BarChart3 className="w-4 h-4" />
+                  View Report
+                </button>
+              )}
             </div>
-          ))}
-          {isLoading && (
-            <div className="flex justify-start">
-              <div className="mr-3 mt-1">
-                <Loader2 className="w-4 h-4 animate-spin text-purple-500" />
-              </div>
-              <div className="bg-white border-2 border-purple-200 rounded-3xl px-6 py-4 shadow-lg">
-                <Loader2 className="w-4 h-4 animate-spin text-purple-500" />
+          </div>
+
+          {trainedModel && (
+            <div className="bg-white rounded-2xl shadow-xl border border-gray-200 p-6">
+              <h3 className="text-lg font-bold text-gray-900 mb-4">Model Metrics</h3>
+              <div className="space-y-3">
+                {Object.entries(trainedModel.metrics || {}).slice(0, 4).map(([key, value]) => (
+                  <div key={key} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
+                    <span className="text-sm font-medium text-gray-700 capitalize">{key}</span>
+                    <span className="text-sm font-bold text-indigo-600">{typeof value === 'number' ? value.toFixed(3) : value}</span>
+                  </div>
+                ))}
               </div>
             </div>
           )}
-          <div ref={messagesEndRef} />
-        </div>
-      </main>
+        </aside>
 
-      {/* Input */}
-      <footer className="border-t border-purple-200/50 bg-white/90 backdrop-blur-xl sticky bottom-0 w-full shadow-2xl">
-        <div className="max-w-5xl mx-auto px-6 py-5">
-          <div className="flex items-center gap-3">
-            {!datasetId && (
-              <label className="cursor-pointer">
-                <input
-                  type="file"
-                  accept=".csv"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                  disabled={isUploading}
-                />
-                <div className="p-3 rounded-xl hover:bg-purple-100 transition-colors">
-                  <Upload className="w-5 h-5 text-purple-500" />
+        {/* Chat Area */}
+        <main className="flex-1 flex flex-col bg-white rounded-2xl shadow-xl border border-gray-200 overflow-hidden">
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-gradient-to-b from-gray-50 to-white">
+            {messages.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-full text-center space-y-8 py-20">
+                <div className="w-32 h-32 rounded-3xl bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 flex items-center justify-center shadow-2xl">
+                  <FileText className="w-16 h-16 text-white" />
                 </div>
-              </label>
+                <div className="space-y-3">
+                  <h2 className="text-3xl font-bold text-gray-900">Get Started with AutoML</h2>
+                  <p className="text-gray-600 max-w-md">Upload your dataset and let AI build the perfect machine learning model for you</p>
+                </div>
+                <label className="cursor-pointer">
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                    disabled={isUploading}
+                  />
+                  <div className="px-8 py-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl text-base font-bold hover:from-indigo-700 hover:to-purple-700 transition-all shadow-xl hover:shadow-2xl hover:scale-105">
+                    {isUploading ? 'Uploading...' : '📁 Upload CSV File'}
+                  </div>
+                </label>
+              </div>
             )}
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
-              placeholder={datasetId ? (trainedModel ? "ask me to predict something..." : "tell me which column to predict...") : "upload a csv first"}
-              disabled={isLoading || !datasetId}
-              className="flex-1 bg-white border-2 border-purple-200 rounded-2xl px-6 py-4 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 disabled:opacity-50 shadow-md"
-            />
-            <button
-              onClick={handleSend}
-              disabled={!input.trim() || isLoading || !datasetId}
-              className="p-4 rounded-2xl bg-gradient-to-r from-purple-600 to-pink-600 text-white flex items-center justify-center hover:from-purple-700 hover:to-pink-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-xl hover:shadow-2xl disabled:hover:shadow-xl"
-            >
-              <Send className="w-5 h-5" />
-            </button>
+
+            <div className="space-y-4">
+              {messages.map((message) => (
+                <div
+                  key={message.id}
+                  className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} animate-in`}
+                >
+                  <div
+                    className={`max-w-[80%] rounded-2xl px-6 py-4 shadow-lg ${
+                      message.role === 'user'
+                        ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white'
+                        : message.type === 'error'
+                        ? 'bg-red-50 border-2 border-red-300 text-red-900'
+                        : message.type === 'success'
+                        ? 'bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-300 text-green-900'
+                        : message.type === 'training'
+                        ? 'bg-gradient-to-r from-blue-50 to-cyan-50 border-2 border-blue-300 text-blue-900'
+                        : message.type === 'chart'
+                        ? 'bg-white border-2 border-gray-200 shadow-xl'
+                        : message.type === 'prediction'
+                        ? 'bg-gradient-to-r from-yellow-50 to-amber-50 border-2 border-yellow-300 text-amber-900'
+                        : 'bg-white border-2 border-gray-200 text-gray-900'
+                    }`}
+                  >
+                    <p className="text-sm leading-relaxed whitespace-pre-wrap font-medium">{message.content}</p>
+                    {message.type === 'chart' && message.chartData && renderChart(message.chartData)}
+                    {message.type === 'prediction' && message.modelData && (
+                      <div className="mt-4 p-4 bg-gradient-to-r from-yellow-100 to-amber-100 rounded-xl border-2 border-yellow-400 shadow-md">
+                        <div className="text-2xl font-bold text-yellow-900 mb-2">{message.modelData.prediction}</div>
+                        {message.modelData.probabilities && (
+                          <div className="mt-3 space-y-2">
+                            {Object.entries(message.modelData.probabilities).map(([label, prob]) => (
+                              <div key={label} className="flex justify-between items-center p-2 bg-white/60 rounded-lg">
+                                <span className="text-sm font-medium text-gray-800">{label}</span>
+                                <span className="text-sm font-bold text-indigo-600">{((prob as number) * 100).toFixed(1)}%</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {isLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-white border-2 border-gray-200 rounded-2xl px-6 py-4 shadow-lg">
+                    <Loader2 className="w-5 h-5 animate-spin text-indigo-600" />
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+          </div>
+
+          {/* Input */}
+          <div className="border-t border-gray-200 bg-white p-6">
+            <div className="flex items-center gap-4">
+              {!datasetId && (
+                <label className="cursor-pointer">
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                    disabled={isUploading}
+                  />
+                  <div className="p-3 rounded-xl hover:bg-indigo-50 transition-colors border-2 border-indigo-200">
+                    <Upload className="w-6 h-6 text-indigo-600" />
+                  </div>
+                </label>
+              )}
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyPress={handleKeyPress}
+                placeholder={datasetId ? (trainedModel ? "Ask me to predict something..." : "Tell me which column to predict...") : "Upload a CSV first"}
+                disabled={isLoading || !datasetId}
+                className="flex-1 bg-gray-50 border-2 border-gray-300 rounded-xl px-6 py-4 text-base focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 disabled:opacity-50 font-medium"
+              />
+              <button
+                onClick={handleSend}
+                disabled={!input.trim() || isLoading || !datasetId}
+                className="p-4 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:from-indigo-700 hover:to-purple-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl"
+              >
+                <Send className="w-6 h-6" />
+              </button>
+            </div>
+          </div>
+        </main>
+        </div>
+
+      {/* Prediction Modal */}
+      {showPredictionModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col border-2 border-gray-200">
+            <div className="bg-gradient-to-r from-indigo-600 to-purple-600 px-8 py-6 flex items-center justify-between">
+              <h2 className="text-2xl font-bold text-white flex items-center gap-3">
+                <Zap className="w-6 h-6" />
+                Enter Feature Values
+              </h2>
+              <button
+                onClick={() => setShowPredictionModal(false)}
+                className="p-2 hover:bg-white/20 rounded-lg transition-colors"
+              >
+                <X className="w-6 h-6 text-white" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-8 space-y-5 bg-gray-50">
+              {featureColumns.map((col) => (
+                <div key={col} className="bg-white rounded-xl p-5 border-2 border-gray-200 shadow-sm">
+                  <label className="block text-base font-bold text-gray-900 mb-3">
+                    {col}
+                  </label>
+                  <input
+                    type="text"
+                    value={predictionFeatures[col] || ''}
+                    onChange={(e) => setPredictionFeatures({ ...predictionFeatures, [col]: e.target.value })}
+                    placeholder="Enter value..."
+                    className="w-full px-5 py-3 border-2 border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-base font-medium"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="bg-gray-50 border-t-2 border-gray-200 px-8 py-6 flex items-center justify-end gap-4">
+              <button
+                onClick={() => setShowPredictionModal(false)}
+                className="px-6 py-3 text-base font-semibold text-gray-700 hover:bg-gray-200 rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handlePrediction()}
+                disabled={isPredicting || featureColumns.some(col => !predictionFeatures[col]?.trim())}
+                className="px-6 py-3 text-base font-bold text-white bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg"
+              >
+                {isPredicting ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Predicting...
+                  </>
+                ) : (
+                  <>
+                    <Zap className="w-5 h-5" />
+                    Predict
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
-      </footer>
+      )}
     </div>
   )
 }

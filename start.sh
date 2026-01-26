@@ -1,26 +1,114 @@
 #!/bin/bash
 
-# Start backend
-echo "starting backend..."
-cd backend
+# Intent2Model Startup Script
+# This script starts both backend and frontend services
+
+set -e
+
+echo "🚀 Starting Intent2Model..."
+echo ""
+
+# Colors
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Check if we're in the right directory
+if [ ! -d "backend" ] || [ ! -d "frontend" ]; then
+    echo "❌ Error: Please run this script from the project root directory"
+    exit 1
+fi
+
+# Kill any existing processes
+echo "🧹 Cleaning up old processes..."
+pkill -f "uvicorn main:app" 2>/dev/null || true
+pkill -f "next dev" 2>/dev/null || true
+sleep 2
+
+# Set API key
 export GEMINI_API_KEY=AIzaSyDc6lDoHJmM1_YEP4XPdl17349eKvg0JAE
-python main.py &
+
+# Start Backend
+echo ""
+echo "${BLUE}📦 Starting Backend...${NC}"
+cd backend
+python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload > ../backend.log 2>&1 &
 BACKEND_PID=$!
+cd ..
 
 # Wait for backend to start
-sleep 3
+echo "⏳ Waiting for backend to start..."
+sleep 5
 
-# Start frontend
-echo "starting frontend..."
-cd ../frontend
-npm run dev &
-FRONTEND_PID=$!
+# Check if backend is running
+if curl -s http://localhost:8000/ > /dev/null; then
+    echo "${GREEN}✅ Backend is running on http://localhost:8000${NC}"
+else
+    echo "${YELLOW}⚠️  Backend might still be starting...${NC}"
+fi
 
-echo "backend running on http://localhost:8000"
-echo "frontend running on http://localhost:3000"
+# Start Frontend
 echo ""
-echo "press ctrl+c to stop both servers"
+echo "${BLUE}🎨 Starting Frontend...${NC}"
+cd frontend
+npm run dev > ../frontend.log 2>&1 &
+FRONTEND_PID=$!
+cd ..
+
+# Wait for frontend to start
+echo "⏳ Waiting for frontend to start..."
+sleep 8
+
+# Check if frontend is running
+if curl -s http://localhost:3000 > /dev/null; then
+    echo "${GREEN}✅ Frontend is running on http://localhost:3000${NC}"
+else
+    echo "${YELLOW}⚠️  Frontend might still be starting...${NC}"
+fi
+
+# Print status
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  ${GREEN}🎉 Intent2Model is LIVE!${NC}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "  🌐 Frontend: ${BLUE}http://localhost:3000${NC}"
+echo "  🔧 Backend:  ${BLUE}http://localhost:8000${NC}"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "${YELLOW}📖 How to Use:${NC}"
+echo ""
+echo "1. Open http://localhost:3000 in your browser"
+echo "2. Upload a CSV file (drag & drop or click)"
+echo "3. Chat with the AI:"
+echo "   • Tell it which column to predict (e.g., 'variety')"
+echo "   • Ask for a report: 'report' or 'show me results'"
+echo "   • Make predictions: 'can you predict for me?'"
+echo ""
+echo "${YELLOW}💡 Example Commands:${NC}"
+echo "   • 'variety' → trains model to predict variety"
+echo "   • 'report' → shows charts and metrics"
+echo "   • 'predict' → starts prediction flow"
+echo "   • 'sepal.length: 5.1, sepal.width: 3.5' → makes prediction"
+echo ""
+echo "${YELLOW}🛑 To Stop:${NC}"
+echo "   Press Ctrl+C or run: ./stop.sh"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "Logs:"
+echo "  Backend:  tail -f backend.log"
+echo "  Frontend: tail -f frontend.log"
+echo ""
+
+# Save PIDs
+echo $BACKEND_PID > .backend.pid
+echo $FRONTEND_PID > .frontend.pid
 
 # Wait for user interrupt
-trap "kill $BACKEND_PID $FRONTEND_PID; exit" INT
+trap "echo ''; echo '🛑 Stopping services...'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; rm -f .backend.pid .frontend.pid; exit" INT TERM
+
+echo "Press Ctrl+C to stop all services..."
 wait

@@ -47,16 +47,30 @@ def train_classification(
             "model": "random_forest"
         }
     
-    # Check if target is categorical (for classification)
+    # Prepare data
+    X = df.drop(columns=[target])
+    y = df[target]
+    
+    # Check if target is categorical (for classification) - handle both object and numeric categorical
     le = None
-    if y.dtype == 'object' or y.dtype.name == 'category':
-        # Encode target labels
+    unique_count = y.nunique()
+    total_count = len(y)
+    
+    # Determine if it's categorical: object dtype OR numeric with low cardinality
+    is_categorical = (
+        y.dtype == 'object' or 
+        y.dtype.name == 'category' or
+        (y.dtype in ['int64', 'float64', 'int32', 'float32'] and unique_count <= 20 and unique_count < total_count * 0.1)
+    )
+    
+    if is_categorical:
+        # Encode target labels - convert to string first to handle any type
         from sklearn.preprocessing import LabelEncoder
         le = LabelEncoder()
-        y_encoded = le.fit_transform(y)
+        y_encoded = le.fit_transform(y.astype(str))
         y_classes = le.classes_
     else:
-        y_encoded = y
+        y_encoded = y.values if hasattr(y, 'values') else y
         y_classes = None
     
     # Get column types
@@ -87,7 +101,7 @@ def train_classification(
     # Cross-validation
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     cv_results = cross_validate(
-        pipeline, X, y_encoded, cv=cv, scoring=cv_scoring, return_train_score=True
+        pipeline, X, y_encoded, cv=cv, scoring=cv_scoring, return_train_score=True, error_score='raise'
     )
     cv_scores = cv_results["test_score"].tolist()
     
@@ -222,7 +236,7 @@ def train_regression(
     # Cross-validation
     cv = KFold(n_splits=5, shuffle=True, random_state=42)
     cv_results = cross_validate(
-        pipeline, X, y, cv=cv, scoring=cv_scoring, return_train_score=True
+        pipeline, X, y, cv=cv, scoring=cv_scoring, return_train_score=True, error_score='raise'
     )
     cv_scores = cv_results["test_score"].tolist()
     
@@ -283,7 +297,8 @@ def train_regression(
         "cv_scores": cv_scores,
         "cv_mean": np.mean(cv_scores),
         "cv_std": np.std(cv_scores),
-        "feature_importance": feature_importance
+        "feature_importance": feature_importance,
+        "label_encoder": le  # Return label encoder for prediction decoding
     }
 
 

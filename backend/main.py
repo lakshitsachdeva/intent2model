@@ -23,6 +23,10 @@ from ml.evaluator import evaluate_dataset
 from utils.logging import create_run_id, log_run
 from agents.planner_agent import plan_pipeline
 from schemas.pipeline_schema import UserIntent
+from agents.llm_interface import LLMInterface
+from agents.error_analyzer import analyze_training_error
+import json
+import re
 
 
 app = FastAPI(title="Intent2Model API", version="1.0.0")
@@ -241,21 +245,167 @@ async def train_model(request: TrainRequest):
         }
     except Exception as e:
         error_msg = str(e)
-        # Convert technical errors to user-friendly messages
-        if "could not convert string to float" in error_msg or "ValueError" in error_msg:
-            user_msg = f"the target column '{request.target}' contains text values. make sure it's a valid column name."
-        elif "All the" in error_msg and "fits failed" in error_msg:
-            user_msg = f"couldn't train with '{request.target}'. the data might not be suitable for this type of model. try a different column?"
-        elif "not found" in error_msg.lower():
-            user_msg = f"column '{request.target}' not found. available columns: {', '.join(list(df.columns)[:5])}"
-        else:
-            user_msg = f"something went wrong training the model. try a different column or check your data."
+        
+        # Use LLM to analyze the error and provide helpful explanation
+        try:
+            dataset_info = {
+                "shape": df.shape,
+                "columns": list(df.columns),
+                "target_dtype": str(df[request.target].dtype),
+                "target_unique_count": df[request.target].nunique(),
+                "target_missing_count": df[request.target].isna().sum()
+            }
+            
+            error_analysis = analyze_training_error(
+                error=e,
+                error_msg=error_msg,
+                dataset_info=dataset_info,
+                target_column=request.target,
+                task_type=task,
+                llm_provider="gemini"
+            )
+            
+            # Build comprehensive error message
+            user_msg = f"""❌ Training Error
+
+{error_analysis['explanation']}
+
+🔍 Root Cause: {error_analysis['root_cause']}
+
+💡 Suggestions:
+{chr(10).join(f'  • {s}' for s in error_analysis['suggestions'])}"""
+            
+        except Exception as llm_error:
+            # Fallback if LLM analysis fails
+            print(f"LLM error analysis failed: {llm_error}")
+            if "could not convert string to float" in error_msg or "ValueError" in error_msg:
+                user_msg = f"❌ The target column '{request.target}' contains text values. This column might not be suitable for {task}. Try a different column?"
+            elif "All the" in error_msg and "fits failed" in error_msg:
+                user_msg = f"❌ Couldn't train with '{request.target}'. The data might not be suitable for this type of model. Try a different column?"
+            elif "not found" in error_msg.lower():
+                user_msg = f"❌ Column '{request.target}' not found. Available columns: {', '.join(list(df.columns)[:5])}"
+            else:
+                user_msg = f"❌ Training failed: {error_msg}\n\n💡 Try a different target column or check your data for issues."
+        
         raise HTTPException(status_code=500, detail=user_msg)
 
 
 class PredictRequest(BaseModel):
     run_id: str
     features: Dict[str, Any]
+
+
+class ParsePredictionRequest(BaseModel):
+    user_input: str
+    feature_columns: list[str]
+    run_id: str
+
+
+@app.post("/parse-prediction")
+async def parse_prediction(request: ParsePredictionRequest):
+    """
+    Use LLM to extract feature values from natural language input.
+    
+    Request body:
+        - user_input: Natural language input from user
+        - feature_columns: List of required feature column names
+        - run_id: Run ID to get context
+        
+    Returns:
+        Extracted features as JSON
+    """
+    try:
+        # Get model info for context
+        if request.run_id not in trained_models_cache:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        model_info = trained_models_cache[request.run_id]
+        feature_columns = model_info["feature_columns"]
+        
+        # Build prompt for LLM
+        system_prompt = """You are a helpful assistant that extracts feature values from natural language input.
+Your task is to parse the user's input and extract numeric values for each required feature column.
+Return ONLY a valid JSON object with feature names as keys and numeric values as values.
+Do not include any explanation, just the JSON.
+
+Examples:
+Input: "sepal.length: 5.1, sepal.width: 3.5, petal.length: 1.4, petal.width: 0.2"
+Output: {"sepal.length": 5.1, "sepal.width": 3.5, "petal.length": 1.4, "petal.width": 0.2}
+
+Input: "5.1, 3.5, 1.4, 0.2 respectively"
+Output: {"sepal.length": 5.1, "sepal.width": 3.5, "petal.length": 1.4, "petal.width": 0.2}
+
+Input: "sepal.length, sepal.width, petal.length, petal.width, 5.1, 3.5, 1.4, 0.2"
+Output: {"sepal.length": 5.1, "sepal.width": 3.5, "petal.length": 1.4, "petal.width": 0.2}
+
+If you cannot extract all values, return the ones you can extract. Make sure all values are numbers, not strings."""
+
+        prompt = f"""Extract feature values from this user input:
+
+User input: "{request.user_input}"
+
+Required features (in order): {', '.join(feature_columns)}
+
+Extract the values and return a JSON object with feature names as keys and numeric values as values.
+If the user lists values in order (like "5.1, 3.5, 1.4, 0.2"), map them to the features in the same order.
+If the user uses "respectively", map values in order to features.
+If the user uses key:value format, use those mappings.
+
+Return ONLY valid JSON, nothing else."""
+
+        # Use LLM to extract
+        llm = LLMInterface(provider="gemini")
+        response_text = llm.generate(prompt, system_prompt)
+        
+        # Extract JSON from response (LLM might add extra text)
+        json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+        else:
+            # Try to find JSON in code blocks
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                json_str = response_text.strip()
+        
+        # Parse JSON
+        try:
+            features = json.loads(json_str)
+        except json.JSONDecodeError:
+            # Fallback: try to extract key-value pairs manually
+            features = {}
+            for col in feature_columns:
+                # Look for patterns like "col_name: value" or "col_name value"
+                pattern1 = rf'{re.escape(col)}\s*[:=]\s*([\d.]+)'
+                pattern2 = rf'{re.escape(col)}\s+([\d.]+)'
+                match = re.search(pattern1, request.user_input, re.IGNORECASE) or re.search(pattern2, request.user_input, re.IGNORECASE)
+                if match:
+                    features[col] = float(match.group(1))
+            
+            # If still empty, try extracting all numbers and mapping in order
+            if not features:
+                numbers = re.findall(r'[\d.]+', request.user_input)
+                if len(numbers) == len(feature_columns):
+                    features = {col: float(val) for col, val in zip(feature_columns, numbers)}
+        
+        # Validate all features are present
+        missing = [col for col in feature_columns if col not in features]
+        if missing:
+            return {
+                "features": features,
+                "missing": missing,
+                "complete": False
+            }
+        
+        return {
+            "features": features,
+            "missing": [],
+            "complete": True
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse prediction input: {str(e)}")
 
 
 @app.post("/predict")
