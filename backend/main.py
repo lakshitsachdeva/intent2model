@@ -182,16 +182,43 @@ async def train_model(request: TrainRequest):
             config = None
             use_model_comparison = False
         
-        # Train model(s)
-        if use_model_comparison and pipeline_config.model_candidates:
-            # Try multiple models and pick the best
-            train_result = compare_models(df, request.target, task, metric, pipeline_config.model_candidates, config)
-        else:
-            # Single model training
-            if task == "classification":
-                train_result = train_classification(df, request.target, metric, config)
+        # Train model(s) with automatic error fixing
+        from agents.auto_fix_agent import auto_fix_training_error
+        
+        training_context = {
+            "target": request.target,
+            "task": task,
+            "metric": metric,
+            "dataset_shape": df.shape,
+            "target_dtype": str(df[request.target].dtype),
+            "target_unique_count": df[request.target].nunique()
+        }
+        
+        try:
+            if use_model_comparison and pipeline_config.model_candidates:
+                # Try multiple models and pick the best
+                train_result = auto_fix_training_error(
+                    compare_models,
+                    df, request.target, task, metric, pipeline_config.model_candidates, config,
+                    context=training_context
+                )
             else:
-                train_result = train_regression(df, request.target, metric, config)
+                # Single model training with auto-fix
+                if task == "classification":
+                    train_result = auto_fix_training_error(
+                        train_classification,
+                        df, request.target, metric, config,
+                        context=training_context
+                    )
+                else:
+                    train_result = auto_fix_training_error(
+                        train_regression,
+                        df, request.target, metric, config,
+                        context=training_context
+                    )
+        except Exception as training_error:
+            # If auto-fix failed, fall through to error analysis
+            raise training_error
         
         # Evaluate dataset
         eval_result = evaluate_dataset(df, request.target, task)

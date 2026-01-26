@@ -298,7 +298,7 @@ def train_regression(
         "cv_mean": np.mean(cv_scores),
         "cv_std": np.std(cv_scores),
         "feature_importance": feature_importance,
-        "label_encoder": le  # Return label encoder for prediction decoding
+        "label_encoder": None  # Regression doesn't need label encoder
     }
 
 
