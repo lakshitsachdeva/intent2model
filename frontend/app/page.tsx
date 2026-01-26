@@ -38,6 +38,33 @@ export default function Home() {
   const [messageCounter, setMessageCounter] = useState(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
+  // Load state from localStorage on mount
+  useEffect(() => {
+    const savedDatasetId = localStorage.getItem('datasetId')
+    const savedRunId = localStorage.getItem('currentRunId')
+    const savedColumns = localStorage.getItem('availableColumns')
+    
+    if (savedDatasetId) setDatasetId(savedDatasetId)
+    if (savedRunId) setCurrentRunId(savedRunId)
+    if (savedColumns) setAvailableColumns(JSON.parse(savedColumns))
+  }, [])
+
+  // Save state to localStorage when it changes
+  useEffect(() => {
+    if (datasetId) localStorage.setItem('datasetId', datasetId)
+    else localStorage.removeItem('datasetId')
+  }, [datasetId])
+
+  useEffect(() => {
+    if (currentRunId) localStorage.setItem('currentRunId', currentRunId)
+    else localStorage.removeItem('currentRunId')
+  }, [currentRunId])
+
+  useEffect(() => {
+    if (availableColumns.length > 0) localStorage.setItem('availableColumns', JSON.stringify(availableColumns))
+    else localStorage.removeItem('availableColumns')
+  }, [availableColumns])
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
@@ -128,9 +155,14 @@ export default function Home() {
 
       const lowerInput = userMessage.toLowerCase().trim()
 
-      if (lowerInput.includes('predict') || lowerInput.includes('what would') || lowerInput.includes('if i tell you') || lowerInput.includes('yes lets try') || lowerInput.includes('yes let')) {
+      if (lowerInput.includes('predict') || lowerInput.includes('what would') || lowerInput.includes('if i tell you') || lowerInput.includes('yes lets try') || lowerInput.includes('yes let') || lowerInput.includes('make prediction')) {
         if (!trainedModel || !currentRunId) {
           addMessage('assistant', 'Train a model first, then I can make predictions', 'info')
+          setIsLoading(false)
+          return
+        }
+        if (!featureColumns || featureColumns.length === 0) {
+          addMessage('assistant', 'Model is ready but feature columns are missing. Please train again.', 'error')
           setIsLoading(false)
           return
         }
@@ -152,7 +184,12 @@ export default function Home() {
           } else {
             addMessage('assistant', 'Train a model first by telling me which column to predict', 'info')
           }
-        } else if (lowerInput.includes('make') || lowerInput.includes('train') || lowerInput.includes('build')) {
+        } else if (lowerInput.includes('make') || lowerInput.includes('train') || lowerInput.includes('build') || lowerInput.includes('modle')) {
+          if (!datasetId) {
+            addMessage('assistant', 'Dataset not found. Please upload a CSV first.', 'error')
+            setIsLoading(false)
+            return
+          }
           if (availableColumns.length > 0) {
             const target = availableColumns[0]
             await trainModel(target)
@@ -232,6 +269,12 @@ export default function Home() {
         return
       }
 
+      if (!currentRunId) {
+        addMessage('assistant', 'Model not found. Please train a model first.', 'error')
+        setIsPredicting(false)
+        return
+      }
+
       const response = await fetch('http://localhost:8000/predict', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -245,7 +288,7 @@ export default function Home() {
       
       if (response.ok) {
         setShowPredictionModal(false)
-        addMessage('assistant', `Prediction: ${data.prediction}`, 'prediction', null, data)
+        addMessage('assistant', `🎯 Prediction: ${data.prediction}`, 'prediction', null, data)
         if (data.probabilities) {
           const probText = Object.entries(data.probabilities)
             .map(([k, v]) => `${k}: ${((v as number) * 100).toFixed(1)}%`)
@@ -254,6 +297,13 @@ export default function Home() {
         }
       } else {
         addMessage('assistant', data.detail || 'Prediction failed', 'error')
+        // If model not found, clear the state
+        if (data.detail && data.detail.includes('not found')) {
+          setTrainedModel(null)
+          setCurrentRunId(null)
+          localStorage.removeItem('currentRunId')
+          addMessage('assistant', 'Model was lost. Please train again.', 'error')
+        }
       }
     } catch (error) {
       addMessage('assistant', 'Prediction failed. Check your input?', 'error')
@@ -263,6 +313,11 @@ export default function Home() {
   }
 
   const trainModel = async (target: string) => {
+    if (!datasetId) {
+      addMessage('assistant', 'Dataset not found. Please upload a CSV first.', 'error')
+      return
+    }
+
     addMessage('assistant', `Training model to predict "${target}"...`, 'training')
     
     try {
