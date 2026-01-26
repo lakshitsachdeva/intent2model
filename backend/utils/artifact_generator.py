@@ -154,6 +154,12 @@ def generate_notebook(
                     f"{'model = RandomForestClassifier(n_estimators=100, random_state=42)' if task == 'classification' else 'model = RandomForestRegressor(n_estimators=100, random_state=42)'}\n",
                     "\n",
                     "# Create full pipeline\n",
+                ] + (
+                    ["model = RandomForestClassifier(n_estimators=100, random_state=42)\n"]
+                    if task == 'classification'
+                    else ["model = RandomForestRegressor(n_estimators=100, random_state=42)\n"]
+                ) + [
+                    "\n",
                     "pipeline = Pipeline(steps=[\n",
                     "    ('preprocessor', preprocessor),\n",
                     "    ('model', model)\n",
@@ -177,10 +183,11 @@ def generate_notebook(
                     "y_pred = pipeline.predict(X_test)\n",
                     "\n",
                     "# Evaluate\n",
-                    f"{'score = accuracy_score(y_test, y_pred)' if task == 'classification' else 'score = r2_score(y_test, y_pred)'}\n",
-                    f"print(f'{'Accuracy' if task == 'classification' else 'R2 Score'}: {{score:.4f}}')\n",
-                    "\n",
-                    f"{'print(classification_report(y_test, y_pred))' if task == 'classification' else 'print(f\"RMSE: {{mean_squared_error(y_test, y_pred, squared=False):.4f}}\")'}"
+                ] + (
+                    ["score = accuracy_score(y_test, y_pred)\n", "print(f'Accuracy: {score:.4f}')\n", "\n", "print(classification_report(y_test, y_pred))"] 
+                    if task == 'classification' 
+                    else ["score = r2_score(y_test, y_pred)\n", "print(f'R2 Score: {score:.4f}')\n", "\n", "print(f'RMSE: {mean_squared_error(y_test, y_pred, squared=False):.4f}')"]
+                )
                 ]
             },
             {
@@ -227,10 +234,14 @@ def generate_notebook(
                     "# Save the trained model\n",
                     "with open('model.pkl', 'wb') as f:\n",
                     "    pickle.dump(pipeline, f)\n",
-                    "\n",
-                    f"{'# Save label encoder if used\\nwith open(\"label_encoder.pkl\", \"wb\") as f:\\n    pickle.dump(le, f)' if task == 'classification' else ''}\n",
+                ] + (
+                    ["\n", "# Save label encoder if used\n", "with open('label_encoder.pkl', 'wb') as f:\n", "    pickle.dump(le, f)\n"]
+                    if task == 'classification'
+                    else []
+                ) + [
                     "\n",
                     "print('Model saved successfully!')"
+                ]
                 ]
             },
             {
