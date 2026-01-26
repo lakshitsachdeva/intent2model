@@ -231,18 +231,20 @@ def generate_notebook(
                 "cell_type": "code",
                 "execution_count": None,
                 "metadata": {},
-                "source": [
-                    "# Save the trained model\n",
-                    "with open('model.pkl', 'wb') as f:\n",
-                    "    pickle.dump(pipeline, f)\n",
-                ] + (
-                    ["\n", "# Save label encoder if used\n", "with open('label_encoder.pkl', 'wb') as f:\n", "    pickle.dump(le, f)\n"]
-                    if task == 'classification'
-                    else []
-                ) + [
-                    "\n",
-                    "print('Model saved successfully!')"
-                ]
+                "source": (
+                    [
+                        "# Save the trained model\n",
+                        "with open('model.pkl', 'wb') as f:\n",
+                        "    pickle.dump(pipeline, f)\n",
+                    ] + (
+                        ["\n", "# Save label encoder if used\n", "with open('label_encoder.pkl', 'wb') as f:\n", "    pickle.dump(le, f)\n"]
+                        if task == 'classification'
+                        else []
+                    ) + [
+                        "\n",
+                        "print('Model saved successfully!')"
+                    ]
+                )
                 ]
             },
             {
