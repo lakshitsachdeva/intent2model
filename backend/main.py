@@ -758,6 +758,154 @@ async def predict(request: PredictRequest):
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
 
+@app.get("/download/{run_id}/notebook")
+async def download_notebook(run_id: str):
+    """Download Jupyter notebook for a trained model."""
+    if run_id not in trained_models_cache:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    model_info = trained_models_cache[run_id]
+    df = model_info.get("df")
+    if df is None:
+        raise HTTPException(status_code=404, detail="Dataset not available for this model")
+    
+    notebook_json = generate_notebook(
+        df=df,
+        target=model_info["target"],
+        task=model_info["task"],
+        config=model_info.get("config", {}),
+        metrics=model_info.get("metrics", {}),
+        feature_importance=model_info.get("feature_importance"),
+        model=model_info["model"]
+    )
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.ipynb', delete=False) as f:
+        f.write(notebook_json)
+        temp_path = f.name
+    
+    return FileResponse(
+        temp_path,
+        media_type='application/json',
+        filename=f'model_{run_id[:8]}_training_notebook.ipynb',
+        background=lambda: os.unlink(temp_path)
+    )
+
+
+@app.get("/download/{run_id}/model")
+async def download_model(run_id: str):
+    """Download trained model as pickle file."""
+    if run_id not in trained_models_cache:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    model_info = trained_models_cache[run_id]
+    model = model_info["model"]
+    
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.pkl', delete=False) as f:
+        import pickle
+        pickle.dump(model, f)
+        temp_path = f.name
+    
+    return FileResponse(
+        temp_path,
+        media_type='application/octet-stream',
+        filename=f'model_{run_id[:8]}.pkl',
+        background=lambda: os.unlink(temp_path)
+    )
+
+
+@app.get("/download/{run_id}/readme")
+async def download_readme(run_id: str):
+    """Download README.md for the model."""
+    if run_id not in trained_models_cache:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    model_info = trained_models_cache[run_id]
+    
+    readme_content = generate_readme(
+        target=model_info["target"],
+        task=model_info["task"],
+        metrics=model_info.get("metrics", {}),
+        config=model_info.get("config", {}),
+        feature_importance=model_info.get("feature_importance")
+    )
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+        f.write(readme_content)
+        temp_path = f.name
+    
+    return FileResponse(
+        temp_path,
+        media_type='text/markdown',
+        filename=f'README_{run_id[:8]}.md',
+        background=lambda: os.unlink(temp_path)
+    )
+
+
+@app.get("/download/{run_id}/all")
+async def download_all_artifacts(run_id: str):
+    """Download all artifacts as a ZIP file."""
+    if run_id not in trained_models_cache:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    import zipfile
+    import io
+    
+    model_info = trained_models_cache[run_id]
+    df = model_info.get("df")
+    
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Add notebook
+        if df is not None:
+            notebook_json = generate_notebook(
+                df=df,
+                target=model_info["target"],
+                task=model_info["task"],
+                config=model_info.get("config", {}),
+                metrics=model_info.get("metrics", {}),
+                feature_importance=model_info.get("feature_importance"),
+                model=model_info["model"]
+            )
+            zip_file.writestr('training_notebook.ipynb', notebook_json)
+        
+        # Add README
+        readme_content = generate_readme(
+            target=model_info["target"],
+            task=model_info["task"],
+            metrics=model_info.get("metrics", {}),
+            config=model_info.get("config", {}),
+            feature_importance=model_info.get("feature_importance")
+        )
+        zip_file.writestr('README.md', readme_content)
+        
+        # Add model pickle
+        import pickle
+        model_bytes = io.BytesIO()
+        pickle.dump(model_info["model"], model_bytes)
+        zip_file.writestr('model.pkl', model_bytes.getvalue())
+        
+        # Add charts
+        if model_info.get("metrics"):
+            metrics_data = {"data": [{"name": k, "value": v} for k, v in model_info["metrics"].items()]}
+            chart_img = generate_chart_image("metrics", metrics_data, "Performance Metrics")
+            zip_file.writestr('charts/metrics.png', base64.b64decode(chart_img))
+        
+        if model_info.get("feature_importance"):
+            chart_img = generate_chart_image("feature_importance", model_info["feature_importance"], "Feature Importance")
+            zip_file.writestr('charts/feature_importance.png', base64.b64decode(chart_img))
+    
+    zip_buffer.seek(0)
+    
+    return Response(
+        content=zip_buffer.read(),
+        media_type='application/zip',
+        headers={
+            "Content-Disposition": f'attachment; filename="model_artifacts_{run_id[:8]}.zip"'
+        }
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

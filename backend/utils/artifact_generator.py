@@ -104,7 +104,14 @@ def generate_notebook(
                     f"y = df['{target}']\n",
                     "\n",
                     "# Handle categorical target if needed\n",
-                    f"{'le = LabelEncoder()\\ny = le.fit_transform(y.astype(str))' if task == 'classification' else ''}\n",
+                ]
+            )
+            if task == 'classification':
+                notebook["cells"][4]["source"].extend([
+                    "le = LabelEncoder()\n",
+                    "y = le.fit_transform(y.astype(str))\n"
+                ])
+            notebook["cells"][4]["source"].extend([
                     "\n",
                     "# Split data\n",
                     "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)\n",
