@@ -3,7 +3,7 @@
 # Intent2Model Startup Script
 # This script starts both backend and frontend services
 
-set -e
+set +e  # Don't exit on error, we'll handle it manually
 
 echo "🚀 Starting Intent2Model..."
 echo ""
@@ -33,6 +33,19 @@ export GEMINI_API_KEY=AIzaSyDc6lDoHJmM1_YEP4XPdl17349eKvg0JAE
 echo ""
 echo "${BLUE}📦 Starting Backend...${NC}"
 cd backend
+
+# Check if Python dependencies are installed
+if ! python3 -c "import uvicorn" 2>/dev/null; then
+    echo "${YELLOW}⚠️  Installing Python dependencies...${NC}"
+    pip3 install -r ../requirements.txt 2>&1 | tail -5
+fi
+
+# Check if main.py exists
+if [ ! -f "main.py" ]; then
+    echo "❌ Error: main.py not found in backend directory"
+    exit 1
+fi
+
 python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload > ../backend.log 2>&1 &
 BACKEND_PID=$!
 cd ..
@@ -42,16 +55,41 @@ echo "⏳ Waiting for backend to start..."
 sleep 5
 
 # Check if backend is running
-if curl -s http://localhost:8000/ > /dev/null; then
-    echo "${GREEN}✅ Backend is running on http://localhost:8000${NC}"
-else
-    echo "${YELLOW}⚠️  Backend might still be starting...${NC}"
-fi
+MAX_RETRIES=10
+RETRY_COUNT=0
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    if curl -s http://localhost:8000/ > /dev/null 2>&1; then
+        echo "${GREEN}✅ Backend is running on http://localhost:8000${NC}"
+        break
+    fi
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+        echo "⏳ Waiting for backend... ($RETRY_COUNT/$MAX_RETRIES)"
+        sleep 2
+    else
+        echo "${YELLOW}⚠️  Backend might still be starting. Check logs: tail -f backend.log${NC}"
+        echo "Last 10 lines of backend.log:"
+        tail -10 backend.log 2>/dev/null || echo "No log file yet"
+    fi
+done
 
 # Start Frontend
 echo ""
 echo "${BLUE}🎨 Starting Frontend...${NC}"
 cd frontend
+
+# Check if node_modules exists
+if [ ! -d "node_modules" ]; then
+    echo "${YELLOW}⚠️  Installing npm dependencies...${NC}"
+    npm install 2>&1 | tail -10
+fi
+
+# Check if package.json exists
+if [ ! -f "package.json" ]; then
+    echo "❌ Error: package.json not found in frontend directory"
+    exit 1
+fi
+
 npm run dev > ../frontend.log 2>&1 &
 FRONTEND_PID=$!
 cd ..
@@ -61,11 +99,23 @@ echo "⏳ Waiting for frontend to start..."
 sleep 8
 
 # Check if frontend is running
-if curl -s http://localhost:3000 > /dev/null; then
-    echo "${GREEN}✅ Frontend is running on http://localhost:3000${NC}"
-else
-    echo "${YELLOW}⚠️  Frontend might still be starting...${NC}"
-fi
+MAX_RETRIES=15
+RETRY_COUNT=0
+while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+    if curl -s http://localhost:3000 > /dev/null 2>&1; then
+        echo "${GREEN}✅ Frontend is running on http://localhost:3000${NC}"
+        break
+    fi
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+        echo "⏳ Waiting for frontend... ($RETRY_COUNT/$MAX_RETRIES)"
+        sleep 2
+    else
+        echo "${YELLOW}⚠️  Frontend might still be starting. Check logs: tail -f frontend.log${NC}"
+        echo "Last 10 lines of frontend.log:"
+        tail -10 frontend.log 2>/dev/null || echo "No log file yet"
+    fi
+done
 
 # Print status
 echo ""
