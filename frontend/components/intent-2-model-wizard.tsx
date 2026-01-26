@@ -60,8 +60,14 @@ export default function Intent2ModelWizard() {
       const categorical = data.profile?.categorical_cols || [];
       setAvailableColumns([...numeric, ...categorical]);
       setStep(2);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Upload failed:', error);
+      
+      // Check if it's a network error
+      if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
+        alert('⚠️ Cannot connect to backend. Make sure backend is running on http://localhost:8000\n\nRun: cd backend && python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload');
+      }
+      
       // Still proceed to step 2 even if upload fails (autonomous)
       setStep(2);
     } finally {
