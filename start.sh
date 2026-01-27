@@ -57,6 +57,13 @@ if ! python -c "import uvicorn" 2>/dev/null; then
     echo "${GREEN}✅ Python dependencies installed${NC}"
 fi
 
+# Check/install google-generativeai for LLM support
+if ! python -c "import google.generativeai" 2>/dev/null; then
+    echo "${YELLOW}⚠️  Installing google-generativeai for LLM support...${NC}"
+    python -m pip install google-generativeai --quiet
+    echo "${GREEN}✅ LLM dependencies installed${NC}"
+fi
+
 # Check if main.py exists
 if [ ! -f "main.py" ]; then
     echo "${RED}❌ Error: main.py not found in backend directory${NC}"
