@@ -18,6 +18,37 @@ from .pipeline_builder import build_pipeline
 from .profiler import profile_dataset
 
 
+def _safe_n_splits_classification(y: np.ndarray, desired: int = 5) -> int:
+    """
+    Pick a safe number of CV folds for classification.
+    StratifiedKFold requires n_splits <= min_class_count and <= n_samples.
+    """
+    try:
+        y_arr = np.asarray(y)
+        n_samples = int(len(y_arr))
+        if n_samples < 2:
+            return 1
+        # class counts
+        _, counts = np.unique(y_arr, return_counts=True)
+        min_class = int(counts.min()) if len(counts) else 1
+        n_splits = min(desired, n_samples, min_class)
+        return max(1, n_splits)
+    except Exception:
+        # fall back conservatively
+        return 2
+
+
+def _safe_n_splits_regression(n_samples: int, desired: int = 5) -> int:
+    """Pick a safe number of CV folds for regression (KFold requires n_splits <= n_samples)."""
+    try:
+        n = int(n_samples)
+        if n < 2:
+            return 1
+        return max(1, min(desired, n))
+    except Exception:
+        return 2
+
+
 def train_classification(
     df: pd.DataFrame,
     target: str,
@@ -99,11 +130,17 @@ def train_classification(
     cv_scoring = scoring_map.get(metric, "accuracy")
     
     # Cross-validation
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    cv_results = cross_validate(
-        pipeline, X, y_encoded, cv=cv, scoring=cv_scoring, return_train_score=True, error_score='raise'
-    )
-    cv_scores = cv_results["test_score"].tolist()
+    n_splits = _safe_n_splits_classification(y_encoded, desired=5)
+    cv_scores: List[float] = []
+    if n_splits >= 2:
+        cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        cv_results = cross_validate(
+            pipeline, X, y_encoded, cv=cv, scoring=cv_scoring, return_train_score=True, error_score='raise'
+        )
+        cv_scores = cv_results["test_score"].tolist()
+    else:
+        # Too few samples per class; skip CV and train on full data
+        cv_scores = []
     
     # Train final model on full data
     pipeline.fit(X, y_encoded)
@@ -170,8 +207,8 @@ def train_classification(
         "best_model": pipeline,
         "metrics": metrics,
         "cv_scores": cv_scores,
-        "cv_mean": np.mean(cv_scores),
-        "cv_std": np.std(cv_scores),
+        "cv_mean": float(np.mean(cv_scores)) if cv_scores else None,
+        "cv_std": float(np.std(cv_scores)) if cv_scores else None,
         "feature_importance": feature_importance,
         "label_encoder": le  # Return encoder for prediction
     }
@@ -234,11 +271,16 @@ def train_regression(
     cv_scoring = scoring_map.get(metric, "r2")
     
     # Cross-validation
-    cv = KFold(n_splits=5, shuffle=True, random_state=42)
-    cv_results = cross_validate(
-        pipeline, X, y, cv=cv, scoring=cv_scoring, return_train_score=True, error_score='raise'
-    )
-    cv_scores = cv_results["test_score"].tolist()
+    n_splits = _safe_n_splits_regression(len(y), desired=5)
+    cv_scores: List[float] = []
+    if n_splits >= 2:
+        cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+        cv_results = cross_validate(
+            pipeline, X, y, cv=cv, scoring=cv_scoring, return_train_score=True, error_score='raise'
+        )
+        cv_scores = cv_results["test_score"].tolist()
+    else:
+        cv_scores = []
     
     # For negative scores (RMSE, MAE), convert to positive
     if metric in ["rmse", "mae"]:
@@ -295,8 +337,8 @@ def train_regression(
         "best_model": pipeline,
         "metrics": metrics,
         "cv_scores": cv_scores,
-        "cv_mean": np.mean(cv_scores),
-        "cv_std": np.std(cv_scores),
+        "cv_mean": float(np.mean(cv_scores)) if cv_scores else None,
+        "cv_std": float(np.std(cv_scores)) if cv_scores else None,
         "feature_importance": feature_importance,
         "label_encoder": None  # Regression doesn't need label encoder
     }
@@ -311,7 +353,7 @@ def compare_models(
     base_config: Optional[Dict[str, Any]] = None
 ) -> Dict:
     """
-    Try multiple models and return the best one.
+    Try multiple models and return ALL results with detailed comparison.
     
     Args:
         df: Input DataFrame
@@ -322,7 +364,10 @@ def compare_models(
         base_config: Base pipeline configuration
         
     Returns:
-        Dictionary with best model results and comparison
+        Dictionary with:
+        - best_model: Best model result (for backward compatibility)
+        - all_models: List of ALL model results with full details
+        - model_comparison: Comparison summary
     """
     results = []
     
@@ -359,17 +404,59 @@ def compare_models(
     reverse = metric not in ["rmse", "mae"]
     results.sort(key=lambda x: x["primary_metric"], reverse=reverse)
     
-    best_result = results[0]
-    best_result["model_comparison"] = {
-        "tried_models": [r["model_name"] for r in results],
-        "best_model": best_result["model_name"],
+    best_result = results[0].copy()
+
+    def _to_float(x):
+        try:
+            if x is None:
+                return None
+            return float(x)
+        except Exception:
+            return None
+
+    def _json_safe_model_result(r: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Strip non-JSON-serializable objects (sklearn pipelines, label encoders, numpy types).
+        Keep only what the UI needs.
+        """
+        metrics = {k: _to_float(v) for k, v in (r.get("metrics") or {}).items()}
+        cv_scores = [float(s) for s in (r.get("cv_scores") or [])]
+        feature_importance = r.get("feature_importance")
+        if isinstance(feature_importance, dict):
+            # feature importance may have numpy floats
+            feature_importance = {str(k): _to_float(v) for k, v in feature_importance.items()}
+        else:
+            feature_importance = None
+
+        return {
+            "model_name": r.get("model_name"),
+            "primary_metric": _to_float(r.get("primary_metric")),
+            "metrics": metrics,
+            "cv_scores": cv_scores,
+            "cv_mean": _to_float(r.get("cv_mean")),
+            "cv_std": _to_float(r.get("cv_std")),
+            "feature_importance": feature_importance,
+        }
+
+    all_models_safe = [_json_safe_model_result(r) for r in results]
+
+    # Build comprehensive comparison (JSON-safe)
+    comparison = {
+        "tried_models": [r.get("model_name") for r in all_models_safe],
+        "best_model": best_result.get("model_name"),
         "all_results": [
             {
-                "model": r["model_name"],
-                "metric": r["primary_metric"]
+                "model": r.get("model_name"),
+                "metric": r.get("primary_metric"),
             }
-            for r in results
-        ]
+            for r in all_models_safe
+        ],
+        "all_models": all_models_safe,
     }
-    
+
+    # Keep best_model pipeline in best_result for server-side caching,
+    # but return JSON-safe all_models for UI.
+    best_result["model_comparison"] = comparison
+    best_result["all_models"] = all_models_safe
+
     return best_result

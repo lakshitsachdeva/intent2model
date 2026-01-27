@@ -38,6 +38,30 @@ import base64
 
 app = FastAPI(title="Intent2Model API", version="1.0.0")
 
+
+def _json_safe(obj):
+    """Convert common numpy/pandas scalar types to plain Python types for FastAPI JSON encoding."""
+    try:
+        import numpy as np  # type: ignore
+        import pandas as pd  # type: ignore
+
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, (pd.Timestamp,)):
+            return obj.isoformat()
+    except Exception:
+        pass
+
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -305,20 +329,42 @@ async def train_model(request: TrainRequest):
             priority_metric=metric
         )
         
+        # ALWAYS use model comparison with comprehensive model list
+        if task == "classification":
+            model_candidates = ["logistic_regression", "random_forest", "gradient_boosting", "naive_bayes"]
+            # Try XGBoost if available
+            try:
+                import xgboost
+                model_candidates.append("xgboost")
+            except:
+                pass
+        else:
+            model_candidates = ["linear_regression", "random_forest", "gradient_boosting", "ridge"]
+            # Try XGBoost if available
+            try:
+                import xgboost
+                model_candidates.append("xgboost")
+            except:
+                pass
+        
         try:
             pipeline_config = plan_pipeline(profile, user_intent, llm_provider="gemini")
             # Use LLM-generated config
             config = {
                 "task": pipeline_config.task,
                 "preprocessing": pipeline_config.preprocessing,
-                "model": pipeline_config.model_candidates[0] if pipeline_config.model_candidates else "random_forest"
+                "model": model_candidates[0]  # Use first as default
             }
-            use_model_comparison = len(pipeline_config.model_candidates) > 1
+            # Override with LLM suggestions if available
+            if pipeline_config.model_candidates and len(pipeline_config.model_candidates) > 0:
+                # Merge LLM suggestions with defaults
+                model_candidates = list(set(model_candidates + pipeline_config.model_candidates))
         except Exception as e:
             # Fallback to default config if LLM fails
-            print(f"LLM planning failed: {e}. Using default config.")
+            print(f"LLM planning failed: {e}. Using default config with model comparison.")
             config = None
-            use_model_comparison = False
+        
+        use_model_comparison = True  # Always compare multiple models
         
         # Train model(s) with automatic error fixing
         from agents.auto_fix_agent import auto_fix_training_error
@@ -333,13 +379,57 @@ async def train_model(request: TrainRequest):
         }
         
         try:
-            if use_model_comparison and pipeline_config.model_candidates:
-                # Try multiple models and pick the best
+            if use_model_comparison:
+                # Try multiple models and get ALL results
                 train_result = auto_fix_training_error(
                     compare_models,
-                    df, request.target, task, metric, pipeline_config.model_candidates, config,
+                    df, request.target, task, metric, model_candidates, config,
                     context=training_context
                 )
+                
+                # Add LLM explanations for each model
+                from agents.model_explainer import explain_model_performance
+                
+                profile = profile_dataset(df)
+                dataset_info = {
+                    "n_rows": len(df),
+                    "n_cols": len(df.columns),
+                    "numeric_cols": profile.get("numeric_cols", []),
+                    "categorical_cols": profile.get("categorical_cols", []),
+                    "target": request.target,
+                    "target_unique_count": df[request.target].nunique(),
+                    "missing_percent": profile.get("missing_percent", {})
+                }
+                
+                # Explain each model
+                all_models_with_explanations = []
+                for model_result in train_result.get("all_models", []):
+                    model_name = model_result["model_name"]
+                    model_metrics = model_result["metrics"]
+                    
+                    # Get comparison context (other models' results)
+                    other_models = [
+                        {
+                            "model_name": r["model_name"],
+                            "primary_metric": r["primary_metric"]
+                        }
+                        for r in train_result.get("all_models", [])
+                        if r["model_name"] != model_name
+                    ]
+                    
+                    explanation = explain_model_performance(
+                        model_name=model_name,
+                        metrics=model_metrics,
+                        dataset_info=dataset_info,
+                        task=task,
+                        comparison_with=other_models,
+                        llm_provider="gemini"
+                    )
+                    
+                    model_result["explanation"] = explanation
+                    all_models_with_explanations.append(model_result)
+                
+                train_result["all_models"] = all_models_with_explanations
             else:
                 # Single model training with auto-fix
                 if task == "classification":
@@ -384,7 +474,8 @@ async def train_model(request: TrainRequest):
             }
         )
         
-        # Store trained model for prediction
+        # Store trained model for prediction and artifact generation
+        # NOTE: compare_models returns JSON-safe all_models, but keeps the real fitted pipeline in train_result["best_model"].
         trained_models_cache[run_id] = {
             "model": train_result["best_model"],
             "target": request.target,
@@ -392,26 +483,29 @@ async def train_model(request: TrainRequest):
             "feature_columns": list(df.drop(columns=[request.target]).columns),
             "label_encoder": train_result.get("label_encoder") if task == "classification" else None,
             "config": config,
-            "df": df,  # Store for artifact generation
+            "df": df.copy(),  # Store dataset for artifact generation
             "metrics": train_result["metrics"],
-            "feature_importance": train_result.get("feature_importance")
+            "feature_importance": train_result.get("feature_importance"),
+            "all_models": train_result.get("all_models", [])  # Store JSON-safe summaries
         }
         
-        return {
+        response_payload = {
             "run_id": run_id,
             "metrics": train_result["metrics"],
-            "cv_mean": train_result["cv_mean"],
-            "cv_std": train_result["cv_std"],
+            "cv_mean": train_result.get("cv_mean"),
+            "cv_std": train_result.get("cv_std"),
             "warnings": eval_result["warnings"],
             "imbalance_ratio": eval_result.get("imbalance_ratio"),
             "leakage_columns": eval_result["leakage_columns"],
             "feature_importance": train_result.get("feature_importance"),
             "model_comparison": train_result.get("model_comparison"),
+            "all_models": train_result.get("all_models", []),  # Return ALL models with explanations
             "pipeline_config": {
                 "preprocessing": config.get("preprocessing", []) if config else [],
                 "model": train_result.get("model_name", config.get("model", "unknown")) if config else "unknown"
             }
         }
+        return _json_safe(response_payload)
     except Exception as e:
         error_msg = str(e)
         

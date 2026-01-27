@@ -95,7 +95,7 @@ export default function Intent2ModelWizard() {
     }
     
     // Real progress tracking - update based on actual training stages
-    let progressInterval: NodeJS.Timeout;
+    let progressInterval: NodeJS.Timeout | null = null;
     
     try {
       // Start progress simulation
@@ -120,7 +120,7 @@ export default function Intent2ModelWizard() {
       const data = await response.json();
       
       if (response.ok && data.run_id) {
-        clearInterval(progressInterval);
+        if (progressInterval) clearInterval(progressInterval);
         setProgress(100);
         setTrainedModel(data);
         setTimeout(() => {
@@ -140,7 +140,7 @@ export default function Intent2ModelWizard() {
           });
           const fallbackData = await fallbackResponse.json();
           if (fallbackResponse.ok) {
-            clearInterval(progressInterval);
+            if (progressInterval) clearInterval(progressInterval);
             setProgress(100);
             setTrainedModel(fallbackData);
             setTimeout(() => {
@@ -154,7 +154,7 @@ export default function Intent2ModelWizard() {
       }
     } catch (error) {
       console.error('Training error:', error);
-      clearInterval(progressInterval);
+      if (progressInterval) clearInterval(progressInterval);
       // Still show success (autonomous - backend handles retries)
       setProgress(100);
       setTimeout(() => {
@@ -354,107 +354,270 @@ export default function Intent2ModelWizard() {
             animate={{ opacity: 1, scale: 1 }}
             key="step4"
           >
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <Card className="md:col-span-2">
-                <CardHeader>
-                  <CardTitle className="flex items-center">
-                    <CheckCircle2 className="w-5 h-5 text-green-500 mr-2" />
-                    Model Trained Successfully
-                  </CardTitle>
-                  <CardDescription>Your model is ready for deployment and evaluation.</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-6">
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    {trainedModel?.metrics ? Object.entries(trainedModel.metrics).slice(0, 4).map(([key, value]: [string, any], i) => (
-                      <div key={i} className="p-3 rounded-lg bg-muted/30 border text-center">
-                        <p className="text-xs text-muted-foreground uppercase tracking-wider">{key}</p>
-                        <p className="text-xl font-bold">{typeof value === 'number' ? value.toFixed(3) : value}</p>
-                      </div>
-                    )) : (
-                      <div className="col-span-4 text-center text-muted-foreground">Loading metrics...</div>
-                    )}
-                  </div>
-                  
-                  <Separator />
-                  
-                  <div className="space-y-4">
-                    <h4 className="font-semibold">Model Ready</h4>
-                    <div className="p-4 rounded-lg bg-black text-white font-mono text-sm overflow-x-auto">
-                      <p className="text-blue-400"># Model trained successfully</p>
-                      <p className="text-green-400 mt-2">&gt;&gt; Ready for predictions</p>
-                    </div>
-                  </div>
-                </CardContent>
-                <CardFooter className="flex gap-4 flex-wrap">
-                  {trainedModel?.run_id && (
-                    <>
-                      <Button 
-                        className="flex-1 min-w-[150px]" 
-                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/notebook`, '_blank')}
-                      >
-                        📓 Download Notebook
-                      </Button>
-                      <Button 
-                        variant="outline" 
-                        className="flex-1 min-w-[150px]"
-                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/model`, '_blank')}
-                      >
-                        💾 Download Model (.pkl)
-                      </Button>
-                      <Button 
-                        variant="outline" 
-                        className="flex-1 min-w-[150px]"
-                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/readme`, '_blank')}
-                      >
-                        📄 Download README
-                      </Button>
-                      <Button 
-                        variant="secondary" 
-                        className="flex-1 min-w-[150px]"
-                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/all`, '_blank')}
-                      >
-                        📦 Download All (ZIP)
-                      </Button>
-                    </>
-                  )}
-                  <Button variant="ghost" className="flex-1 min-w-[150px]" onClick={() => setStep(1)}>Train Another</Button>
-                </CardFooter>
-              </Card>
-
-              <div className="space-y-6">
+            <div className="space-y-6">
+              {/* Model Comparison Table */}
+              {trainedModel?.all_models && Array.isArray(trainedModel.all_models) && trainedModel.all_models.length > 0 ? (
                 <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm font-medium uppercase tracking-wider text-muted-foreground">Model Architecture</CardTitle>
+                  <CardHeader>
+                    <CardTitle>Model Comparison</CardTitle>
+                    <CardDescription>All trained models with performance metrics. Select one to use.</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b">
+                            <th className="text-left p-3">Model</th>
+                            <th className="text-right p-3">Primary Metric</th>
+                            <th className="text-right p-3">CV Mean</th>
+                            <th className="text-right p-3">CV Std</th>
+                            <th className="text-center p-3">Status</th>
+                            <th className="text-center p-3">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {trainedModel.all_models.map((model: any, idx: number) => {
+                            const isBest = idx === 0;
+                            const primaryMetric = model.primary_metric || (model.metrics && Object.keys(model.metrics).length > 0 ? model.metrics[Object.keys(model.metrics)[0]] : 0) || 0;
+                            return (
+                              <tr key={idx} className={`border-b hover:bg-muted/50 ${isBest ? 'bg-green-50 dark:bg-green-950/20' : ''}`}>
+                                <td className="p-3">
+                                  <div className="font-medium capitalize">{model.model_name?.replace('_', ' ')}</div>
+                                  {isBest && <Badge variant="default" className="mt-1">Best</Badge>}
+                                </td>
+                                <td className="text-right p-3 font-medium">{typeof primaryMetric === 'number' ? primaryMetric.toFixed(4) : primaryMetric}</td>
+                                <td className="text-right p-3 text-muted-foreground">{model.cv_mean?.toFixed(4) || 'N/A'}</td>
+                                <td className="text-right p-3 text-muted-foreground">{model.cv_std?.toFixed(4) || 'N/A'}</td>
+                                <td className="text-center p-3">
+                                  {isBest ? (
+                                    <Badge variant="default">Recommended</Badge>
+                                  ) : (
+                                    <Badge variant="secondary">Available</Badge>
+                                  )}
+                                </td>
+                                <td className="text-center p-3">
+                                  <Button 
+                                    size="sm" 
+                                    variant={isBest ? "default" : "outline"}
+                                    onClick={() => {
+                                      // Store selected model
+                                      setTrainedModel({...trainedModel, selectedModel: model});
+                                    }}
+                                  >
+                                    {isBest ? 'Using' : 'Select'}
+                                  </Button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center">
+                      <CheckCircle2 className="w-5 h-5 text-green-500 mr-2" />
+                      Model Trained Successfully
+                    </CardTitle>
+                    <CardDescription>Your model is ready for deployment and evaluation.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                      {trainedModel?.metrics ? Object.entries(trainedModel.metrics).slice(0, 4).map(([key, value]: [string, any], i) => (
+                        <div key={i} className="p-3 rounded-lg bg-muted/30 border text-center">
+                          <p className="text-xs text-muted-foreground uppercase tracking-wider">{key}</p>
+                          <p className="text-xl font-bold">{typeof value === 'number' ? value.toFixed(3) : value}</p>
+                        </div>
+                      )) : (
+                        <div className="col-span-4 text-center text-muted-foreground">Loading metrics...</div>
+                      )}
+                    </div>
+                    
+                    <Separator />
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Model Details with Explanations */}
+              {trainedModel?.all_models && Array.isArray(trainedModel.all_models) && trainedModel.all_models.length > 0 && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {trainedModel.all_models.map((model: any, idx: number) => (
+                    <Card key={idx} className={idx === 0 ? 'border-green-500 border-2' : ''}>
+                      <CardHeader>
+                        <CardTitle className="flex items-center justify-between">
+                          <span className="capitalize">{model.model_name?.replace('_', ' ')}</span>
+                          {idx === 0 && <Badge>Best Model</Badge>}
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        {/* Metrics */}
+                        <div className="grid grid-cols-2 gap-2">
+                          {Object.entries(model.metrics || {}).slice(0, 4).map(([key, value]: [string, any]) => (
+                            <div key={key} className="p-2 rounded bg-muted/30">
+                              <p className="text-xs text-muted-foreground">{key}</p>
+                              <p className="font-bold">{typeof value === 'number' ? value.toFixed(3) : value}</p>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* LLM Explanation */}
+                        {model.explanation && (
+                          <div className="space-y-2">
+                            <h4 className="font-semibold text-sm">Why this model?</h4>
+                            <p className="text-sm text-muted-foreground">
+                              {typeof model.explanation === 'object' && model.explanation.explanation 
+                                ? model.explanation.explanation 
+                                : typeof model.explanation === 'string' 
+                                  ? model.explanation 
+                                  : 'Explanation not available'}
+                            </p>
+                            {model.explanation && typeof model.explanation === 'object' && model.explanation.strengths && (
+                              <div className="mt-2">
+                                <p className="text-xs font-medium text-green-600 dark:text-green-400">Strengths:</p>
+                                <p className="text-xs text-muted-foreground">{model.explanation.strengths}</p>
+                              </div>
+                            )}
+                            {model.explanation && typeof model.explanation === 'object' && model.explanation.recommendation && (
+                              <div className="mt-2">
+                                <p className="text-xs font-medium text-blue-600 dark:text-blue-400">Recommendation:</p>
+                                <p className="text-xs text-muted-foreground">{model.explanation.recommendation}</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* CV Scores Chart */}
+                        {model.cv_scores && Array.isArray(model.cv_scores) && model.cv_scores.length > 0 && (
+                          <div className="mt-4">
+                            <p className="text-xs font-medium mb-2">Cross-Validation Scores</p>
+                            <div className="h-20 flex items-end gap-1">
+                              {model.cv_scores.map((score: number, i: number) => {
+                                const maxScore = Math.max(...model.cv_scores, 0.001);
+                                return (
+                                  <div 
+                                    key={i} 
+                                    className="flex-1 bg-primary/30 rounded-t flex items-end justify-center"
+                                    style={{ height: `${(score / maxScore) * 100}%` }}
+                                    title={`Fold ${i+1}: ${score.toFixed(3)}`}
+                                  >
+                                    <span className="text-[8px] text-muted-foreground">{score.toFixed(2)}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              )}
+
+              {/* Metrics Comparison Chart */}
+              {trainedModel?.all_models && Array.isArray(trainedModel.all_models) && trainedModel.all_models.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Performance Comparison</CardTitle>
+                    <CardDescription>Compare all models across different metrics</CardDescription>
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm">Type</span>
-                        <Badge>{trainedModel?.pipeline_config?.model || "Random Forest"}</Badge>
+                      {/* Primary Metric Comparison */}
+                      <div>
+                        <p className="text-sm font-medium mb-2">Primary Metric Comparison</p>
+                        <div className="h-48 flex items-end gap-2">
+                          {trainedModel.all_models.map((model: any, idx: number) => {
+                            const primaryMetric = model.primary_metric || (model.metrics && Object.keys(model.metrics).length > 0 ? model.metrics[Object.keys(model.metrics)[0]] : 0) || 0;
+                            const allMetrics = trainedModel.all_models.map((m: any) => m.primary_metric || (m.metrics && Object.keys(m.metrics).length > 0 ? m.metrics[Object.keys(m.metrics)[0]] : 0) || 0);
+                            const maxMetric = Math.max(...allMetrics, 0.001); // Avoid division by zero
+                            return (
+                              <div key={idx} className="flex-1 flex flex-col items-center">
+                                <div 
+                                  className={`w-full rounded-t flex items-end justify-center ${idx === 0 ? 'bg-green-500' : 'bg-primary/50'}`}
+                                  style={{ height: `${(primaryMetric / maxMetric) * 100}%` }}
+                                  title={`${model.model_name}: ${primaryMetric.toFixed(4)}`}
+                                >
+                                  <span className="text-[10px] text-white font-medium p-1">{primaryMetric.toFixed(3)}</span>
+                                </div>
+                                <p className="text-xs mt-2 text-center capitalize">{model.model_name?.replace('_', ' ')}</p>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm">Preprocessing</span>
-                        <span className="font-medium text-xs">{trainedModel?.pipeline_config?.preprocessing?.join(", ") || "Standard"}</span>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
 
-                <Card className="bg-primary text-primary-foreground">
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm font-medium uppercase tracking-wider opacity-80">Next Steps</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="flex items-start space-x-3">
-                      <Zap className="w-5 h-5 mt-0.5 shrink-0" />
-                      <p className="text-sm">Expose as REST API endpoint for real-time inference.</p>
+                      {/* CV Mean Comparison */}
+                      <div>
+                        <p className="text-sm font-medium mb-2">Cross-Validation Mean</p>
+                        <div className="h-32 flex items-end gap-2">
+                          {trainedModel.all_models.map((model: any, idx: number) => {
+                            const cvMean = model.cv_mean || 0;
+                            const allCvMeans = trainedModel.all_models.map((m: any) => m.cv_mean || 0);
+                            const maxCv = Math.max(...allCvMeans, 0.001); // Avoid division by zero
+                            return (
+                              <div key={idx} className="flex-1 flex flex-col items-center">
+                                <div 
+                                  className={`w-full rounded-t ${idx === 0 ? 'bg-blue-500' : 'bg-blue-300'}`}
+                                  style={{ height: `${(cvMean / maxCv) * 100}%` }}
+                                  title={`${model.model_name}: ${cvMean.toFixed(4)}`}
+                                />
+                                <p className="text-[10px] mt-1">{cvMean.toFixed(3)}</p>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
                     </div>
-                    <Button variant="secondary" className="w-full" onClick={() => setStep(1)}>
-                      Train Another
-                    </Button>
                   </CardContent>
                 </Card>
-              </div>
+              )}
+
+              {/* Download Buttons */}
+              {trainedModel?.run_id && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Download Artifacts</CardTitle>
+                    <CardDescription>Get your trained model, notebook, and documentation</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <Button 
+                        className="w-full" 
+                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/notebook`, '_blank')}
+                      >
+                        📓 Notebook
+                      </Button>
+                      <Button 
+                        variant="outline" 
+                        className="w-full"
+                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/model`, '_blank')}
+                      >
+                        💾 Model (.pkl)
+                      </Button>
+                      <Button 
+                        variant="outline" 
+                        className="w-full"
+                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/readme`, '_blank')}
+                      >
+                        📄 README
+                      </Button>
+                      <Button 
+                        variant="secondary" 
+                        className="w-full"
+                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/all`, '_blank')}
+                      >
+                        📦 All (ZIP)
+                      </Button>
+                    </div>
+                  </CardContent>
+                  <CardFooter>
+                    <Button variant="ghost" className="w-full" onClick={() => setStep(1)}>Train Another Model</Button>
+                  </CardFooter>
+                </Card>
+              )}
             </div>
           </motion.div>
         )}

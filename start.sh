@@ -34,10 +34,20 @@ echo ""
 echo "${BLUE}📦 Starting Backend...${NC}"
 cd backend
 
-# Check if Python dependencies are installed
-if ! python3 -c "import uvicorn" 2>/dev/null; then
-    echo "${YELLOW}⚠️  Installing Python dependencies...${NC}"
-    pip3 install -r ../requirements.txt 2>&1 | tail -5
+# Use a local virtualenv to avoid macOS PEP-668 (externally-managed env) issues
+if [ ! -d ".venv" ]; then
+    echo "${YELLOW}⚠️  Creating Python virtualenv (backend/.venv)...${NC}"
+    python3 -m venv .venv
+fi
+
+# Activate venv
+source .venv/bin/activate
+
+# Check/install Python dependencies inside venv
+if ! python -c "import uvicorn" 2>/dev/null; then
+    echo "${YELLOW}⚠️  Installing Python dependencies into venv...${NC}"
+    python -m pip install --upgrade pip setuptools wheel 2>&1 | tail -5
+    python -m pip install -r ../requirements.txt 2>&1 | tail -10
 fi
 
 # Check if main.py exists
@@ -46,7 +56,7 @@ if [ ! -f "main.py" ]; then
     exit 1
 fi
 
-python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload > ../backend.log 2>&1 &
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload > ../backend.log 2>&1 &
 BACKEND_PID=$!
 cd ..
 

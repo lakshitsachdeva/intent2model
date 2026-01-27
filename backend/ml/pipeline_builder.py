@@ -98,7 +98,10 @@ def _get_classification_model(model_name: str):
     models = {
         "logistic_regression": LogisticRegression(max_iter=1000, random_state=42),
         "random_forest": RandomForestClassifier(n_estimators=100, random_state=42),
-        "xgboost": None  # Will be handled separately if available
+        "xgboost": None,  # Will be handled separately if available
+        "svm": None,  # Will be handled separately
+        "naive_bayes": None,  # Will be handled separately
+        "gradient_boosting": None  # Will be handled separately
     }
     
     if model_name == "xgboost":
@@ -107,6 +110,27 @@ def _get_classification_model(model_name: str):
             return XGBClassifier(random_state=42, eval_metric="logloss")
         except ImportError:
             raise ImportError("XGBoost not installed. Install with: pip install xgboost")
+    
+    if model_name == "svm":
+        try:
+            from sklearn.svm import SVC
+            return SVC(random_state=42, probability=True)
+        except ImportError:
+            raise ImportError("SVM requires sklearn")
+    
+    if model_name == "naive_bayes":
+        try:
+            from sklearn.naive_bayes import GaussianNB
+            return GaussianNB()
+        except ImportError:
+            raise ImportError("Naive Bayes requires sklearn")
+    
+    if model_name == "gradient_boosting":
+        try:
+            from sklearn.ensemble import GradientBoostingClassifier
+            return GradientBoostingClassifier(random_state=42)
+        except ImportError:
+            raise ImportError("Gradient Boosting requires sklearn")
     
     if model_name not in models:
         raise ValueError(f"Unknown classification model: {model_name}. Available: {list(models.keys())}")
@@ -119,7 +143,11 @@ def _get_regression_model(model_name: str):
     models = {
         "linear_regression": LinearRegression(),
         "random_forest": RandomForestRegressor(n_estimators=100, random_state=42),
-        "xgboost": None  # Will be handled separately if available
+        "xgboost": None,  # Will be handled separately if available
+        "svm": None,  # Will be handled separately
+        "gradient_boosting": None,  # Will be handled separately
+        "ridge": None,  # Will be handled separately
+        "lasso": None  # Will be handled separately
     }
     
     if model_name == "xgboost":
@@ -128,6 +156,34 @@ def _get_regression_model(model_name: str):
             return XGBRegressor(random_state=42)
         except ImportError:
             raise ImportError("XGBoost not installed. Install with: pip install xgboost")
+    
+    if model_name == "svm":
+        try:
+            from sklearn.svm import SVR
+            return SVR()
+        except ImportError:
+            raise ImportError("SVM requires sklearn")
+    
+    if model_name == "gradient_boosting":
+        try:
+            from sklearn.ensemble import GradientBoostingRegressor
+            return GradientBoostingRegressor(random_state=42)
+        except ImportError:
+            raise ImportError("Gradient Boosting requires sklearn")
+    
+    if model_name == "ridge":
+        try:
+            from sklearn.linear_model import Ridge
+            return Ridge(random_state=42)
+        except ImportError:
+            raise ImportError("Ridge requires sklearn")
+    
+    if model_name == "lasso":
+        try:
+            from sklearn.linear_model import Lasso
+            return Lasso(random_state=42)
+        except ImportError:
+            raise ImportError("Lasso requires sklearn")
     
     if model_name not in models:
         raise ValueError(f"Unknown regression model: {model_name}. Available: {list(models.keys())}")
