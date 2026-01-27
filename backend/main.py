@@ -701,6 +701,9 @@ async def train_model(request: TrainRequest):
         
         # Store trained model for prediction and artifact generation
         # NOTE: compare_models returns JSON-safe all_models, but keeps the real fitted pipeline in train_result["best_model"].
+        # Generate preprocessing recommendations
+        preprocessing_recommendations = _preprocessing_recommendations(profile, df)
+        
         trained_models_cache[run_id] = {
             "model": train_result["best_model"],
             "target": request.target,
@@ -726,7 +729,7 @@ async def train_model(request: TrainRequest):
             "metric": metric,
             "feature_columns": trained_models_cache[run_id]["feature_columns"],
             "trace": trace,
-            "preprocessing_recommendations": _preprocessing_recommendations(profile, df),
+            "preprocessing_recommendations": preprocessing_recommendations,
             "metrics": train_result["metrics"],
             "cv_mean": train_result.get("cv_mean"),
             "cv_std": train_result.get("cv_std"),

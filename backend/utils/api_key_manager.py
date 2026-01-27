@@ -15,16 +15,22 @@ def set_custom_api_key(key: str, provider: str = "gemini"):
 
 def get_api_key(provider: str = "gemini") -> Optional[str]:
     """Get API key - custom first, then environment variable."""
-    # Check custom keys first
-    if provider in _custom_api_keys:
+    # Check custom keys first (user-provided)
+    if provider in _custom_api_keys and _custom_api_keys[provider]:
         return _custom_api_keys[provider]
     
-    # Fall back to environment variables
+    # Fall back to environment variables (default)
     if provider == "gemini":
-        return os.getenv("GEMINI_API_KEY", "")
+        key = os.getenv("GEMINI_API_KEY", "")
+        if key:
+            return key
     elif provider == "openai":
-        return os.getenv("OPENAI_API_KEY", "")
+        key = os.getenv("OPENAI_API_KEY", "")
+        if key:
+            return key
     elif provider == "groq":
-        return os.getenv("GROQ_API_KEY", "")
+        key = os.getenv("GROQ_API_KEY", "")
+        if key:
+            return key
     
     return None
