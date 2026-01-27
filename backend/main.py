@@ -153,14 +153,21 @@ LLM_AVAILABLE = False
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-if GEMINI_API_KEY:
+# Try to get API key from api_key_manager (which checks custom keys first, then env)
+from utils.api_key_manager import get_api_key
+api_key = get_api_key(provider="gemini") or GEMINI_API_KEY
+
+if api_key:
     try:
-        llm_test = LLMInterface(provider=LLM_PROVIDER, api_key=GEMINI_API_KEY)
+        llm_test = LLMInterface(provider=LLM_PROVIDER, api_key=api_key)
         # Quick test call (with timeout protection)
         test_response = llm_test.generate("Say 'OK'", "You are a test assistant.")
         if test_response and len(test_response.strip()) > 0:
             LLM_AVAILABLE = True
+            model_info = get_current_model_info()
             print(f"✅ LLM ({LLM_PROVIDER}) is available and working")
+            if model_info.get("model"):
+                print(f"   Using model: {model_info.get('model')} - {model_info.get('reason', '')}")
         else:
             print(f"⚠️  LLM ({LLM_PROVIDER}) responded but with empty content")
     except Exception as e:
