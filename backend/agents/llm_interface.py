@@ -127,13 +127,22 @@ class LLMInterface:
                     
                 except Exception as e:
                     error_str = str(e).lower()
+                    error_full = str(e)
                     
                     # Check if it's a rate limit error
                     is_rate_limit = (
-                        '429' in str(e) or 
+                        '429' in error_full or 
                         'quota' in error_str or 
                         'rate limit' in error_str or
-                        'resourceexhausted' in error_str
+                        'resourceexhausted' in error_str or
+                        'exceeded' in error_str
+                    )
+                    
+                    # Check if model doesn't exist
+                    is_model_not_found = (
+                        'not found' in error_str or
+                        '404' in error_full or
+                        'not supported' in error_str
                     )
                     
                     if is_rate_limit:
@@ -141,8 +150,14 @@ class LLMInterface:
                         print(f"⚠️  {model_name} hit rate limit, trying next model...")
                         last_error = f"Rate limit on {model_name}"
                         continue
+                    elif is_model_not_found:
+                        # Model doesn't exist, skip it
+                        print(f"⚠️  {model_name} not available, trying next model...")
+                        last_error = f"Model {model_name} not found"
+                        continue
                     else:
-                        # Other error (model not found, etc.) - try next
+                        # Other error - log but try next
+                        print(f"⚠️  {model_name} error: {str(e)[:100]}, trying next model...")
                         last_error = f"{model_name}: {str(e)[:100]}"
                         continue
             

@@ -32,8 +32,15 @@ pkill -f "uvicorn main:app" 2>/dev/null || true
 pkill -f "next dev" 2>/dev/null || true
 sleep 2
 
-# Set API key
-export GEMINI_API_KEY=AIzaSyAuxa5b792g6AaiD_ZURSrvGvLh-M-3bUw
+# Load API key from .env file if it exists, otherwise use default
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+    echo "${GREEN}✅ Loaded API key from .env file${NC}"
+else
+    # Fallback to default (user can change in .env file)
+    export GEMINI_API_KEY=AIzaSyAuxa5b792g6AaiD_ZURSrvGvLh-M-3bUw
+    echo "${YELLOW}⚠️  Using default API key. Create .env file to customize.${NC}"
+fi
 
 # Start Backend
 echo ""

@@ -60,10 +60,11 @@ export default function Intent2ModelWizard() {
   };
 
   const handleSetApiKey = async () => {
-    if (!apiKey.trim()) {
-      setApiKeyStatus({ status: "error", message: "Please enter an API key" });
-      return;
-    }
+    // Allow empty to use default
+    // if (!apiKey.trim()) {
+    //   setApiKeyStatus({ status: "error", message: "Please enter an API key" });
+    //   return;
+    // }
 
     setIsSettingApiKey(true);
     setApiKeyStatus(null);
@@ -916,11 +917,11 @@ export default function Intent2ModelWizard() {
                   )}
 
                   <div className="space-y-2">
-                    <Label htmlFor="api-key">Gemini API Key</Label>
+                    <Label htmlFor="api-key">Gemini API Key (leave empty to use default)</Label>
                     <Input
                       id="api-key"
                       type="password"
-                      placeholder="Enter your API key..."
+                      placeholder="Enter your API key or leave empty for default..."
                       value={apiKey}
                       onChange={(e) => setApiKey(e.target.value)}
                       onKeyDown={(e) => {
@@ -928,7 +929,8 @@ export default function Intent2ModelWizard() {
                       }}
                     />
                     <p className="text-xs text-muted-foreground">
-                      Your API key is only stored in memory and never saved to disk.
+                      Your API key is only stored in memory and never saved to disk. 
+                      Leave empty to use the default key from .env file.
                     </p>
                   </div>
 
@@ -937,10 +939,12 @@ export default function Intent2ModelWizard() {
                       className={`p-3 rounded-md text-sm ${
                         apiKeyStatus.status === "success"
                           ? "bg-green-500/10 text-green-700 dark:text-green-400"
+                          : apiKeyStatus.status === "warning"
+                          ? "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400"
                           : "bg-red-500/10 text-red-700 dark:text-red-400"
                       }`}
                     >
-                      {apiKeyStatus.status === "success" ? "✅ " : "❌ "}
+                      {apiKeyStatus.status === "success" ? "✅ " : apiKeyStatus.status === "warning" ? "⚠️ " : "❌ "}
                       {apiKeyStatus.message}
                       {apiKeyStatus.is_rate_limit && (
                         <div className="mt-2 text-xs">
@@ -951,6 +955,11 @@ export default function Intent2ModelWizard() {
                         <div className="mt-2 text-xs">
                           Using model: <strong>{apiKeyStatus.current_model}</strong>
                           {apiKeyStatus.model_reason && ` (${apiKeyStatus.model_reason})`}
+                        </div>
+                      )}
+                      {apiKeyStatus.using_default && (
+                        <div className="mt-2 text-xs">
+                          ℹ️ Using default API key from environment
                         </div>
                       )}
                     </div>
@@ -969,9 +978,9 @@ export default function Intent2ModelWizard() {
                   </Button>
                   <Button
                     onClick={handleSetApiKey}
-                    disabled={isSettingApiKey || !apiKey.trim()}
+                    disabled={isSettingApiKey}
                   >
-                    {isSettingApiKey ? "Setting..." : "Set API Key"}
+                    {isSettingApiKey ? "Setting..." : apiKey.trim() ? "Set Custom Key" : "Use Default Key"}
                   </Button>
                 </CardFooter>
               </Card>

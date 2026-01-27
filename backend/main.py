@@ -32,9 +32,12 @@ import os
 from fastapi.responses import FileResponse, Response
 import json
 import re
-import os
 import tempfile
 import base64
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (if it exists)
+load_dotenv()
 
 
 app = FastAPI(title="Intent2Model API", version="1.0.0")
@@ -228,11 +231,28 @@ async def set_api_key(request: ApiKeyRequest):
     """
     Allow user to set a custom API key.
     This key will be used for subsequent LLM calls.
+    If empty, will use default from environment.
     """
     global LLM_AVAILABLE, current_llm_model, current_llm_reason
     
-    # Store the custom API key
-    set_custom_api_key(request.api_key, provider=request.provider)
+    # If empty, clear custom key and use default
+    if not request.api_key or not request.api_key.strip():
+        from utils.api_key_manager import _custom_api_keys
+        if request.provider in _custom_api_keys:
+            del _custom_api_keys[request.provider]
+        
+        # Test with default key
+        default_key = get_api_key(provider=request.provider)
+        if default_key:
+            request.api_key = default_key
+        else:
+            return {
+                "status": "error",
+                "message": "No API key provided and no default key found in environment"
+            }
+    else:
+        # Store the custom API key
+        set_custom_api_key(request.api_key, provider=request.provider)
     
     # Test the API key
     try:
@@ -252,7 +272,8 @@ async def set_api_key(request: ApiKeyRequest):
                 "message": "API key validated successfully",
                 "llm_available": True,
                 "current_model": current_llm_model,
-                "model_reason": current_llm_reason
+                "model_reason": current_llm_reason,
+                "using_default": request.api_key == get_api_key(provider=request.provider)
             }
         else:
             return {
@@ -262,13 +283,27 @@ async def set_api_key(request: ApiKeyRequest):
     except Exception as e:
         error_msg = str(e)
         # Check if it's a rate limit
-        is_rate_limit = '429' in error_msg or 'quota' in error_msg.lower() or 'rate limit' in error_msg.lower()
+        is_rate_limit = (
+            '429' in error_msg or 
+            'quota' in error_msg.lower() or 
+            'rate limit' in error_msg.lower() or
+            'resourceexhausted' in error_msg.lower()
+        )
+        
+        # If rate limit, the system will auto-fallback, so this is actually OK
+        if is_rate_limit:
+            return {
+                "status": "warning",
+                "message": f"Rate limit detected: {error_msg[:150]}. System will automatically try alternative models.",
+                "is_rate_limit": True,
+                "suggestion": "The system will automatically switch to alternative models when rate limits are hit."
+            }
         
         return {
             "status": "error",
             "message": f"API key validation failed: {error_msg[:200]}",
-            "is_rate_limit": is_rate_limit,
-            "suggestion": "Try a different API key or wait for quota reset" if is_rate_limit else "Check your API key"
+            "is_rate_limit": False,
+            "suggestion": "Please check your API key is correct"
         }
 
 
