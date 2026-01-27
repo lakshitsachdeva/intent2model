@@ -74,14 +74,24 @@ class LLMInterface:
             import google.generativeai as genai
             genai.configure(api_key=self.api_key)
             
-            # Try different model names in order
-            model_names = ['gemini-pro', 'models/gemini-pro', 'gemini-1.5-pro', 'models/gemini-1.5-pro']
+            # Try different model names in order (updated for current Gemini API)
+            model_names = [
+                'gemini-2.5-flash',      # Latest fast model
+                'gemini-flash-latest',   # Latest flash (fallback)
+                'gemini-2.5-pro',        # Latest pro model
+                'gemini-pro-latest',     # Latest pro (fallback)
+                'gemini-1.5-flash',      # Older but stable
+                'gemini-1.5-pro',        # Older pro
+            ]
             model = None
             last_error = None
             
             for model_name in model_names:
                 try:
                     model = genai.GenerativeModel(model_name)
+                    # Quick test to verify it works
+                    test_response = model.generate_content("test")
+                    print(f"✅ Using Gemini model: {model_name}")
                     break
                 except Exception as e:
                     last_error = e

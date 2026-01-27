@@ -37,9 +37,10 @@ def plan_pipeline(
         response = llm.generate(prompt, system_prompt)
         # Try to extract JSON from response
         config_dict = _extract_json_from_response(response)
+        print("✅ LLM planning succeeded")
     except Exception as e:
         # Fallback to rule-based planning if LLM fails
-        print(f"LLM planning failed: {e}. Using rule-based fallback.")
+        print(f"⚠️  LLM planning failed: {e}. Using rule-based fallback.")
         config_dict = _rule_based_plan(profile, user_intent)
     
     # Validate and apply sanity checks

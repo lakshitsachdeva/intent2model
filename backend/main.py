@@ -27,7 +27,8 @@ from agents.llm_interface import LLMInterface
 from agents.error_analyzer import analyze_training_error
 from agents.recovery_agent import AutonomousRecoveryAgent
 from agents.intent_detector import IntentDetectionAgent
-from utils.artifact_generator import generate_notebook, generate_readme, save_model_pickle, generate_chart_image
+from utils.artifact_generator import generate_notebook, generate_readme, save_model_pickle, generate_chart_image, generate_model_report
+import os
 from fastapi.responses import FileResponse, Response
 import json
 import re
@@ -62,6 +63,79 @@ def _json_safe(obj):
         return [_json_safe(v) for v in obj]
     return obj
 
+
+def _model_code_for_notebook(task: str, model_name: str) -> str:
+    """Return a stable boilerplate code snippet string used inside the notebook for the chosen model."""
+    model_name = (model_name or "").strip().lower()
+    task = (task or "").strip().lower()
+    if task == "classification":
+        mapping = {
+            "logistic_regression": "LogisticRegression(max_iter=2000, random_state=42)",
+            "random_forest": "RandomForestClassifier(n_estimators=300, random_state=42)",
+            "gradient_boosting": "GradientBoostingClassifier(random_state=42)",
+            "naive_bayes": "GaussianNB()",
+            "svm": "SVC(random_state=42, probability=True)",
+            "xgboost": "XGBClassifier(random_state=42, eval_metric='logloss')",
+        }
+        return mapping.get(model_name, "RandomForestClassifier(n_estimators=300, random_state=42)")
+    else:
+        mapping = {
+            "linear_regression": "LinearRegression()",
+            "random_forest": "RandomForestRegressor(n_estimators=300, random_state=42)",
+            "gradient_boosting": "GradientBoostingRegressor(random_state=42)",
+            "ridge": "Ridge(alpha=1.0, random_state=42)",
+            "lasso": "Lasso(alpha=0.001, random_state=42)",
+            "svm": "SVR()",
+            "xgboost": "XGBRegressor(random_state=42)",
+        }
+        return mapping.get(model_name, "RandomForestRegressor(n_estimators=300, random_state=42)")
+
+
+def _preprocessing_recommendations(profile: Dict[str, Any], df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Rule-based, dataset-oriented preprocessing suggestions (LLM can refine later).
+    """
+    recs: List[Dict[str, Any]] = []
+    missing = profile.get("missing_percent", {}) or {}
+    high_missing = [c for c, p in missing.items() if (p or 0) > 10]
+    if high_missing:
+        recs.append({"type": "imputer", "why": f"Missing values >10% in: {', '.join(high_missing[:8])}", "suggestion": "Add median imputer for numeric and most_frequent for categorical."})
+
+    # High-cardinality categoricals
+    cat_cols = profile.get("categorical_cols", []) or []
+    high_card = []
+    for c in cat_cols[:30]:
+        try:
+            nunq = int(df[c].nunique(dropna=True))
+            if nunq > 30:
+                high_card.append((c, nunq))
+        except Exception:
+            continue
+    if high_card:
+        recs.append({"type": "encoding", "why": f"High-cardinality categoricals: {', '.join([f'{c}({n})' for c,n in high_card[:6]])}", "suggestion": "Consider target encoding / hashing trick instead of one-hot."})
+
+    # Skew / outliers for numeric
+    num_cols = profile.get("numeric_cols", []) or []
+    skewed = []
+    for c in num_cols[:30]:
+        try:
+            s = pd.to_numeric(df[c], errors="coerce").dropna()
+            if len(s) < 20:
+                continue
+            sk = float(s.skew())
+            if abs(sk) > 1.0:
+                skewed.append((c, sk))
+        except Exception:
+            continue
+    if skewed:
+        recs.append({"type": "transform", "why": f"Skewed numeric columns: {', '.join([f'{c}({sk:.2f})' for c,sk in skewed[:6]])}", "suggestion": "Consider log/yeo-johnson transform; robust scaling."})
+
+    # Scaling
+    if num_cols:
+        recs.append({"type": "scaling", "why": "Numeric features detected.", "suggestion": "StandardScaler for linear/SVM; robust scaler if heavy outliers."})
+
+    return {"recommendations": recs}
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -70,6 +144,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Check LLM availability on startup
+LLM_AVAILABLE = False
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+if GEMINI_API_KEY:
+    try:
+        llm_test = LLMInterface(provider=LLM_PROVIDER, api_key=GEMINI_API_KEY)
+        # Quick test call (with timeout protection)
+        test_response = llm_test.generate("Say 'OK'", "You are a test assistant.")
+        if test_response and len(test_response.strip()) > 0:
+            LLM_AVAILABLE = True
+            print(f"✅ LLM ({LLM_PROVIDER}) is available and working")
+        else:
+            print(f"⚠️  LLM ({LLM_PROVIDER}) responded but with empty content")
+    except Exception as e:
+        print(f"⚠️  LLM ({LLM_PROVIDER}) is configured but not available: {str(e)[:150]}")
+        print("   System will use rule-based fallbacks (still fully functional)")
+        print("   Note: LLM features will be disabled, but all core ML functionality works")
+else:
+    print("⚠️  No GEMINI_API_KEY found. System will use rule-based fallbacks (still fully functional)")
+    print("   To enable LLM features, set GEMINI_API_KEY environment variable")
 
 # In-memory storage for uploaded datasets (in production, use proper storage)
 dataset_cache = {}
@@ -86,7 +183,23 @@ class TrainRequest(BaseModel):
 @app.get("/")
 async def root():
     """Health check endpoint."""
-    return {"message": "Intent2Model API", "status": "running"}
+    return {
+        "message": "Intent2Model API",
+        "version": "1.0.0",
+        "status": "running",
+        "llm_available": LLM_AVAILABLE,
+        "llm_provider": LLM_PROVIDER if LLM_AVAILABLE else "rule-based-fallback"
+    }
+
+@app.get("/health")
+async def health():
+    """Detailed health check with LLM status."""
+    return {
+        "status": "healthy",
+        "llm_available": LLM_AVAILABLE,
+        "llm_provider": LLM_PROVIDER if LLM_AVAILABLE else "rule-based-fallback",
+        "message": "✅ LLM enabled - using AI-powered planning" if LLM_AVAILABLE else "⚠️  Using rule-based fallbacks (fully functional, but less intelligent)"
+    }
 
 
 @app.post("/upload")
@@ -318,8 +431,10 @@ async def train_model(request: TrainRequest):
     if task == "regression" and metric not in regression_metrics:
         metric = "r2"  # Default fallback
     
+    trace = []
     try:
         # Get dataset profile for planning
+        trace.append("Profiled dataset and inferred column types.")
         profile = profile_dataset(df)
         
         # Use LLM planner to generate optimal pipeline config
@@ -349,6 +464,7 @@ async def train_model(request: TrainRequest):
         
         try:
             pipeline_config = plan_pipeline(profile, user_intent, llm_provider="gemini")
+            trace.append(f"LLM planned pipeline: preprocessing={pipeline_config.preprocessing}, model_candidates={pipeline_config.model_candidates}")
             # Use LLM-generated config
             config = {
                 "task": pipeline_config.task,
@@ -361,7 +477,8 @@ async def train_model(request: TrainRequest):
                 model_candidates = list(set(model_candidates + pipeline_config.model_candidates))
         except Exception as e:
             # Fallback to default config if LLM fails
-            print(f"LLM planning failed: {e}. Using default config with model comparison.")
+            print(f"⚠️  LLM planning failed: {e}. Using rule-based fallback.")
+            trace.append(f"⚠️  LLM planning unavailable ({str(e)[:50]}); used rule-based defaults for preprocessing/model candidates.")
             config = None
         
         use_model_comparison = True  # Always compare multiple models
@@ -380,6 +497,7 @@ async def train_model(request: TrainRequest):
         
         try:
             if use_model_comparison:
+                trace.append(f"Training & comparing models: {model_candidates}")
                 # Try multiple models and get ALL results
                 train_result = auto_fix_training_error(
                     compare_models,
@@ -430,6 +548,7 @@ async def train_model(request: TrainRequest):
                     all_models_with_explanations.append(model_result)
                 
                 train_result["all_models"] = all_models_with_explanations
+                trace.append("Generated per-model explanations (LLM if available, otherwise rule-based).")
             else:
                 # Single model training with auto-fix
                 if task == "classification":
@@ -450,6 +569,7 @@ async def train_model(request: TrainRequest):
         
         # Evaluate dataset
         eval_result = evaluate_dataset(df, request.target, task)
+        trace.append("Evaluated dataset for warnings/leakage/imbalance.")
         
         # Create run ID and log
         run_id = create_run_id()
@@ -483,14 +603,25 @@ async def train_model(request: TrainRequest):
             "feature_columns": list(df.drop(columns=[request.target]).columns),
             "label_encoder": train_result.get("label_encoder") if task == "classification" else None,
             "config": config,
+            "model_name": train_result.get("model_name", config.get("model") if config else None),
             "df": df.copy(),  # Store dataset for artifact generation
             "metrics": train_result["metrics"],
             "feature_importance": train_result.get("feature_importance"),
-            "all_models": train_result.get("all_models", [])  # Store JSON-safe summaries
+            "all_models": train_result.get("all_models", []),  # Store JSON-safe summaries
+            "trace": trace,  # Store training trace for report
+            "preprocessing_recommendations": preprocessing_recommendations  # Store preprocessing recs for report
         }
+        trace.append("Cached best fitted pipeline server-side for prediction/downloads.")
         
         response_payload = {
             "run_id": run_id,
+            "dataset_id": request.dataset_id,
+            "target": request.target,
+            "task": task,
+            "metric": metric,
+            "feature_columns": trained_models_cache[run_id]["feature_columns"],
+            "trace": trace,
+            "preprocessing_recommendations": _preprocessing_recommendations(profile, df),
             "metrics": train_result["metrics"],
             "cv_mean": train_result.get("cv_mean"),
             "cv_std": train_result.get("cv_std"),
@@ -852,6 +983,65 @@ async def predict(request: PredictRequest):
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
 
+@app.get("/dataset/{dataset_id}/summary")
+async def dataset_summary(dataset_id: str):
+    """
+    Dataset summary for visualization: missing %, numeric hist bins, correlation matrix (numeric only).
+    """
+    if dataset_id not in dataset_cache:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    df = dataset_cache[dataset_id]
+    profile = profile_dataset(df)
+
+    numeric_cols = profile.get("numeric_cols", [])
+    categorical_cols = profile.get("categorical_cols", [])
+
+    # Missing percent already computed in profile
+    missing_percent = profile.get("missing_percent", {})
+
+    # Numeric histograms (lightweight bins)
+    hists = {}
+    try:
+        import numpy as np
+        for col in numeric_cols[:20]:  # cap for payload size
+            series = pd.to_numeric(df[col], errors="coerce").dropna()
+            if series.empty:
+                continue
+            counts, edges = np.histogram(series.values, bins=12)
+            hists[col] = {
+                "bins": [float(x) for x in edges.tolist()],
+                "counts": [int(x) for x in counts.tolist()],
+            }
+    except Exception:
+        hists = {}
+
+    # Correlation matrix (numeric only)
+    corr = None
+    try:
+        if len(numeric_cols) >= 2:
+            corr_df = df[numeric_cols[:20]].apply(pd.to_numeric, errors="coerce").corr()
+            corr = {
+                "cols": list(corr_df.columns),
+                "values": corr_df.fillna(0).values.tolist(),
+            }
+    except Exception:
+        corr = None
+
+    return _json_safe(
+        {
+            "dataset_id": dataset_id,
+            "n_rows": int(profile.get("n_rows", len(df))),
+            "n_cols": int(profile.get("n_cols", len(df.columns))),
+            "numeric_cols": numeric_cols,
+            "categorical_cols": categorical_cols,
+            "missing_percent": missing_percent,
+            "hists": hists,
+            "correlation": corr,
+        }
+    )
+
+
 @app.get("/download/{run_id}/notebook")
 async def download_notebook(run_id: str):
     """Download Jupyter notebook for a trained model."""
@@ -863,11 +1053,17 @@ async def download_notebook(run_id: str):
     if df is None:
         raise HTTPException(status_code=404, detail="Dataset not available for this model")
     
+    model_name = model_info.get("model_name") or (model_info.get("config", {}) or {}).get("model", "unknown")
     notebook_json = generate_notebook(
         df=df,
         target=model_info["target"],
         task=model_info["task"],
-        config=model_info.get("config", {}),
+        config={
+            **(model_info.get("config", {}) or {}),
+            "model": model_name,
+            "feature_columns": model_info.get("feature_columns", []),
+            "model_code": _model_code_for_notebook(model_info["task"], model_name),
+        },
         metrics=model_info.get("metrics", {}),
         feature_importance=model_info.get("feature_importance"),
         model=model_info["model"]
@@ -931,6 +1127,53 @@ async def download_readme(run_id: str):
         temp_path,
         media_type='text/markdown',
         filename=f'README_{run_id[:8]}.md',
+        background=lambda: os.unlink(temp_path)
+    )
+
+
+@app.get("/download/{run_id}/report")
+async def download_report(run_id: str):
+    """Download detailed model analysis report with all explanations."""
+    if run_id not in trained_models_cache:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    model_info = trained_models_cache[run_id]
+    
+    # Get all models data
+    all_models = model_info.get("all_models", [])
+    df = model_info.get("df")
+    
+    # Build dataset info
+    dataset_info = {}
+    if df is not None:
+        dataset_info = {
+            "n_rows": len(df),
+            "n_cols": len(df.columns),
+            "numeric_cols": df.select_dtypes(include=['number']).columns.tolist(),
+            "categorical_cols": df.select_dtypes(include=['object', 'category']).columns.tolist()
+        }
+    
+    # Get trace and preprocessing recommendations from the training response
+    trace = model_info.get("trace", [])
+    preprocessing_recommendations = model_info.get("preprocessing_recommendations", [])
+    
+    report_content = generate_model_report(
+        all_models=all_models,
+        target=model_info["target"],
+        task=model_info["task"],
+        dataset_info=dataset_info,
+        trace=trace,
+        preprocessing_recommendations=preprocessing_recommendations
+    )
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+        f.write(report_content)
+        temp_path = f.name
+    
+    return FileResponse(
+        temp_path,
+        media_type='text/markdown',
+        filename=f'Model_Report_{run_id[:8]}.md',
         background=lambda: os.unlink(temp_path)
     )
 

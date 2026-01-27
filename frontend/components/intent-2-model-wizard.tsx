@@ -25,6 +25,7 @@ import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
 
 export default function Intent2ModelWizard() {
   const [step, setStep] = useState(1);
@@ -36,6 +37,11 @@ export default function Intent2ModelWizard() {
   const [availableColumns, setAvailableColumns] = useState<string[]>([]);
   const [trainedModel, setTrainedModel] = useState<any>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [datasetSummary, setDatasetSummary] = useState<any>(null);
+  const [featureColumns, setFeatureColumns] = useState<string[]>([]);
+  const [predictInputs, setPredictInputs] = useState<Record<string, string>>({});
+  const [predictionResult, setPredictionResult] = useState<any>(null);
+  const [isPredicting, setIsPredicting] = useState(false);
 
   const onDrop = async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return;
@@ -59,6 +65,15 @@ export default function Intent2ModelWizard() {
       const numeric = data.profile?.numeric_cols || [];
       const categorical = data.profile?.categorical_cols || [];
       setAvailableColumns([...numeric, ...categorical]);
+      setDatasetSummary(null);
+      // Fetch visualization summary
+      try {
+        const s = await fetch(`http://localhost:8000/dataset/${data.dataset_id}/summary`);
+        const sj = await s.json();
+        setDatasetSummary(sj);
+      } catch (e) {
+        // ignore
+      }
       setStep(2);
     } catch (error: any) {
       console.error('Upload failed:', error);
@@ -123,6 +138,13 @@ export default function Intent2ModelWizard() {
         if (progressInterval) clearInterval(progressInterval);
         setProgress(100);
         setTrainedModel(data);
+        // Dynamic prediction inputs
+        const cols = Array.isArray(data.feature_columns) ? data.feature_columns : [];
+        setFeatureColumns(cols);
+        const init: Record<string, string> = {};
+        cols.forEach((c: string) => (init[c] = ""));
+        setPredictInputs(init);
+        setPredictionResult(null);
         setTimeout(() => {
           setTraining(false);
           setStep(4);
@@ -161,6 +183,32 @@ export default function Intent2ModelWizard() {
         setTraining(false);
         setStep(4);
       }, 1000);
+    }
+  };
+
+  const runPrediction = async () => {
+    if (!trainedModel?.run_id) return;
+    setIsPredicting(true);
+    setPredictionResult(null);
+    try {
+      const features: Record<string, any> = {};
+      for (const col of featureColumns) {
+        const raw = (predictInputs[col] ?? "").trim();
+        // try numeric parse; fall back to string
+        const num = Number(raw);
+        features[col] = raw !== "" && !Number.isNaN(num) ? num : raw;
+      }
+      const resp = await fetch("http://localhost:8000/predict", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: trainedModel.run_id, features }),
+      });
+      const out = await resp.json();
+      setPredictionResult(out);
+    } catch (e: any) {
+      setPredictionResult({ error: e?.message || "Prediction failed" });
+    } finally {
+      setIsPredicting(false);
     }
   };
 
@@ -243,6 +291,66 @@ export default function Intent2ModelWizard() {
                 <CardDescription>What should your machine learning model focus on?</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
+                {datasetSummary && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <Card className="border">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm">Missing Values (%)</CardTitle>
+                        <CardDescription className="text-xs">Quick quality check</CardDescription>
+                      </CardHeader>
+                      <CardContent className="h-56">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart
+                            data={Object.entries(datasetSummary.missing_percent || {}).slice(0, 12).map(([k, v]: any) => ({
+                              name: k,
+                              value: Number(v) || 0,
+                            }))}
+                            margin={{ top: 10, right: 10, left: 0, bottom: 30 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="name" angle={-25} textAnchor="end" height={60} />
+                            <YAxis domain={[0, (max: number) => Math.max(1, max)]} />
+                            <Tooltip />
+                            <Bar dataKey="value" fill="hsl(var(--primary))" />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </CardContent>
+                    </Card>
+
+                    <Card className="border">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm">Distribution (first numeric)</CardTitle>
+                        <CardDescription className="text-xs">Histogram bins</CardDescription>
+                      </CardHeader>
+                      <CardContent className="h-56">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart
+                            data={(() => {
+                              const hists = datasetSummary.hists || {};
+                              const first = Object.keys(hists)[0];
+                              if (!first) return [];
+                              const bins = hists[first].bins || [];
+                              const counts = hists[first].counts || [];
+                              // Use bin centers for labels
+                              return counts.map((c: any, i: number) => ({
+                                bin: `${(((Number(bins[i]) || 0) + (Number(bins[i + 1]) || 0)) / 2).toFixed(2)}`,
+                                count: Number(c) || 0,
+                              }));
+                            })()}
+                            margin={{ top: 10, right: 10, left: 0, bottom: 20 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="bin" hide />
+                            <YAxis domain={[0, (max: number) => Math.max(1, max)]} />
+                            <Tooltip />
+                            <Bar dataKey="count" fill="hsl(var(--primary))" />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
+
                 <div className="flex items-center space-x-4 p-4 rounded-lg bg-muted/50 border">
                   <FileSpreadsheet className="w-8 h-8 text-primary" />
                   <div>
@@ -463,29 +571,23 @@ export default function Intent2ModelWizard() {
                           ))}
                         </div>
 
-                        {/* LLM Explanation */}
+                        {/* LLM Explanation - Truncated for UI */}
                         {model.explanation && (
                           <div className="space-y-2">
                             <h4 className="font-semibold text-sm">Why this model?</h4>
-                            <p className="text-sm text-muted-foreground">
-                              {typeof model.explanation === 'object' && model.explanation.explanation 
-                                ? model.explanation.explanation 
-                                : typeof model.explanation === 'string' 
-                                  ? model.explanation 
-                                  : 'Explanation not available'}
+                            <p className="text-sm text-muted-foreground line-clamp-2">
+                              {(() => {
+                                const fullText = typeof model.explanation === 'object' && model.explanation.explanation 
+                                  ? model.explanation.explanation 
+                                  : typeof model.explanation === 'string' 
+                                    ? model.explanation 
+                                    : 'Explanation not available';
+                                return fullText.length > 120 ? fullText.substring(0, 120) + '...' : fullText;
+                              })()}
                             </p>
-                            {model.explanation && typeof model.explanation === 'object' && model.explanation.strengths && (
-                              <div className="mt-2">
-                                <p className="text-xs font-medium text-green-600 dark:text-green-400">Strengths:</p>
-                                <p className="text-xs text-muted-foreground">{model.explanation.strengths}</p>
-                              </div>
-                            )}
-                            {model.explanation && typeof model.explanation === 'object' && model.explanation.recommendation && (
-                              <div className="mt-2">
-                                <p className="text-xs font-medium text-blue-600 dark:text-blue-400">Recommendation:</p>
-                                <p className="text-xs text-muted-foreground">{model.explanation.recommendation}</p>
-                              </div>
-                            )}
+                            <p className="text-xs text-muted-foreground italic">
+                              View full analysis in the downloadable report
+                            </p>
                           </div>
                         )}
 
@@ -583,7 +685,7 @@ export default function Intent2ModelWizard() {
                     <CardDescription>Get your trained model, notebook, and documentation</CardDescription>
                   </CardHeader>
                   <CardContent>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                       <Button 
                         className="w-full" 
                         onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/notebook`, '_blank')}
@@ -598,6 +700,13 @@ export default function Intent2ModelWizard() {
                         💾 Model (.pkl)
                       </Button>
                       <Button 
+                        variant="default" 
+                        className="w-full bg-blue-600 hover:bg-blue-700"
+                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/report`, '_blank')}
+                      >
+                        📊 Full Report
+                      </Button>
+                      <Button 
                         variant="outline" 
                         className="w-full"
                         onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/readme`, '_blank')}
@@ -606,7 +715,7 @@ export default function Intent2ModelWizard() {
                       </Button>
                       <Button 
                         variant="secondary" 
-                        className="w-full"
+                        className="w-full col-span-2 sm:col-span-1"
                         onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/all`, '_blank')}
                       >
                         📦 All (ZIP)
@@ -616,6 +725,58 @@ export default function Intent2ModelWizard() {
                   <CardFooter>
                     <Button variant="ghost" className="w-full" onClick={() => setStep(1)}>Train Another Model</Button>
                   </CardFooter>
+                </Card>
+              )}
+
+              {/* Predict Panel */}
+              {trainedModel?.run_id && featureColumns.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Make a Prediction</CardTitle>
+                    <CardDescription>Enter feature values (everything except the target) and predict dynamically for this dataset.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {featureColumns.map((col) => (
+                        <div key={col} className="space-y-2">
+                          <Label>{col}</Label>
+                          <Input
+                            value={predictInputs[col] ?? ""}
+                            onChange={(e) => setPredictInputs((prev) => ({ ...prev, [col]: e.target.value }))}
+                            placeholder="Enter value..."
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    <Button onClick={runPrediction} disabled={isPredicting} className="w-full">
+                      {isPredicting ? "Predicting..." : "Predict"}
+                    </Button>
+                    {predictionResult && (
+                      <div className="p-4 rounded-lg border bg-muted/30">
+                        {"error" in predictionResult ? (
+                          <p className="text-sm text-red-500">{predictionResult.error}</p>
+                        ) : (
+                          <div className="space-y-2">
+                            <p className="text-sm font-semibold">Prediction:</p>
+                            <p className="text-lg font-bold">{String(predictionResult.prediction)}</p>
+                            {predictionResult.probabilities && (
+                              <div className="mt-2">
+                                <p className="text-xs text-muted-foreground mb-1">Probabilities</p>
+                                <div className="space-y-1">
+                                  {Object.entries(predictionResult.probabilities).map(([k, v]: any) => (
+                                    <div key={k} className="flex items-center justify-between text-xs">
+                                      <span>{k}</span>
+                                      <span className="font-medium">{(Number(v) * 100).toFixed(1)}%</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </CardContent>
                 </Card>
               )}
             </div>

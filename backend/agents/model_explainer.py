@@ -47,9 +47,11 @@ Explain in clear, non-technical language when possible, but include technical de
     try:
         response = llm.generate(prompt, system_prompt)
         # Parse structured response
-        return _parse_explanation(response, model_name, metrics)
+        result = _parse_explanation(response, model_name, metrics)
+        print(f"✅ LLM explanation generated for {model_name}")
+        return result
     except Exception as e:
-        print(f"LLM explanation failed for {model_name}: {e}")
+        print(f"⚠️  LLM explanation failed for {model_name}: {e}. Using rule-based fallback.")
         return _rule_based_explanation(model_name, metrics, dataset_info, task)
 
 

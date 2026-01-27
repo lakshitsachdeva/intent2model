@@ -3,7 +3,7 @@
 # Intent2Model Startup Script
 # This script starts both backend and frontend services
 
-set +e  # Don't exit on error, we'll handle it manually
+set -e  # Exit on error
 
 echo "🚀 Starting Intent2Model..."
 echo ""
@@ -12,13 +12,19 @@ echo ""
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Check if we're in the right directory
 if [ ! -d "backend" ] || [ ! -d "frontend" ]; then
-    echo "❌ Error: Please run this script from the project root directory"
+    echo "${RED}❌ Error: Please run this script from the project root directory${NC}"
     exit 1
 fi
+
+# Check for required commands
+command -v python3 >/dev/null 2>&1 || { echo "${RED}❌ Error: python3 is required but not installed${NC}"; exit 1; }
+command -v node >/dev/null 2>&1 || { echo "${RED}❌ Error: node is required but not installed${NC}"; exit 1; }
+command -v npm >/dev/null 2>&1 || { echo "${RED}❌ Error: npm is required but not installed${NC}"; exit 1; }
 
 # Kill any existing processes
 echo "🧹 Cleaning up old processes..."
@@ -27,7 +33,7 @@ pkill -f "next dev" 2>/dev/null || true
 sleep 2
 
 # Set API key
-export GEMINI_API_KEY=AIzaSyDc6lDoHJmM1_YEP4XPdl17349eKvg0JAE
+export GEMINI_API_KEY=AIzaSyAuxa5b792g6AaiD_ZURSrvGvLh-M-3bUw
 
 # Start Backend
 echo ""
@@ -46,8 +52,9 @@ source .venv/bin/activate
 # Check/install Python dependencies inside venv
 if ! python -c "import uvicorn" 2>/dev/null; then
     echo "${YELLOW}⚠️  Installing Python dependencies into venv...${NC}"
-    python -m pip install --upgrade pip setuptools wheel 2>&1 | tail -5
-    python -m pip install -r ../requirements.txt 2>&1 | tail -10
+    python -m pip install --upgrade pip setuptools wheel --quiet
+    python -m pip install -r ../requirements.txt --quiet
+    echo "${GREEN}✅ Python dependencies installed${NC}"
 fi
 
 # Check if main.py exists
@@ -91,7 +98,8 @@ cd frontend
 # Check if node_modules exists
 if [ ! -d "node_modules" ]; then
     echo "${YELLOW}⚠️  Installing npm dependencies...${NC}"
-    npm install 2>&1 | tail -10
+    npm install --silent
+    echo "${GREEN}✅ npm dependencies installed${NC}"
 fi
 
 # Check if package.json exists
@@ -170,5 +178,17 @@ echo $FRONTEND_PID > .frontend.pid
 # Wait for user interrupt
 trap "echo ''; echo '🛑 Stopping services...'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; rm -f .backend.pid .frontend.pid; exit" INT TERM
 
+echo ""
+echo "${GREEN}✨ Ready! Services are running in the background.${NC}"
+echo ""
+echo "To view logs:"
+echo "  ${BLUE}tail -f backend.log${NC}   (backend logs)"
+echo "  ${BLUE}tail -f frontend.log${NC} (frontend logs)"
+echo ""
+echo "To stop services:"
+echo "  ${BLUE}./stop.sh${NC} or ${BLUE}Ctrl+C${NC}"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
 echo "Press Ctrl+C to stop all services..."
 wait
