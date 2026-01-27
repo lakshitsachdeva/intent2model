@@ -17,7 +17,9 @@ class AutoFixAgent:
     """
     
     def __init__(self, llm_provider: str = "gemini"):
-        self.llm = LLMInterface(provider=llm_provider)
+        from utils.api_key_manager import get_api_key
+        api_key = get_api_key(provider=llm_provider)
+        self.llm = LLMInterface(provider=llm_provider, api_key=api_key)
         self.max_retries = 3
     
     def fix_and_retry(

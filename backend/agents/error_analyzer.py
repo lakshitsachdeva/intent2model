@@ -34,7 +34,9 @@ def analyze_training_error(
         - suggestions: List of suggestions to fix the issue
     """
     try:
-        llm = LLMInterface(provider=llm_provider)
+        from utils.api_key_manager import get_api_key
+        api_key = get_api_key(provider=llm_provider)
+        llm = LLMInterface(provider=llm_provider, api_key=api_key)
         
         system_prompt = """You are an expert ML engineer helping diagnose training errors.
 Analyze the error and provide:

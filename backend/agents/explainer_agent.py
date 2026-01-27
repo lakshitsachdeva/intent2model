@@ -36,7 +36,9 @@ def explain_results(
     prompt = _build_explanation_prompt(metrics, warnings, feature_importance, config)
     
     # Get LLM explanation
-    llm = LLMInterface(provider=llm_provider)
+    from utils.api_key_manager import get_api_key
+    api_key = get_api_key(provider=llm_provider)
+    llm = LLMInterface(provider=llm_provider, api_key=api_key)
     system_prompt = _get_explanation_system_prompt()
     
     try:
