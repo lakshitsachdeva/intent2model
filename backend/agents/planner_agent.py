@@ -29,8 +29,11 @@ def plan_pipeline(
     # Build prompt for LLM
     prompt = _build_planning_prompt(profile, user_intent)
     
-    # Get LLM response
-    llm = LLMInterface(provider=llm_provider)
+    # Get LLM response - use custom API key if available
+    from utils.api_key_manager import get_api_key
+    api_key = get_api_key(provider=llm_provider)
+    llm = LLMInterface(provider=llm_provider, api_key=api_key)
+    
     system_prompt = _get_planning_system_prompt()
     
     try:

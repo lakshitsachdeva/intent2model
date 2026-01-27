@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import React from "react";
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
@@ -42,6 +43,61 @@ export default function Intent2ModelWizard() {
   const [predictInputs, setPredictInputs] = useState<Record<string, string>>({});
   const [predictionResult, setPredictionResult] = useState<any>(null);
   const [isPredicting, setIsPredicting] = useState(false);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [apiKey, setApiKey] = useState("");
+  const [apiKeyStatus, setApiKeyStatus] = useState<any>(null);
+  const [llmStatus, setLlmStatus] = useState<any>(null);
+  const [isSettingApiKey, setIsSettingApiKey] = useState(false);
+
+  const fetchLlmStatus = async () => {
+    try {
+      const resp = await fetch("http://localhost:8000/health");
+      const data = await resp.json();
+      setLlmStatus(data);
+    } catch (e) {
+      console.error("Failed to fetch LLM status:", e);
+    }
+  };
+
+  const handleSetApiKey = async () => {
+    if (!apiKey.trim()) {
+      setApiKeyStatus({ status: "error", message: "Please enter an API key" });
+      return;
+    }
+
+    setIsSettingApiKey(true);
+    setApiKeyStatus(null);
+
+    try {
+      const resp = await fetch("http://localhost:8000/api/set-api-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: apiKey, provider: "gemini" }),
+      });
+      const data = await resp.json();
+      setApiKeyStatus(data);
+      
+      if (data.status === "success") {
+        // Refresh LLM status
+        await fetchLlmStatus();
+        // Clear API key from input for security
+        setApiKey("");
+        // Auto-close modal after 2 seconds
+        setTimeout(() => {
+          setShowApiKeyModal(false);
+        }, 2000);
+      }
+    } catch (e: any) {
+      setApiKeyStatus({ status: "error", message: e?.message || "Failed to set API key" });
+    } finally {
+      setIsSettingApiKey(false);
+    }
+  };
+
+  // Fetch LLM status on mount
+  useEffect(() => {
+    fetchLlmStatus();
+  }, []);
 
   const onDrop = async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return;
@@ -216,13 +272,39 @@ export default function Intent2ModelWizard() {
     <div className="w-full max-w-5xl mx-auto space-y-8 p-6">
       {/* Header Section */}
       <div className="flex flex-col space-y-2 text-center sm:text-left">
-        <div className="flex items-center space-x-2 text-primary">
-          <BrainCircuit className="w-8 h-8" />
-          <h1 className="text-3xl font-bold tracking-tight">Intent2Model</h1>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-2 text-primary">
+            <BrainCircuit className="w-8 h-8" />
+            <h1 className="text-3xl font-bold tracking-tight">Intent2Model</h1>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setShowApiKeyModal(true);
+              fetchLlmStatus();
+            }}
+            className="flex items-center space-x-2"
+          >
+            <Settings2 className="w-4 h-4" />
+            <span className="hidden sm:inline">LLM Settings</span>
+          </Button>
         </div>
         <p className="text-muted-foreground text-lg">
           Transform raw datasets into high-performance ML models autonomously.
         </p>
+        {llmStatus && (
+          <div className="text-sm text-muted-foreground">
+            {llmStatus.llm_available ? (
+              <span>
+                ✅ LLM: {llmStatus.current_model || "Active"} 
+                {llmStatus.model_reason && ` (${llmStatus.model_reason})`}
+              </span>
+            ) : (
+              <span>⚠️ Using rule-based fallbacks</span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Stepper */}
@@ -780,6 +862,120 @@ export default function Intent2ModelWizard() {
                 </Card>
               )}
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* API Key Modal */}
+      <AnimatePresence>
+        {showApiKeyModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+            onClick={() => setShowApiKeyModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-background rounded-lg shadow-xl max-w-md w-full p-6"
+            >
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center space-x-2">
+                    <Settings2 className="w-5 h-5" />
+                    <span>LLM API Key Settings</span>
+                  </CardTitle>
+                  <CardDescription>
+                    Provide your Gemini API key to enable AI-powered features. 
+                    The system will automatically switch models if rate limits are hit.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {llmStatus && (
+                    <div className="p-3 bg-muted rounded-md text-sm">
+                      <div className="font-medium mb-1">Current Status:</div>
+                      <div>
+                        {llmStatus.llm_available ? (
+                          <div>
+                            ✅ <strong>Active</strong> - Using: {llmStatus.current_model || "Default"}
+                            {llmStatus.model_reason && (
+                              <div className="text-muted-foreground mt-1">
+                                {llmStatus.model_reason}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div>⚠️ Using rule-based fallbacks</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <Label htmlFor="api-key">Gemini API Key</Label>
+                    <Input
+                      id="api-key"
+                      type="password"
+                      placeholder="Enter your API key..."
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleSetApiKey();
+                      }}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Your API key is only stored in memory and never saved to disk.
+                    </p>
+                  </div>
+
+                  {apiKeyStatus && (
+                    <div
+                      className={`p-3 rounded-md text-sm ${
+                        apiKeyStatus.status === "success"
+                          ? "bg-green-500/10 text-green-700 dark:text-green-400"
+                          : "bg-red-500/10 text-red-700 dark:text-red-400"
+                      }`}
+                    >
+                      {apiKeyStatus.status === "success" ? "✅ " : "❌ "}
+                      {apiKeyStatus.message}
+                      {apiKeyStatus.is_rate_limit && (
+                        <div className="mt-2 text-xs">
+                          💡 The system will automatically try alternative models when rate limits are hit.
+                        </div>
+                      )}
+                      {apiKeyStatus.current_model && (
+                        <div className="mt-2 text-xs">
+                          Using model: <strong>{apiKeyStatus.current_model}</strong>
+                          {apiKeyStatus.model_reason && ` (${apiKeyStatus.model_reason})`}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+                <CardFooter className="flex justify-end space-x-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setShowApiKeyModal(false);
+                      setApiKey("");
+                      setApiKeyStatus(null);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleSetApiKey}
+                    disabled={isSettingApiKey || !apiKey.trim()}
+                  >
+                    {isSettingApiKey ? "Setting..." : "Set API Key"}
+                  </Button>
+                </CardFooter>
+              </Card>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>

@@ -23,7 +23,7 @@ from ml.evaluator import evaluate_dataset
 from utils.logging import create_run_id, log_run
 from agents.planner_agent import plan_pipeline
 from schemas.pipeline_schema import UserIntent
-from agents.llm_interface import LLMInterface
+from agents.llm_interface import LLMInterface, get_current_model_info
 from agents.error_analyzer import analyze_training_error
 from agents.recovery_agent import AutonomousRecoveryAgent
 from agents.intent_detector import IntentDetectionAgent
@@ -172,6 +172,11 @@ else:
 dataset_cache = {}
 trained_models_cache = {}  # Store trained models for prediction
 
+# API key management - allow users to provide custom keys
+from utils.api_key_manager import set_custom_api_key, get_api_key
+current_llm_model = None  # Track which model is currently being used
+current_llm_reason = None  # Why this model was chosen
+
 
 class TrainRequest(BaseModel):
     target: str
@@ -191,15 +196,80 @@ async def root():
         "llm_provider": LLM_PROVIDER if LLM_AVAILABLE else "rule-based-fallback"
     }
 
+def get_llm_with_custom_key(provider: str = "gemini"):
+    """Get LLMInterface with custom API key if available, otherwise use default."""
+    api_key = get_api_key(provider=provider) or GEMINI_API_KEY
+    return LLMInterface(provider=provider, api_key=api_key)
+
+# Make this function available to agents via a module-level function
+# Agents can import this to get LLM with custom key support
+import sys
+sys.modules[__name__].get_llm_with_custom_key = get_llm_with_custom_key
+
 @app.get("/health")
 async def health():
     """Detailed health check with LLM status."""
+    model_info = get_current_model_info()
     return {
         "status": "healthy",
         "llm_available": LLM_AVAILABLE,
         "llm_provider": LLM_PROVIDER if LLM_AVAILABLE else "rule-based-fallback",
-        "message": "✅ LLM enabled - using AI-powered planning" if LLM_AVAILABLE else "⚠️  Using rule-based fallbacks (fully functional, but less intelligent)"
+        "current_model": model_info.get("model") or current_llm_model,
+        "model_reason": model_info.get("reason") or current_llm_reason,
+        "message": f"✅ LLM enabled - using {model_info.get('model') or current_llm_model or 'AI-powered planning'}" if LLM_AVAILABLE else "⚠️  Using rule-based fallbacks (fully functional, but less intelligent)"
     }
+
+class ApiKeyRequest(BaseModel):
+    api_key: str
+    provider: str = "gemini"
+
+@app.post("/api/set-api-key")
+async def set_api_key(request: ApiKeyRequest):
+    """
+    Allow user to set a custom API key.
+    This key will be used for subsequent LLM calls.
+    """
+    global LLM_AVAILABLE, current_llm_model, current_llm_reason
+    
+    # Store the custom API key
+    set_custom_api_key(request.api_key, provider=request.provider)
+    
+    # Test the API key
+    try:
+        llm_test = LLMInterface(provider=request.provider, api_key=request.api_key)
+        test_response = llm_test.generate("Say 'OK'", "You are a test assistant.")
+        
+        if test_response and len(test_response.strip()) > 0:
+            LLM_AVAILABLE = True
+            # Get model info from the test
+            model_info = get_current_model_info()
+            global current_llm_model, current_llm_reason
+            current_llm_model = model_info.get("model")
+            current_llm_reason = model_info.get("reason")
+            
+            return {
+                "status": "success",
+                "message": "API key validated successfully",
+                "llm_available": True,
+                "current_model": current_llm_model,
+                "model_reason": current_llm_reason
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "API key accepted but returned empty response"
+            }
+    except Exception as e:
+        error_msg = str(e)
+        # Check if it's a rate limit
+        is_rate_limit = '429' in error_msg or 'quota' in error_msg.lower() or 'rate limit' in error_msg.lower()
+        
+        return {
+            "status": "error",
+            "message": f"API key validation failed: {error_msg[:200]}",
+            "is_rate_limit": is_rate_limit,
+            "suggestion": "Try a different API key or wait for quota reset" if is_rate_limit else "Check your API key"
+        }
 
 
 @app.post("/upload")
@@ -860,7 +930,7 @@ If the user uses key:value format, use those mappings.
 Return ONLY valid JSON, nothing else."""
 
         # Use LLM to extract
-        llm = LLMInterface(provider="gemini")
+        llm = get_llm_with_custom_key(provider="gemini")
         response_text = llm.generate(prompt, system_prompt)
         
         # Extract JSON from response (LLM might add extra text)

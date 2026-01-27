@@ -7,6 +7,16 @@ Abstract interface for LLM providers (Gemini, OpenAI, Groq).
 from typing import Optional
 import os
 
+# Global tracking for current model usage
+_current_model_name = None
+_current_model_reason = None
+
+def get_current_model_info():
+    """Get info about which model is currently being used."""
+    return {
+        "model": _current_model_name,
+        "reason": _current_model_reason
+    }
 
 class LLMInterface:
     """
@@ -69,43 +79,82 @@ class LLMInterface:
             raise Exception(f"OpenAI API error: {str(e)}")
     
     def _gemini_generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
-        """Generate using Gemini API."""
+        """Generate using Gemini API with automatic model fallback on rate limits."""
         try:
             import google.generativeai as genai
             genai.configure(api_key=self.api_key)
             
-            # Try different model names in order (updated for current Gemini API)
-            model_names = [
-                'gemini-2.5-flash',      # Latest fast model
-                'gemini-flash-latest',   # Latest flash (fallback)
-                'gemini-2.5-pro',        # Latest pro model
-                'gemini-pro-latest',     # Latest pro (fallback)
-                'gemini-1.5-flash',      # Older but stable
-                'gemini-1.5-pro',        # Older pro
+            # Model priority list - ordered by preference, with alternatives for rate limits
+            # Based on rate limits: gemini-2.5-flash (21/20 RPD limit), try alternatives
+            model_priority = [
+                {'name': 'gemini-2.5-flash', 'reason': 'Latest fast model'},
+                {'name': 'gemini-2.5-flash-lite', 'reason': 'Lite version (higher limits)'},
+                {'name': 'gemini-3-flash', 'reason': 'Newer flash model'},
+                {'name': 'gemini-flash-latest', 'reason': 'Latest flash fallback'},
+                {'name': 'gemini-2.5-pro', 'reason': 'Pro model (different quota)'},
+                {'name': 'gemini-1.5-flash', 'reason': 'Older stable model'},
+                {'name': 'gemini-1.5-pro', 'reason': 'Older pro model'},
             ]
-            model = None
-            last_error = None
-            
-            for model_name in model_names:
-                try:
-                    model = genai.GenerativeModel(model_name)
-                    # Quick test to verify it works
-                    test_response = model.generate_content("test")
-                    print(f"✅ Using Gemini model: {model_name}")
-                    break
-                except Exception as e:
-                    last_error = e
-                    continue
-            
-            if model is None:
-                raise Exception(f"Could not initialize any Gemini model. Last error: {last_error}")
             
             full_prompt = prompt
             if system_prompt:
                 full_prompt = f"{system_prompt}\n\n{prompt}"
             
-            response = model.generate_content(full_prompt)
-            return response.text
+            last_error = None
+            rate_limit_models = []  # Track which models hit rate limits
+            
+            for model_info in model_priority:
+                model_name = model_info['name']
+                reason = model_info['reason']
+                
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(full_prompt)
+                    
+                    # Success! Log which model worked and why
+                    global _current_model_name, _current_model_reason
+                    _current_model_name = model_name
+                    
+                    if model_name != model_priority[0]['name']:
+                        fallback_reason = f"Fallback: {reason} (primary model hit rate limit)"
+                        _current_model_reason = fallback_reason
+                        print(f"✅ Using {model_name} ({fallback_reason})")
+                    else:
+                        _current_model_reason = reason
+                        print(f"✅ Using {model_name} ({reason})")
+                    
+                    return response.text
+                    
+                except Exception as e:
+                    error_str = str(e).lower()
+                    
+                    # Check if it's a rate limit error
+                    is_rate_limit = (
+                        '429' in str(e) or 
+                        'quota' in error_str or 
+                        'rate limit' in error_str or
+                        'resourceexhausted' in error_str
+                    )
+                    
+                    if is_rate_limit:
+                        rate_limit_models.append(model_name)
+                        print(f"⚠️  {model_name} hit rate limit, trying next model...")
+                        last_error = f"Rate limit on {model_name}"
+                        continue
+                    else:
+                        # Other error (model not found, etc.) - try next
+                        last_error = f"{model_name}: {str(e)[:100]}"
+                        continue
+            
+            # All models failed
+            if rate_limit_models:
+                raise Exception(
+                    f"All Gemini models hit rate limits. Tried: {', '.join(rate_limit_models)}. "
+                    f"Please wait or provide a different API key. Last error: {last_error}"
+                )
+            else:
+                raise Exception(f"Could not use any Gemini model. Last error: {last_error}")
+                
         except ImportError:
             raise ImportError("Google Generative AI package not installed. Install with: pip install google-generativeai")
         except Exception as e:

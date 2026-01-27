@@ -42,7 +42,10 @@ Analyze the model's performance in the context of the dataset characteristics.
 Be specific about why certain models work better for this data.
 Explain in clear, non-technical language when possible, but include technical details when relevant."""
     
-    llm = LLMInterface(provider=llm_provider)
+    # Get LLM - use custom API key if available
+    from utils.api_key_manager import get_api_key
+    api_key = get_api_key(provider=llm_provider)
+    llm = LLMInterface(provider=llm_provider, api_key=api_key)
     
     try:
         response = llm.generate(prompt, system_prompt)
