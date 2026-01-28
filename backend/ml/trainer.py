@@ -258,8 +258,39 @@ def train_regression(
     if target in categorical_cols:
         categorical_cols.remove(target)
     
+    # Validate feature_transforms before building pipeline
+    from agents.pipeline_validator import validate_feature_transforms
+    feature_transforms = config.get("feature_transforms")
+    if feature_transforms:
+        validation = validate_feature_transforms(
+            feature_transforms=feature_transforms,
+            available_columns=list(X.columns),
+            target=target
+        )
+        if not validation["valid"]:
+            error_msg = "COMPILER ERROR - Invalid feature_transforms:\n"
+            for err in validation["errors"]:
+                error_msg += f"  - {err}\n"
+            raise RuntimeError(error_msg)
+        print(f"✅ Feature transforms validated: {validation.get('kept_count', 0)} features kept, {validation.get('dropped_count', 0)} dropped")
+    
     # Build pipeline
     pipeline = build_pipeline(config, numeric_cols, categorical_cols)
+    
+    # COMPILER INVARIANT CHECKS - Fail loudly before training
+    from agents.pipeline_validator import validate_pipeline_before_training
+    try:
+        diagnostic = validate_pipeline_before_training(
+            pipeline=pipeline,
+            X=X,
+            y=y,
+            config=config,
+            feature_transforms=feature_transforms
+        )
+        print(f"✅ Pipeline validation passed: {diagnostic.get('output_features', 'unknown')} output features")
+    except RuntimeError as e:
+        # Re-raise with clear compiler error message
+        raise RuntimeError(f"COMPILER ERROR: {str(e)}")
     
     # Select scoring metric (note: sklearn uses negative MSE for RMSE)
     scoring_map = {
@@ -398,7 +429,37 @@ def compare_models(
             continue
     
     if not results:
-        raise ValueError("All models failed to train")
+        # Check if it's a compiler error vs training error
+        error_summary = []
+        for model_name in model_candidates:
+            # Try to build and validate pipeline for this model
+            try:
+                test_config = base_config.copy() if base_config else {}
+                test_config["model"] = model_name
+                test_pipeline = build_pipeline(test_config, numeric_cols, categorical_cols)
+                
+                from agents.pipeline_validator import validate_pipeline_before_training
+                validate_pipeline_before_training(
+                    pipeline=test_pipeline,
+                    X=X,
+                    y=y,
+                    config=test_config,
+                    feature_transforms=test_config.get("feature_transforms")
+                )
+            except RuntimeError as e:
+                error_summary.append(f"  - {model_name}: COMPILER ERROR - {str(e)[:200]}")
+            except Exception as e:
+                error_summary.append(f"  - {model_name}: Training error - {str(e)[:200]}")
+        
+        if error_summary:
+            error_msg = "All models failed. Errors:\n" + "\n".join(error_summary)
+        else:
+            error_msg = (
+                "All models failed to train. "
+                "This is likely a COMPILER ERROR (invalid pipeline) rather than a training error. "
+                "Check that feature_transforms produces at least one output feature."
+            )
+        raise ValueError(error_msg)
     
     # Sort by primary metric (higher is better for most metrics, except rmse/mae)
     reverse = metric not in ["rmse", "mae"]

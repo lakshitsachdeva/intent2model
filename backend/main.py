@@ -905,6 +905,9 @@ async def train_model(request: TrainRequest):
         except Exception:
             pass
         
+        # Check if it's a compiler error vs training error
+        is_compiler_error = "COMPILER ERROR" in error_msg or "compiler" in error_msg.lower()
+        
         # Use LLM to analyze the error and provide helpful explanation
         try:
             dataset_info = {
@@ -915,10 +918,23 @@ async def train_model(request: TrainRequest):
                 "target_missing_count": df[request.target].isna().sum()
             }
             
-            error_analysis = analyze_training_error(
-                error=e,
-                error_msg=error_msg,
-                dataset_info=dataset_info,
+            # For compiler errors, provide more specific message
+            if is_compiler_error:
+                error_analysis = {
+                    "error_type": "Compiler Error",
+                    "explanation": error_msg,
+                    "root_cause": "The compiled pipeline is invalid. This is NOT a training error - the pipeline cannot be executed.",
+                    "suggestions": [
+                        "Check that feature_transforms includes at least one non-dropped feature",
+                        "Verify that all feature names in feature_transforms exist in the dataset",
+                        "Ensure the preprocessor produces at least one output feature"
+                    ]
+                }
+            else:
+                error_analysis = analyze_training_error(
+                    error=e,
+                    error_msg=error_msg,
+                    dataset_info=dataset_info,
                 target_column=request.target,
                 task_type=task,
                 llm_provider="gemini"
