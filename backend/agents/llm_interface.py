@@ -97,14 +97,21 @@ class LLMInterface:
         _current_model_reason = "Using local Gemini CLI (no API key consumed by this backend)"
 
         try:
-            # Gemini CLI often reads GOOGLE_API_KEY. Map our GEMINI_API_KEY/custom key to GOOGLE_API_KEY for the subprocess.
-            from utils.api_key_manager import get_api_key
-            gemini_key = get_api_key(provider="gemini") or ""
+            # Gemini CLI can auth via:
+            # - OAuth (your Google account login in the CLI) OR
+            # - API key (GOOGLE_API_KEY)
+            #
+            # Default: DO NOT inject API keys so OAuth-based CLI sessions work.
+            # If you want to force key auth, set GEMINI_CLI_AUTH_MODE=api_key
+            auth_mode = (os.getenv("GEMINI_CLI_AUTH_MODE", "oauth") or "oauth").strip().lower()
             child_env = os.environ.copy()
-            if gemini_key and not child_env.get("GOOGLE_API_KEY"):
-                child_env["GOOGLE_API_KEY"] = gemini_key
-            if gemini_key and not child_env.get("GEMINI_API_KEY"):
-                child_env["GEMINI_API_KEY"] = gemini_key
+            if auth_mode == "api_key":
+                from utils.api_key_manager import get_api_key
+                gemini_key = get_api_key(provider="gemini") or ""
+                if gemini_key and not child_env.get("GOOGLE_API_KEY"):
+                    child_env["GOOGLE_API_KEY"] = gemini_key
+                if gemini_key and not child_env.get("GEMINI_API_KEY"):
+                    child_env["GEMINI_API_KEY"] = gemini_key
 
             # Use -p to ensure one-shot prompt execution (avoid interactive UI)
             proc = subprocess.run(

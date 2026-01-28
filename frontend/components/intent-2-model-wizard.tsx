@@ -1390,7 +1390,7 @@ export default function Intent2ModelWizard() {
                       <option value="gemini_cli">Gemini CLI (local)</option>
                     </select>
                     <p className="text-xs text-muted-foreground">
-                      CLI still uses Gemini auth (usually via <code>GOOGLE_API_KEY</code> or your Gemini key). We automatically pass your configured key to the CLI process.
+                      CLI uses Gemini auth via your Google account login (OAuth) by default. If you want, you can also force API-key auth via backend env <code>GEMINI_CLI_AUTH_MODE=api_key</code>.
                       CLI detected: <strong>{llmStatus?.gemini_cli_available ? "yes" : "no"}</strong>
                       {llmStatus?.gemini_cli_cmd ? ` (cmd: ${llmStatus.gemini_cli_cmd})` : ""}
                     </p>
