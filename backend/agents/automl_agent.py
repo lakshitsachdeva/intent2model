@@ -146,7 +146,15 @@ def _extract_json(text: str) -> Dict[str, Any]:
     m = re.search(r"\{[\s\S]*\}", text)
     if not m:
         raise ValueError("No JSON object found in LLM response")
-    return json.loads(m.group(0))
+    data = json.loads(m.group(0))
+    
+    # Normalize: LLM might return "column_name" instead of "name" in feature_transforms
+    if "feature_transforms" in data and isinstance(data["feature_transforms"], list):
+        for ft in data["feature_transforms"]:
+            if isinstance(ft, dict) and "column_name" in ft and "name" not in ft:
+                ft["name"] = ft.pop("column_name")
+    
+    return data
 
 
 def _rule_based_plan(profile: Dict[str, Any], requested_target: Optional[str]) -> Dict[str, Any]:

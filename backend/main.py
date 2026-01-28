@@ -30,6 +30,7 @@ from agents.intent_detector import IntentDetectionAgent
 from utils.artifact_generator import generate_notebook, generate_readme, save_model_pickle, generate_chart_image, generate_model_report
 import os
 from fastapi.responses import FileResponse, Response
+from starlette.background import BackgroundTask
 import json
 import re
 import tempfile
@@ -95,11 +96,11 @@ def _model_code_for_notebook(task: str, model_name: str) -> str:
         return mapping.get(model_name, "RandomForestRegressor(n_estimators=300, random_state=42)")
 
 
-def _preprocessing_recommendations(profile: Dict[str, Any], df: pd.DataFrame) -> Dict[str, Any]:
+def _preprocessing_recommendations(profile: Dict[str, Any], df: pd.DataFrame) -> list[dict[str, Any]]:
     """
     Rule-based, dataset-oriented preprocessing suggestions (LLM can refine later).
     """
-    recs: List[Dict[str, Any]] = []
+    recs: list[dict[str, Any]] = []
     missing = profile.get("missing_percent", {}) or {}
     high_missing = [c for c, p in missing.items() if (p or 0) > 10]
     if high_missing:
@@ -138,7 +139,7 @@ def _preprocessing_recommendations(profile: Dict[str, Any], df: pd.DataFrame) ->
     if num_cols:
         recs.append({"type": "scaling", "why": "Numeric features detected.", "suggestion": "StandardScaler for linear/SVM; robust scaler if heavy outliers."})
 
-    return {"recommendations": recs}
+    return recs
 
 # CORS middleware
 app.add_middleware(
@@ -1348,7 +1349,7 @@ async def download_notebook(run_id: str):
         temp_path,
         media_type='application/json',
         filename=f'model_{run_id[:8]}_training_notebook.ipynb',
-        background=lambda: os.unlink(temp_path)
+        background=BackgroundTask(os.unlink, temp_path)
     )
 
 
@@ -1370,7 +1371,7 @@ async def download_model(run_id: str):
         temp_path,
         media_type='application/octet-stream',
         filename=f'model_{run_id[:8]}.pkl',
-        background=lambda: os.unlink(temp_path)
+        background=BackgroundTask(os.unlink, temp_path)
     )
 
 
@@ -1398,7 +1399,7 @@ async def download_readme(run_id: str):
         temp_path,
         media_type='text/markdown',
         filename=f'README_{run_id[:8]}.md',
-        background=lambda: os.unlink(temp_path)
+        background=BackgroundTask(os.unlink, temp_path)
     )
 
 
@@ -1462,7 +1463,7 @@ async def download_report(run_id: str):
             temp_path,
             media_type='text/markdown',
             filename=f'Model_Report_{run_id[:8]}.md',
-            background=lambda: os.unlink(temp_path)
+            background=BackgroundTask(os.unlink, temp_path)
         )
     except HTTPException:
         raise

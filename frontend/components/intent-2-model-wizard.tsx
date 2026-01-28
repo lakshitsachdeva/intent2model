@@ -694,9 +694,24 @@ export default function Intent2ModelWizard() {
                         <thead>
                           <tr className="border-b">
                             <th className="text-left p-3">Model</th>
-                            <th className="text-right p-3">Primary Metric</th>
-                            <th className="text-right p-3">CV Mean</th>
-                            <th className="text-right p-3">CV Std</th>
+                            <th className="text-right p-3">
+                              <div className="flex items-center justify-end gap-1">
+                                Primary Metric
+                                <span className="text-xs text-muted-foreground cursor-help" title="The main metric used to rank models (e.g., RMSE for regression, F1 for classification). Lower is better for RMSE/MAE, higher is better for others.">ℹ️</span>
+                              </div>
+                            </th>
+                            <th className="text-right p-3">
+                              <div className="flex items-center justify-end gap-1">
+                                CV Mean
+                                <span className="text-xs text-muted-foreground cursor-help" title="Average score across all cross-validation folds. Shows how well the model generalizes.">ℹ️</span>
+                              </div>
+                            </th>
+                            <th className="text-right p-3">
+                              <div className="flex items-center justify-end gap-1">
+                                CV Std
+                                <span className="text-xs text-muted-foreground cursor-help" title="Standard deviation of CV scores. Lower = more consistent performance across folds.">ℹ️</span>
+                              </div>
+                            </th>
                             <th className="text-center p-3">Status</th>
                             <th className="text-center p-3">Action</th>
                           </tr>
