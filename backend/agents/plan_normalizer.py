@@ -141,10 +141,23 @@ def normalize_plan_dict(plan_dict: Dict[str, Any], profile: Optional[Dict[str, A
     normalized["planning_source"] = plan_dict.get("planning_source", "fallback")
     normalized["planning_error"] = plan_dict.get("planning_error")
     
-    # Determine plan quality
+    # Determine plan quality based on ACTUAL confidence scores, not just source
+    # A fallback plan can still have high confidence if rule-based logic is confident
+    target_conf = normalized.get("target_confidence", 1.0)
+    task_conf = normalized.get("task_confidence", 1.0)
+    
     if normalized["planning_source"] == "fallback":
-        normalized["plan_quality"] = "fallback_low_confidence"
-    elif normalized["target_confidence"] < 0.7 or normalized["task_confidence"] < 0.7:
+        # Fallback plans: check actual confidence scores
+        if target_conf >= 0.9 and task_conf >= 0.9:
+            # High confidence fallback (rule-based logic is confident)
+            normalized["plan_quality"] = "high_confidence"
+        elif target_conf >= 0.7 and task_conf >= 0.7:
+            # Medium confidence fallback
+            normalized["plan_quality"] = "medium_confidence"
+        else:
+            # Low confidence fallback
+            normalized["plan_quality"] = "fallback_low_confidence"
+    elif target_conf < 0.7 or task_conf < 0.7:
         normalized["plan_quality"] = "medium_confidence"
     else:
         normalized["plan_quality"] = "high_confidence"

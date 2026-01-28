@@ -445,13 +445,17 @@ def _rule_based_plan(profile: Dict[str, Any], requested_target: Optional[str]) -
         ]
 
     # Fallback plan MUST match schema exactly (all new fields included)
+    # If target was explicitly requested, we can have high confidence even in fallback
+    target_conf = 0.95 if requested_target else 0.7  # High if explicit, medium if inferred
+    task_conf = 0.9  # Rule-based task inference is usually confident (regression vs classification)
+    
     return {
         "plan_schema_version": "v1",
         "inferred_target": target,
-        "target_confidence": 0.5,  # Low confidence for fallback
+        "target_confidence": target_conf,
         "alternative_targets": [],
         "task_type": task_type,
-        "task_confidence": 0.6,  # Low confidence for fallback
+        "task_confidence": task_conf,
         "task_inference_md": "⚠️ Rule-based fallback task inference (LLM unavailable). Low confidence.",
         "dataset_intelligence_md": "⚠️ Rule-based fallback dataset intelligence (LLM unavailable). Limited analysis.",
         "transformation_strategy_md": "⚠️ Rule-based fallback transformation strategy (LLM unavailable). Conservative defaults.",
