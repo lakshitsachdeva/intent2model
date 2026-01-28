@@ -293,10 +293,21 @@ async def health():
     # Re-check if API key exists (don't test LLM - too slow)
     from utils.api_key_manager import get_api_key
     api_key = get_api_key(provider="gemini")
+    import shutil
+    gemini_cli_cmd = os.getenv("GEMINI_CLI_CMD", "gemini")
+    gemini_cli_available = bool(shutil.which(gemini_cli_cmd))
     
     # Update global state if API key changed
     global LLM_AVAILABLE, LLM_RATE_LIMITED, LLM_PROVIDER, current_llm_model, current_llm_reason
-    if api_key and api_key.strip():
+    # If using CLI provider, treat availability as "CLI installed"
+    provider = os.getenv("LLM_PROVIDER", LLM_PROVIDER or "gemini")
+    if provider == "gemini_cli":
+        LLM_PROVIDER = "gemini_cli"
+        LLM_AVAILABLE = gemini_cli_available
+        LLM_RATE_LIMITED = False
+        current_llm_model = f"{gemini_cli_cmd} (cli)" if gemini_cli_available else None
+        current_llm_reason = "Gemini CLI detected" if gemini_cli_available else f"Gemini CLI not found: {gemini_cli_cmd}"
+    elif api_key and api_key.strip():
         # API key exists - assume available (actual test happens during training)
         LLM_AVAILABLE = True
         LLM_RATE_LIMITED = False
@@ -315,6 +326,8 @@ async def health():
         "llm_provider": LLM_PROVIDER if LLM_AVAILABLE else "rule-based-fallback",
         "current_model": model_info.get("model") or current_llm_model,
         "model_reason": model_info.get("reason") or current_llm_reason,
+        "gemini_cli_available": gemini_cli_available,
+        "gemini_cli_cmd": gemini_cli_cmd,
         "message": (
             f"✅ LLM enabled - using {model_info.get('model') or current_llm_model or 'AI-powered planning'}"
             if LLM_AVAILABLE

@@ -120,26 +120,17 @@ export default function Intent2ModelWizard() {
     setIsUploading(true);
     const file = acceptedFiles[0];
     setFiles([file]);
-    
-    const formData = new FormData();
-    formData.append('file', file);
 
     try {
-      const response = await fetch('http://localhost:8000/upload', {
-        method: 'POST',
-        body: formData,
-        // Don't set Content-Type header - browser will set it with boundary for FormData
-      });
-
-      const data = await response.json();
-      setDatasetId(data.dataset_id);
-      const numeric = data.profile?.numeric_cols || [];
-      const categorical = data.profile?.categorical_cols || [];
+      const uploadResult = await uploadDataset(file);
+      setDatasetId(uploadResult.dataset_id);
+      const numeric = uploadResult.profile?.numeric_cols || [];
+      const categorical = uploadResult.profile?.categorical_cols || [];
       setAvailableColumns([...numeric, ...categorical]);
       setDatasetSummary(null);
       // Fetch visualization summary
       try {
-        const s = await fetch(`http://localhost:8000/dataset/${data.dataset_id}/summary`);
+        const s = await fetch(`http://localhost:8000/dataset/${uploadResult.dataset_id}/summary`);
         const sj = await s.json();
         setDatasetSummary(sj);
       } catch (e) {
@@ -154,11 +145,29 @@ export default function Intent2ModelWizard() {
         alert('⚠️ Cannot connect to backend. Make sure backend is running on http://localhost:8000\n\nRun: cd backend && python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload');
       }
       
-      // Still proceed to step 2 even if upload fails (autonomous)
-      setStep(2);
+      // Don't proceed; training needs a dataset_id
+      setStep(1);
     } finally {
       setIsUploading(false);
     }
+  };
+
+  const uploadDataset = async (file: File): Promise<any> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch("http://localhost:8000/upload", {
+      method: "POST",
+      body: formData,
+      // Don't set Content-Type header - browser will set it with boundary for FormData
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data?.detail || "Dataset upload failed");
+    }
+    if (!data?.dataset_id) {
+      throw new Error("Upload succeeded but backend did not return dataset_id");
+    }
+    return data;
   };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ 
@@ -188,6 +197,23 @@ export default function Intent2ModelWizard() {
     let logsInterval: NodeJS.Timeout | null = null;
     
     try {
+      // If we don't have datasetId (common after restart), auto-upload the last selected file
+      let ensuredDatasetId = datasetId;
+      if (!ensuredDatasetId) {
+        const file = files?.[0];
+        if (!file) {
+          throw new Error("No dataset available. Please upload a CSV file first.");
+        }
+        setIsUploading(true);
+        const uploadResult = await uploadDataset(file);
+        ensuredDatasetId = uploadResult.dataset_id;
+        setDatasetId(ensuredDatasetId);
+        const numeric = uploadResult.profile?.numeric_cols || [];
+        const categorical = uploadResult.profile?.categorical_cols || [];
+        setAvailableColumns([...numeric, ...categorical]);
+        setIsUploading(false);
+      }
+
       // Start progress simulation (will be overridden by real progress from logs)
       progressInterval = setInterval(() => {
         setProgress(prev => {
@@ -207,7 +233,7 @@ export default function Intent2ModelWizard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          dataset_id: datasetId,
+          dataset_id: ensuredDatasetId,
           target: targetColumn,
         }),
       });
@@ -250,7 +276,7 @@ export default function Intent2ModelWizard() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              dataset_id: datasetId,
+              dataset_id: ensuredDatasetId,
               target: availableColumns[0],
             }),
           });
@@ -272,6 +298,7 @@ export default function Intent2ModelWizard() {
       }
     } catch (error) {
       console.error('Training error:', error);
+      setIsUploading(false);
       if (progressInterval) clearInterval(progressInterval);
       if (logsInterval) clearInterval(logsInterval);
       // Still show success (autonomous - backend handles retries)

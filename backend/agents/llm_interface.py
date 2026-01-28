@@ -6,6 +6,9 @@ Abstract interface for LLM providers (Gemini, OpenAI, Groq).
 
 from typing import Optional
 import os
+import subprocess
+import shlex
+import shutil
 
 # Global tracking for current model usage
 _current_model_name = None
@@ -53,10 +56,63 @@ class LLMInterface:
             return self._openai_generate(prompt, system_prompt)
         elif self.provider == "gemini":
             return self._gemini_generate(prompt, system_prompt)
+        elif self.provider == "gemini_cli":
+            return self._gemini_cli_generate(prompt, system_prompt)
         elif self.provider == "groq":
             return self._groq_generate(prompt, system_prompt)
         else:
             raise ValueError(f"Unknown provider: {self.provider}")
+
+    def _gemini_cli_generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+        """
+        Generate using a local Gemini CLI (no API key usage from our backend).
+        
+        This is intentionally generic because Gemini CLI tools vary by installation.
+        Configure with env:
+          - GEMINI_CLI_CMD (default: "gemini")
+          - GEMINI_CLI_ARGS (default: "")
+        
+        We pass a single combined prompt via STDIN and read STDOUT.
+        """
+        cmd = os.getenv("GEMINI_CLI_CMD", "gemini").strip() or "gemini"
+        args_str = os.getenv("GEMINI_CLI_ARGS", "").strip()
+        args = shlex.split(args_str) if args_str else []
+
+        exe = shutil.which(cmd)
+        if not exe:
+            raise Exception(
+                f"Gemini CLI not found: '{cmd}'. Install it or set GEMINI_CLI_CMD to the correct binary."
+            )
+
+        full_prompt = prompt
+        if system_prompt:
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+
+        # Track model/provider for UI transparency
+        global _current_model_name, _current_model_reason
+        _current_model_name = f"{cmd} (cli)"
+        _current_model_reason = "Using local Gemini CLI (no API key consumed by this backend)"
+
+        try:
+            proc = subprocess.run(
+                [exe, *args],
+                input=full_prompt,
+                text=True,
+                capture_output=True,
+                timeout=int(os.getenv("GEMINI_CLI_TIMEOUT_SEC", "120")),
+            )
+        except subprocess.TimeoutExpired:
+            raise Exception("Gemini CLI timed out")
+        except Exception as e:
+            raise Exception(f"Gemini CLI error: {str(e)}")
+
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        if proc.returncode != 0:
+            raise Exception(f"Gemini CLI failed (exit={proc.returncode}): {err[:400] or 'unknown error'}")
+        if not out:
+            raise Exception(f"Gemini CLI returned empty output. stderr={err[:400]}")
+        return out
     
     def _openai_generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """Generate using OpenAI API."""
