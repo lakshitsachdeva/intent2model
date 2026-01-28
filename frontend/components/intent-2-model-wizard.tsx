@@ -58,6 +58,7 @@ export default function Intent2ModelWizard() {
   const [liveLogs, setLiveLogs] = useState<Array<{ts: string, message: string, stage?: string, progress?: number}>>([]);
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const [currentStage, setCurrentStage] = useState<string>("");
+  const [trainingError, setTrainingError] = useState<string | null>(null);
   const logsEndRef = React.useRef<HTMLDivElement>(null);
 
   const fetchLlmStatus = async () => {
@@ -210,6 +211,7 @@ export default function Intent2ModelWizard() {
     setLiveLogs([]); // Clear previous logs
     setCurrentStage("");
     setCurrentRunId(null); // Will be set when we get run_id
+    setTrainingError(null);
     
     // Extract target column from intent or use first available
     let targetColumn = intent.trim();
@@ -328,12 +330,12 @@ export default function Intent2ModelWizard() {
       setIsUploading(false);
       if (progressInterval) clearInterval(progressInterval);
       if (logsInterval) clearInterval(logsInterval);
-      // Still show success (autonomous - backend handles retries)
-      setProgress(100);
-      setTimeout(() => {
-        setTraining(false);
-        setStep(4);
-      }, 1000);
+      // Show the error and KEEP the training screen so logs remain visible
+      const msg =
+        (error as any)?.message ||
+        "Training failed. Check Developer Logs / Live Activity for details.";
+      setTrainingError(msg);
+      setTraining(false);
     }
   };
 
@@ -738,6 +740,15 @@ export default function Intent2ModelWizard() {
                   </div>
                 ) : (
                   <div className="space-y-6">
+                    {trainingError && (
+                      <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-300">
+                        <div className="font-semibold mb-1">Training failed</div>
+                        <div className="whitespace-pre-wrap wrap-break-word">{trainingError}</div>
+                        <div className="mt-2 text-xs text-muted-foreground">
+                          Keep this screen open — logs will continue updating below.
+                        </div>
+                      </div>
+                    )}
                     {/* Progress Bar */}
                     <div className="space-y-2">
                       <div className="flex justify-between text-sm font-medium">

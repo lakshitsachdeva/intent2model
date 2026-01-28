@@ -192,19 +192,10 @@ def _generate_feature_transforms_from_profile(profile: Optional[Dict[str, Any]],
     
     feature_transforms = []
     for c in cols:
+        # IMPORTANT: feature_transforms should describe X features only.
+        # The target must NOT appear here because validators compare against X.columns (df without target).
         if c == target:
-            feature_transforms.append({
-                "name": c,
-                "inferred_dtype": str(dtypes.get(c, "unknown")),
-                "kind": "unknown",
-                "kind_confidence": 1.0,
-                "drop": True,
-                "impute": "none",
-                "encode": "none",
-                "scale": "none",
-                "notes_md": "Target column - dropped from features",
-                "transform_confidence": 1.0,
-            })
+            continue
         elif c in id_like:
             feature_transforms.append({
                 "name": c,
