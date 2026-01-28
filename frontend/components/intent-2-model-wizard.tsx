@@ -167,6 +167,9 @@ export default function Intent2ModelWizard() {
   const startTraining = async () => {
     setTraining(true);
     setProgress(0);
+    setLiveLogs([]); // Clear previous logs
+    setCurrentStage("");
+    setCurrentRunId(null); // Will be set when we get run_id
     
     // Extract target column from intent or use first available
     let targetColumn = intent.trim();
@@ -179,15 +182,20 @@ export default function Intent2ModelWizard() {
     let logsInterval: NodeJS.Timeout | null = null;
     
     try {
-      // Start progress simulation
+      // Start progress simulation (will be overridden by real progress from logs)
       progressInterval = setInterval(() => {
         setProgress(prev => {
           if (prev >= 95) {
             return 95; // Don't go to 100 until training completes
           }
-          return prev + Math.random() * 5;
+          return prev + Math.random() * 2;
         });
-      }, 800);
+      }, 1000);
+      
+      // Start polling backend logs immediately (before we get run_id)
+      logsInterval = setInterval(() => {
+        fetchBackendLogTail();
+      }, 500);
 
       const response = await fetch('http://localhost:8000/train', {
         method: 'POST',
@@ -200,12 +208,13 @@ export default function Intent2ModelWizard() {
 
       const data = await response.json();
       
-      if (response.ok && data.run_id) {
-        // Set run_id for real-time log polling
-        setCurrentRunId(data.run_id);
-        
-        // Start polling logs immediately
-        fetchRunLogs(data.run_id);
+      if (response.ok) {
+        // Set run_id for real-time log polling (run_id is created at start of training)
+        if (data.run_id) {
+          setCurrentRunId(data.run_id);
+          // Start polling logs immediately
+          fetchRunLogs(data.run_id);
+        }
         
         if (progressInterval) clearInterval(progressInterval);
         if (logsInterval) clearInterval(logsInterval);
@@ -223,6 +232,11 @@ export default function Intent2ModelWizard() {
           setTraining(false);
           setStep(4);
         }, 1000);
+      } else if (data.run_id) {
+        // Training might still be in progress - we got run_id, start polling run logs
+        setCurrentRunId(data.run_id);
+        fetchRunLogs(data.run_id);
+        // Keep training state true and continue polling
       } else {
         // Try with first available column if specified column fails
         if (availableColumns.length > 0 && targetColumn !== availableColumns[0]) {

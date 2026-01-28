@@ -665,9 +665,13 @@ async def train_model(request: TrainRequest):
         metric = "r2"  # Default fallback
     
     trace = []
+    run_id = None
     try:
         run_id = create_run_id()
-        _log_run_event(run_id, "Run created", stage="init", progress=1)
+        _log_run_event(run_id, "🚀 Run created - training request received", stage="init", progress=1)
+        
+        # IMPORTANT: Return run_id immediately so frontend can start polling logs
+        # We'll stream updates via the logs endpoint
 
         # STEP 0–3: LLM-driven AutoML planning BEFORE any model training
         trace.append("STEP 0–3: Planning (target/task/feature strategy/model shortlist) via AutoML agent.")
