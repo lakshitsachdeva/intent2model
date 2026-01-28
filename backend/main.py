@@ -734,9 +734,17 @@ async def train_model(request: TrainRequest):
             
             trace.append(f"Training succeeded after {train_result.get('attempts', 1)} attempt(s)")
             _log_run_event(run_id, f"Training succeeded (attempt {train_result.get('attempts', 1)})", stage="train", progress=70)
-                _log_run_event(run_id, "Training finished (model comparison)", stage="train", progress=70)
-                
-                # Add LLM explanations for each model
+            
+            # Extract plan from result if available
+            if "plan" in train_result:
+                plan_dict = train_result["plan"]
+                if isinstance(plan_dict, dict):
+                    config["automl_plan"] = plan_dict
+                elif hasattr(plan_dict, "model_dump"):
+                    config["automl_plan"] = plan_dict.model_dump()
+            
+            # Add LLM explanations for each model (if model comparison was done)
+            if train_result.get("all_models"):
                 from agents.model_explainer import explain_model_performance
                 
                 profile = profile_dataset(df)
@@ -781,14 +789,6 @@ async def train_model(request: TrainRequest):
                 train_result["all_models"] = all_models_with_explanations
                 trace.append("Generated per-model explanations (LLM if available, otherwise rule-based).")
                 _log_run_event(run_id, "Model explanations generated", stage="explain", progress=78)
-            
-            # Extract plan from result if available
-            if "plan" in train_result:
-                plan_dict = train_result["plan"]
-                if isinstance(plan_dict, dict):
-                    config["automl_plan"] = plan_dict
-                elif hasattr(plan_dict, "model_dump"):
-                    config["automl_plan"] = plan_dict.model_dump()
         except Exception as training_error:
             # If auto-fix failed, fall through to error analysis
             raise training_error
