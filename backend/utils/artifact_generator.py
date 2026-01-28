@@ -5,7 +5,7 @@ Generate artifacts: Jupyter notebook, pickle file, charts, README
 import json
 import pickle
 import base64
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, List
 from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -25,8 +25,39 @@ def generate_notebook(
 ) -> str:
     """
     Generate a Jupyter notebook with complete training code.
+    
+    CRITICAL: Code MUST be generated from AutoMLPlan, not hardcoded boilerplate.
     """
-    automl_plan = (config or {}).get("automl_plan") or {}
+    from schemas.pipeline_schema import AutoMLPlan
+    from agents.plan_compiler import (
+        compile_preprocessing_code,
+        compile_model_code,
+        compile_metrics_code,
+        compile_pipeline_code,
+        validate_plan_for_execution
+    )
+    
+    automl_plan_dict = (config or {}).get("automl_plan") or {}
+    
+    # Convert dict to AutoMLPlan if needed
+    plan = None
+    if automl_plan_dict and isinstance(automl_plan_dict, dict):
+        try:
+            plan = AutoMLPlan(**automl_plan_dict)
+            # Validate plan before generating code
+            try:
+                validate_plan_for_execution(plan)
+            except RuntimeError as e:
+                # For low-confidence plans, still generate but with warnings
+                if "low-confidence" in str(e).lower():
+                    print(f"⚠️  Warning: {e}")
+                else:
+                    raise
+        except Exception as e:
+            print(f"⚠️  Could not parse AutoMLPlan: {e}. Using fallback code generation.")
+            plan = None
+    
+    automl_plan = automl_plan_dict  # Keep dict for markdown sections
     # Expect markdown sections in automl_plan if present
     md_sections = []
     if isinstance(automl_plan, dict) and automl_plan:
@@ -162,125 +193,139 @@ def generate_notebook(
             {
                 "cell_type": "markdown",
                 "metadata": {},
-                "source": ["## 4. Build Pipeline"]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "source": [
-                    "# Identify numeric and categorical columns\n",
-                    "numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()\n",
-                    "categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()\n",
-                    "\n",
-                    "# Build preprocessing dynamically from AutoML plan (if provided)\n",
-                    "feature_transforms = " + json.dumps((config or {}).get("feature_transforms", [])) + "\n",
-                    "transformers = []\n",
-                    "dropped = set([ft['name'] for ft in feature_transforms if ft.get('drop')])\n",
-                    "num_scaled = [ft['name'] for ft in feature_transforms if ft.get('name') in numeric_cols and ft.get('scale') == 'standard' and not ft.get('drop')]\n",
-                    "num_plain = [c for c in numeric_cols if c not in dropped and c not in num_scaled]\n",
-                    "cat_onehot = [ft['name'] for ft in feature_transforms if ft.get('name') in categorical_cols and ft.get('encode') == 'one_hot' and not ft.get('drop')]\n",
-                    "cat_ordinal = [ft['name'] for ft in feature_transforms if ft.get('name') in categorical_cols and ft.get('encode') == 'ordinal' and not ft.get('drop')]\n",
-                    "cat_freq = [ft['name'] for ft in feature_transforms if ft.get('name') in categorical_cols and ft.get('encode') == 'frequency' and not ft.get('drop')]\n",
-                    "\n",
-                    "if num_scaled:\n",
-                    "    transformers.append(('num_scaled', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), num_scaled))\n",
-                    "if num_plain:\n",
-                    "    transformers.append(('num', Pipeline([('imputer', SimpleImputer(strategy='median'))]), num_plain))\n",
-                    "if cat_onehot:\n",
-                    "    try:\n",
-                    "        ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False, min_frequency=5)\n",
-                    "    except TypeError:\n",
-                    "        ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False)\n",
-                    "    transformers.append(('cat_onehot', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', ohe)]), cat_onehot))\n",
-                    "if cat_ordinal:\n",
-                    "    from sklearn.preprocessing import OrdinalEncoder\n",
-                    "    transformers.append(('cat_ordinal', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('ordinal', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))]), cat_ordinal))\n",
-                    "if cat_freq:\n",
-                    "    # Simple frequency encoding\n",
-                    "    from sklearn.base import BaseEstimator, TransformerMixin\n",
-                    "    class FrequencyEncoder(BaseEstimator, TransformerMixin):\n",
-                    "        def fit(self, X, y=None):\n",
-                    "            import numpy as np\n",
-                    "            X = np.asarray(X, dtype=object)\n",
-                    "            self.maps_ = []\n",
-                    "            for j in range(X.shape[1]):\n",
-                    "                col = [\"\" if v is None else str(v) for v in X[:, j]]\n",
-                    "                counts = {}\n",
-                    "                for v in col:\n",
-                    "                    counts[v] = counts.get(v, 0) + 1\n",
-                    "                n = float(max(1, len(col)))\n",
-                    "                self.maps_.append({k: c / n for k, c in counts.items()})\n",
-                    "            return self\n",
-                    "        def transform(self, X):\n",
-                    "            import numpy as np\n",
-                    "            X = np.asarray(X, dtype=object)\n",
-                    "            out = np.zeros((X.shape[0], X.shape[1]), dtype=float)\n",
-                    "            for j in range(X.shape[1]):\n",
-                    "                m = self.maps_[j]\n",
-                    "                col = [\"\" if v is None else str(v) for v in X[:, j]]\n",
-                    "                out[:, j] = [float(m.get(v, 0.0)) for v in col]\n",
-                    "            return out\n",
-                    "    transformers.append(('cat_freq', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('freq', FrequencyEncoder())]), cat_freq))\n",
-                    "\n",
-                    "preprocessor = ColumnTransformer(transformers=transformers, remainder='drop')\n",
-                    "\n",
-                    "# Create model (auto-generated for this dataset/run)\n",
-                ] + (
-                    [f"model = {config.get('model_code')}\n"]
-                    if config and config.get("model_code")
-                    else (
-                        ["model = RandomForestClassifier(n_estimators=200, random_state=42)\n"]
-                        if task == 'classification'
-                        else ["model = RandomForestRegressor(n_estimators=200, random_state=42)\n"]
-                    )
-                ) + [
-                    "\n",
-                    "pipeline = Pipeline(steps=[\n",
-                    "    ('preprocessor', preprocessor),\n",
-                    "    ('model', model)\n",
-                    "])"
-                ]
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": ["## 5. Train Model"]
+                "source": ["## 4. Build Preprocessing Pipeline (from AutoMLPlan)"]
             },
             {
                 "cell_type": "code",
                 "execution_count": None,
                 "metadata": {},
                 "source": (
-                    [
-                        "# Train the model\n",
-                        "pipeline.fit(X_train, y_train)\n",
+                    [compile_preprocessing_code(plan, df)] if plan else [
+                        "# ⚠️ AutoMLPlan not available - using fallback preprocessing\n",
+                        "# This should not happen if LLM planning succeeded\n",
+                        "from sklearn.pipeline import Pipeline\n",
+                        "from sklearn.compose import ColumnTransformer\n",
+                        "from sklearn.preprocessing import StandardScaler, OneHotEncoder\n",
+                        "from sklearn.impute import SimpleImputer\n",
                         "\n",
-                        "# Make predictions\n",
-                        "y_pred = pipeline.predict(X_test)\n",
+                        "# Fallback: basic preprocessing\n",
+                        "numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()\n",
+                        "categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()\n",
                         "\n",
-                        "# Evaluate\n",
-                    ] + (
-                        ["score = accuracy_score(y_test, y_pred)\n", "print(f'Accuracy: {score:.4f}')\n", "\n", "print(classification_report(y_test, y_pred))"] 
-                        if task == 'classification' 
-                        else ["score = r2_score(y_test, y_pred)\n", "print(f'R2 Score: {score:.4f}')\n", "\n", "print(f'RMSE: {mean_squared_error(y_test, y_pred, squared=False):.4f}')"]
-                    )
+                        "transformers = []\n",
+                        "if numeric_cols:\n",
+                        "    transformers.append(('num', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), numeric_cols))\n",
+                        "if categorical_cols:\n",
+                        "    transformers.append(('cat', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))]), categorical_cols))\n",
+                        "preprocessor = ColumnTransformer(transformers, remainder='drop')\n"
+                    ]
                 )
             },
             {
                 "cell_type": "markdown",
                 "metadata": {},
-                "source": ["## 6. Feature Importance"]
+                "source": ["## 5. Build Model (from AutoMLPlan)"]
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "source": (
+                    [compile_model_code(plan, config.get('model'))] if plan else [
+                        "# ⚠️ AutoMLPlan not available - using fallback model\n",
+                        f"from sklearn.ensemble import {'RandomForestClassifier' if task == 'classification' else 'RandomForestRegressor'}\n",
+                        f"model = {'RandomForestClassifier' if task == 'classification' else 'RandomForestRegressor'}(n_estimators=200, random_state=42)\n"
+                    ]
+                )
+            },
+            {
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": ["## 6. Assemble Pipeline (from AutoMLPlan)"]
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "source": (
+                    [compile_pipeline_code(plan)] if plan else [
+                        "from sklearn.pipeline import Pipeline\n",
+                        "pipeline = Pipeline([\n",
+                        "    ('preprocessor', preprocessor),\n",
+                        "    ('model', model)\n",
+                        "])\n"
+                    ]
+                )
+            },
+            {
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": ["## 7. Train Model"]
             },
             {
                 "cell_type": "code",
                 "execution_count": None,
                 "metadata": {},
                 "source": [
-                    "# Get feature importance\n",
+                    "# Train the model\n",
+                    "pipeline.fit(X_train, y_train)\n",
+                    "\n",
+                    "# Make predictions\n",
+                    "y_pred = pipeline.predict(X_test)\n",
+                    "\n",
+                    "# Evaluate using metrics from AutoMLPlan\n"
+                ] + (
+                    [compile_metrics_code(plan)] if plan else [
+                        "# ⚠️ AutoMLPlan not available - using fallback metrics\n",
+                        "from sklearn.metrics import accuracy_score, classification_report, r2_score, mean_squared_error\n"
+                    ]
+                ) + [
+                    "\n",
+                    "# Calculate metrics\n"
+                ] + (
+                    _generate_metrics_evaluation_code(plan, task) if plan else (
+                        [
+                            "score = accuracy_score(y_test, y_pred)\n",
+                            "print(f'Accuracy: {score:.4f}')\n",
+                            "print(classification_report(y_test, y_pred))\n"
+                        ] if task == 'classification' else [
+                            "score = r2_score(y_test, y_pred)\n",
+                            "print(f'R2 Score: {score:.4f}')\n",
+                            "print(f'RMSE: {mean_squared_error(y_test, y_pred, squared=False):.4f}')\n"
+                        ]
+                    )
+                )
+            },
+            {
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": ["## 8. Feature Importance (from plan.explainability_md)"]
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "source": [
+                    "# Get feature importance (aligned with plan)\n",
                     "if hasattr(pipeline.named_steps['model'], 'feature_importances_'):\n",
                     "    importances = pipeline.named_steps['model'].feature_importances_\n",
-                    "    feature_names = numeric_cols + categorical_cols\n",
+                    "    \n",
+                    "    # Get feature names after preprocessing (aligned with plan, not dtype-based)\n",
+                    "    try:\n",
+                    "        preprocessor = pipeline.named_steps['preprocessor']\n",
+                    "        feature_names = []\n",
+                    "        for name, transformer, cols in preprocessor.transformers_:\n",
+                    "            if hasattr(transformer, 'get_feature_names_out'):\n",
+                    "                feature_names.extend(transformer.get_feature_names_out(cols))\n",
+                    "            elif hasattr(transformer, 'named_steps'):\n",
+                    "                for step_name, step_transformer in transformer.named_steps.items():\n",
+                    "                    if hasattr(step_transformer, 'get_feature_names_out'):\n",
+                    "                        feature_names.extend(step_transformer.get_feature_names_out(cols))\n",
+                    "                        break\n",
+                    "            else:\n",
+                    "                feature_names.extend([f'{name}_{col}' for col in cols])\n",
+                    "    except:\n",
+                    "        feature_names = [f'feature_{i}' for i in range(len(importances))]\n",
                     "    \n",
                     "    # Create importance DataFrame\n",
                     "    importance_df = pd.DataFrame({\n",
@@ -295,13 +340,15 @@ def generate_notebook(
                     "    plt.tight_layout()\n",
                     "    plt.show()\n",
                     "    \n",
-                    "    print(importance_df)"
+                    "    print(importance_df)\n",
+                    "else:\n",
+                    "    print('Feature importance not available for this model type.')"
                 ]
             },
             {
                 "cell_type": "markdown",
                 "metadata": {},
-                "source": ["## 7. Save Model"]
+                "source": ["## 9. Save Model"]
             },
             {
                 "cell_type": "code",
@@ -325,7 +372,7 @@ def generate_notebook(
             {
                 "cell_type": "markdown",
                 "metadata": {},
-                "source": ["## 8. Make Predictions"]
+                "source": ["## 10. Make Predictions"]
             },
             {
                 "cell_type": "code",
@@ -682,3 +729,79 @@ def generate_model_report(
         report_lines.append("\nFor questions or further analysis, refer to the generated Jupyter notebook.")
     
     return "\n".join(report_lines)
+
+
+def _generate_metrics_evaluation_code(plan, task: str) -> List[str]:
+    """Generate metrics evaluation code from AutoMLPlan."""
+    lines = []
+    
+    primary = plan.primary_metric
+    additional = plan.additional_metrics
+    
+    is_classification = "classification" in task
+    
+    # Primary metric
+    if is_classification:
+        if primary == "accuracy":
+            lines.append(f"primary_score = accuracy_score(y_test, y_pred)\n")
+            lines.append(f"print(f'Primary Metric ({primary}): {{primary_score:.4f}}')\n")
+        elif primary == "precision":
+            lines.append(f"from sklearn.metrics import precision_score\n")
+            lines.append(f"primary_score = precision_score(y_test, y_pred, average='macro', zero_division=0)\n")
+            lines.append(f"print(f'Primary Metric ({primary}): {{primary_score:.4f}}')\n")
+        elif primary == "recall":
+            lines.append(f"from sklearn.metrics import recall_score\n")
+            lines.append(f"primary_score = recall_score(y_test, y_pred, average='macro', zero_division=0)\n")
+            lines.append(f"print(f'Primary Metric ({primary}): {{primary_score:.4f}}')\n")
+        elif primary in ["f1", "f1_score"]:
+            lines.append(f"from sklearn.metrics import f1_score\n")
+            lines.append(f"primary_score = f1_score(y_test, y_pred, average='macro', zero_division=0)\n")
+            lines.append(f"print(f'Primary Metric (F1): {{primary_score:.4f}}')\n")
+        elif primary == "roc_auc":
+            lines.append(f"from sklearn.metrics import roc_auc_score\n")
+            lines.append(f"try:\n")
+            lines.append(f"    y_pred_proba = pipeline.predict_proba(X_test)\n")
+            lines.append(f"    if len(np.unique(y_test)) == 2:\n")
+            lines.append(f"        primary_score = roc_auc_score(y_test, y_pred_proba[:, 1])\n")
+            lines.append(f"    else:\n")
+            lines.append(f"        primary_score = roc_auc_score(y_test, y_pred_proba, multi_class='ovr', average='macro')\n")
+            lines.append(f"    print(f'Primary Metric (ROC-AUC): {{primary_score:.4f}}')\n")
+            lines.append(f"except Exception as e:\n")
+            lines.append(f"    print(f'ROC-AUC not available: {{e}}')\n")
+        
+        # Additional metrics
+        lines.append("\n# Additional metrics from plan:\n")
+        for metric in additional:
+            if metric == "precision" and primary != "precision":
+                lines.append(f"print(f'Precision: {{precision_score(y_test, y_pred, average=\"macro\", zero_division=0):.4f}}')\n")
+            elif metric == "recall" and primary != "recall":
+                lines.append(f"print(f'Recall: {{recall_score(y_test, y_pred, average=\"macro\", zero_division=0):.4f}}')\n")
+            elif metric == "f1" and primary not in ["f1", "f1_score"]:
+                lines.append(f"print(f'F1: {{f1_score(y_test, y_pred, average=\"macro\", zero_division=0):.4f}}')\n")
+        
+        lines.append("\nprint(classification_report(y_test, y_pred))\n")
+    else:
+        # Regression
+        if primary == "rmse":
+            lines.append(f"from sklearn.metrics import mean_squared_error\n")
+            lines.append(f"primary_score = np.sqrt(mean_squared_error(y_test, y_pred))\n")
+            lines.append(f"print(f'Primary Metric (RMSE): {{primary_score:.4f}}')\n")
+        elif primary == "mae":
+            lines.append(f"from sklearn.metrics import mean_absolute_error\n")
+            lines.append(f"primary_score = mean_absolute_error(y_test, y_pred)\n")
+            lines.append(f"print(f'Primary Metric (MAE): {{primary_score:.4f}}')\n")
+        elif primary in ["r2", "r2_score"]:
+            lines.append(f"primary_score = r2_score(y_test, y_pred)\n")
+            lines.append(f"print(f'Primary Metric (R²): {{primary_score:.4f}}')\n")
+        
+        # Additional metrics
+        lines.append("\n# Additional metrics from plan:\n")
+        for metric in additional:
+            if metric == "mae" and primary != "mae":
+                lines.append(f"print(f'MAE: {{mean_absolute_error(y_test, y_pred):.4f}}')\n")
+            elif metric in ["r2", "r2_score"] and primary not in ["r2", "r2_score"]:
+                lines.append(f"print(f'R²: {{r2_score(y_test, y_pred):.4f}}')\n")
+            elif metric == "rmse" and primary != "rmse":
+                lines.append(f"print(f'RMSE: {{np.sqrt(mean_squared_error(y_test, y_pred)):.4f}}')\n")
+    
+    return lines
