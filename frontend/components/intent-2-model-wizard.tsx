@@ -56,6 +56,7 @@ export default function Intent2ModelWizard() {
   const [liveLogs, setLiveLogs] = useState<Array<{ts: string, message: string, stage?: string, progress?: number}>>([]);
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const [currentStage, setCurrentStage] = useState<string>("");
+  const logsEndRef = React.useRef<HTMLDivElement>(null);
 
   const fetchLlmStatus = async () => {
     try {
@@ -322,6 +323,13 @@ export default function Intent2ModelWizard() {
     
     return () => clearInterval(interval);
   }, [training, currentRunId]);
+  
+  // Auto-scroll logs to bottom when new logs arrive
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [liveLogs, backendLogTail]);
 
   const fetchBackendLogTail = async () => {
     try {
@@ -708,6 +716,7 @@ export default function Intent2ModelWizard() {
                                 ))}
                               </div>
                             )}
+                            <div ref={logsEndRef} />
                           </div>
                         ) : (
                           <div className="text-center text-muted-foreground py-8">
