@@ -190,6 +190,14 @@ def build_pipeline(
             transformers.append(("cat_freq", Pipeline(steps), cat_cols_freq))
 
         preprocessor = ColumnTransformer(transformers, remainder="drop")
+        
+        # CRITICAL: Validate preprocessor has at least one transformer
+        if not transformers:
+            raise RuntimeError(
+                "COMPILER ERROR: Preprocessor has NO transformers. "
+                "This means all features were dropped or no feature_transforms were provided. "
+                "Check that feature_transforms includes at least one non-dropped feature."
+            )
 
         # Build model
         if task == "classification":
