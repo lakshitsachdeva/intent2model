@@ -941,7 +941,19 @@ async def train_model(request: TrainRequest):
             )
             
             # Build comprehensive error message
-            user_msg = f"""❌ Training Error
+            if is_compiler_error:
+                # Compiler errors - show directly without LLM analysis
+                user_msg = f"""❌ COMPILER ERROR
+
+{error_analysis.get('explanation', error_msg)}
+
+🔍 Root Cause: {error_analysis.get('root_cause', 'The compiled pipeline is invalid')}
+
+💡 Suggestions:
+{chr(10).join(f'  • {s}' for s in error_analysis.get('suggestions', []))}"""
+            else:
+                # Training errors - use LLM analysis
+                user_msg = f"""❌ Training Error
 
 {error_analysis['explanation']}
 
