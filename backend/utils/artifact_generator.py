@@ -740,23 +740,26 @@ def _generate_metrics_evaluation_code(plan, task: str) -> List[str]:
     
     is_classification = "classification" in task
     
-    # Primary metric
+    # Primary metric - handle variations like "f1_score_macro", "f1", etc.
     if is_classification:
-        if primary == "accuracy":
+        if primary == "accuracy" or "accuracy" in primary.lower():
             lines.append(f"primary_score = accuracy_score(y_test, y_pred)\n")
-            lines.append(f"print(f'Primary Metric ({primary}): {{primary_score:.4f}}')\n")
-        elif primary == "precision":
+            lines.append(f"print(f'Primary Metric (Accuracy): {{primary_score:.4f}}')\n")
+        elif "precision" in primary.lower():
             lines.append(f"from sklearn.metrics import precision_score\n")
-            lines.append(f"primary_score = precision_score(y_test, y_pred, average='macro', zero_division=0)\n")
-            lines.append(f"print(f'Primary Metric ({primary}): {{primary_score:.4f}}')\n")
-        elif primary == "recall":
+            avg = "macro" if "macro" in primary.lower() else ("micro" if "micro" in primary.lower() else "weighted")
+            lines.append(f"primary_score = precision_score(y_test, y_pred, average='{avg}', zero_division=0)\n")
+            lines.append(f"print(f'Primary Metric (Precision {avg}): {{primary_score:.4f}}')\n")
+        elif "recall" in primary.lower():
             lines.append(f"from sklearn.metrics import recall_score\n")
-            lines.append(f"primary_score = recall_score(y_test, y_pred, average='macro', zero_division=0)\n")
-            lines.append(f"print(f'Primary Metric ({primary}): {{primary_score:.4f}}')\n")
-        elif primary in ["f1", "f1_score"]:
+            avg = "macro" if "macro" in primary.lower() else ("micro" if "micro" in primary.lower() else "weighted")
+            lines.append(f"primary_score = recall_score(y_test, y_pred, average='{avg}', zero_division=0)\n")
+            lines.append(f"print(f'Primary Metric (Recall {avg}): {{primary_score:.4f}}')\n")
+        elif "f1" in primary.lower():
             lines.append(f"from sklearn.metrics import f1_score\n")
-            lines.append(f"primary_score = f1_score(y_test, y_pred, average='macro', zero_division=0)\n")
-            lines.append(f"print(f'Primary Metric (F1): {{primary_score:.4f}}')\n")
+            avg = "macro" if "macro" in primary.lower() else ("micro" if "micro" in primary.lower() else "weighted")
+            lines.append(f"primary_score = f1_score(y_test, y_pred, average='{avg}', zero_division=0)\n")
+            lines.append(f"print(f'Primary Metric (F1 {avg}): {{primary_score:.4f}}')\n")
         elif primary == "roc_auc":
             lines.append(f"from sklearn.metrics import roc_auc_score\n")
             lines.append(f"try:\n")

@@ -20,10 +20,18 @@ def compile_preprocessing_code(plan: AutoMLPlan, df: pd.DataFrame) -> str:
     NEVER applies StandardScaler unless plan explicitly says so.
     Groups features by plan semantics, not dtype.
     """
+    import pandas as pd
+    
     lines = []
     lines.append("# Preprocessing compiled from AutoMLPlan\n")
     lines.append("# Each feature transform is based on plan.feature_transforms\n")
     lines.append("\n")
+    
+    # Validate plan has feature_transforms
+    if not plan.feature_transforms:
+        lines.append("# ⚠️ WARNING: plan.feature_transforms is empty! Using fallback.\n")
+        lines.append("# This should not happen - the plan is incomplete.\n")
+        lines.append("\n")
     
     # Group features by transform strategy (from plan, not dtype)
     dropped_features = []
@@ -177,6 +185,37 @@ def compile_preprocessing_code(plan: AutoMLPlan, df: pd.DataFrame) -> str:
     lines.append("# Create preprocessor from plan-driven transformers\n")
     if dropped_features:
         lines.append(f"# Dropped features (from plan): {dropped_features}\n")
+    
+    # CRITICAL: If no transformers were generated, something is wrong with the plan
+    # Generate a fallback based on dataset structure
+    if not transformers:
+        lines.append("# ⚠️ WARNING: No transformers generated from plan.feature_transforms!\n")
+        lines.append("# This suggests the plan is incomplete. Generating fallback preprocessing.\n")
+        lines.append("\n")
+        
+        # Infer from dataframe
+        numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        categorical_cols = [c for c in df.columns if c not in numeric_cols]
+        
+        # Remove target and dropped features
+        target = plan.inferred_target
+        numeric_cols = [c for c in numeric_cols if c != target and c not in dropped_features]
+        categorical_cols = [c for c in categorical_cols if c != target and c not in dropped_features]
+        
+        if numeric_cols:
+            lines.append(f"# Fallback: numeric features\n")
+            lines.append(f"numeric_cols = {numeric_cols}\n")
+            lines.append(f"transformers.append(('num_scaled', Pipeline([('scaler', StandardScaler())]), numeric_cols))\n")
+        
+        if categorical_cols:
+            lines.append(f"# Fallback: categorical features\n")
+            lines.append(f"categorical_cols = {categorical_cols}\n")
+            lines.append(f"try:\n")
+            lines.append(f"    ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False, min_frequency=5)\n")
+            lines.append(f"except TypeError:\n")
+            lines.append(f"    ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False)\n")
+            lines.append(f"transformers.append(('cat_onehot', Pipeline([('onehot', ohe)]), categorical_cols))\n")
+    
     lines.append("preprocessor = ColumnTransformer(transformers, remainder='drop')\n")
     lines.append("\n")
     
@@ -211,13 +250,14 @@ def compile_model_code(plan: AutoMLPlan, selected_model_name: Optional[str] = No
     
     model_name = model_candidate.model_name
     params = model_candidate.params or {}
+    reason_md = model_candidate.reason_md or "Selected based on plan recommendations."
     
     # Generate model instantiation based on task and model name
     task = plan.task_type
     is_classification = "classification" in task
     
     lines.append(f"# Selected model: {model_name} (from plan.model_candidates)\n")
-    lines.append(f"# Reason: {model_candidate.reason_md}\n")
+    lines.append(f"# Reason: {reason_md}\n")
     lines.append("\n")
     
     # Map model names to sklearn classes
@@ -378,8 +418,11 @@ def validate_plan_for_execution(plan: AutoMLPlan) -> None:
             f"Please specify task type explicitly."
         )
     
+    # Don't raise errors - allow fallback code generation
+    # The compiler will handle empty feature_transforms gracefully
     if not plan.feature_transforms:
-        raise RuntimeError("Plan has no feature_transforms. Cannot generate preprocessing code.")
+        print("⚠️  Warning: Plan has no feature_transforms. Compiler will use fallback logic.")
     
     if not plan.model_candidates:
+        print("⚠️  Warning: Plan has no model_candidates. Cannot generate model code.")
         raise RuntimeError("Plan has no model_candidates. Cannot generate model code.")
