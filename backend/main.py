@@ -190,7 +190,7 @@ run_logs_cache: Dict[str, Any] = {}  # run_id -> {"events": [...], "progress": f
 
 
 def _log_run_event(run_id: str, message: str, stage: Optional[str] = None, progress: Optional[float] = None):
-    """Append a structured log event for a run (for Developer Logs UI)."""
+    """Append a structured log event for a run (for Developer Logs UI). Also writes to stdout for backend.log."""
     if not run_id:
         return
     entry = {
@@ -205,6 +205,7 @@ def _log_run_event(run_id: str, message: str, stage: Optional[str] = None, progr
         except Exception:
             pass
 
+    # Write to in-memory cache for structured logs
     cur = run_logs_cache.get(run_id) or {"events": [], "progress": 0.0, "stage": "init"}
     cur["events"] = (cur.get("events") or [])[-500:] + [entry]
     if progress is not None:
@@ -212,6 +213,11 @@ def _log_run_event(run_id: str, message: str, stage: Optional[str] = None, progr
     if stage is not None:
         cur["stage"] = entry.get("stage", cur.get("stage", ""))
     run_logs_cache[run_id] = cur
+    
+    # ALSO write to stdout (captured by backend.log) so frontend can see logs immediately
+    stage_str = f"[{stage}]" if stage else ""
+    progress_str = f"({progress:.0f}%)" if progress is not None else ""
+    print(f"[{run_id[:8]}] {stage_str} {progress_str} {message}", flush=True)
 
 # API key management - allow users to provide custom keys
 from utils.api_key_manager import set_custom_api_key, get_api_key
