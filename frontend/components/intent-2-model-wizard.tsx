@@ -762,14 +762,26 @@ export default function Intent2ModelWizard() {
                               );
                             }) : null}
                             
-                            {/* Fallback: Show backend log tail if run logs not available yet */}
-                            {liveLogs.length === 0 && training && backendLogTail.length > 0 && (
-                              <div className="text-xs text-muted-foreground space-y-1">
-                                {backendLogTail.slice(-20).map((line, idx) => (
-                                  <div key={idx} className="p-1 rounded">
-                                    {line}
-                                  </div>
-                                ))}
+                            {/* ALWAYS show backend logs during training (updates every 200ms) */}
+                            {training && backendLogTail.length > 0 && (
+                              <div className="text-xs text-muted-foreground space-y-1 mt-4 pt-4 border-t">
+                                <div className="mb-2 font-semibold text-foreground">
+                                  Backend Logs (live - updates every 200ms):
+                                </div>
+                                {backendLogTail.slice(-25).map((line, idx) => {
+                                  // Highlight important lines
+                                  const isImportant = line.includes("Run ID") || line.includes("🚀") || line.includes("✅") || line.includes("❌") || line.includes("⚠️") || line.includes("🔧") || line.includes("🔄") || line.includes("[init]") || line.includes("[train]") || line.includes("[plan]");
+                                  return (
+                                    <div 
+                                      key={idx} 
+                                      className={`p-1 rounded whitespace-pre-wrap break-words ${
+                                        isImportant ? "text-foreground font-medium bg-muted/50" : ""
+                                      }`}
+                                    >
+                                      {line}
+                                    </div>
+                                  );
+                                })}
                               </div>
                             )}
                             <div ref={logsEndRef} />
