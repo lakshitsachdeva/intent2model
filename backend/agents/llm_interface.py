@@ -105,7 +105,13 @@ class LLMInterface:
             # If you want to force key auth, set GEMINI_CLI_AUTH_MODE=api_key
             auth_mode = (os.getenv("GEMINI_CLI_AUTH_MODE", "oauth") or "oauth").strip().lower()
             child_env = os.environ.copy()
-            if auth_mode == "api_key":
+            if auth_mode == "oauth":
+                # Force OAuth path by removing any key env vars from the subprocess.
+                # Otherwise the CLI may silently prefer key-based auth if these are present.
+                child_env.pop("GOOGLE_API_KEY", None)
+                child_env.pop("GEMINI_API_KEY", None)
+                child_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+            elif auth_mode == "api_key":
                 from utils.api_key_manager import get_api_key
                 gemini_key = get_api_key(provider="gemini") or ""
                 if gemini_key and not child_env.get("GOOGLE_API_KEY"):
