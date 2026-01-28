@@ -309,19 +309,29 @@ export default function Intent2ModelWizard() {
     }
   };
   
-  // Poll run logs in real-time during training
+  // Poll logs in real-time during training (BOTH backend logs AND run logs)
   useEffect(() => {
-    if (!training || !currentRunId) return;
+    if (!training) return;
     
-    // Fetch immediately
-    fetchRunLogs(currentRunId);
-    
-    // Then poll every 200ms for real-time updates (faster!)
-    const interval = setInterval(() => {
-      fetchRunLogs(currentRunId);
+    // ALWAYS poll backend logs immediately (even before run_id is available)
+    fetchBackendLogTail();
+    const backendInterval = setInterval(() => {
+      fetchBackendLogTail();
     }, 200);
     
-    return () => clearInterval(interval);
+    // If we have run_id, also poll structured run logs
+    let runLogInterval: NodeJS.Timeout | null = null;
+    if (currentRunId) {
+      fetchRunLogs(currentRunId);
+      runLogInterval = setInterval(() => {
+        fetchRunLogs(currentRunId);
+      }, 200);
+    }
+    
+    return () => {
+      clearInterval(backendInterval);
+      if (runLogInterval) clearInterval(runLogInterval);
+    };
   }, [training, currentRunId]);
   
   // Auto-scroll logs to bottom when new logs arrive
@@ -707,10 +717,10 @@ export default function Intent2ModelWizard() {
                           {liveLogs.length} events
                         </Badge>
                       </div>
-                      <div className="rounded-lg border bg-muted/30 p-4 max-h-[300px] overflow-y-auto">
-                        {liveLogs.length > 0 || (training && backendLogTail.length > 0) ? (
+                      <div className="rounded-lg border bg-muted/30 p-4 max-h-[300px] overflow-y-auto" ref={logsEndRef}>
+                        {(liveLogs.length > 0 || (training && backendLogTail.length > 0)) ? (
                           <div className="space-y-2 font-mono text-xs">
-                            {/* Show structured run logs if available */}
+                            {/* Show structured run logs if available (preferred) */}
                             {liveLogs.length > 0 ? liveLogs.slice(-50).map((log, idx) => {
                               const isError = log.message.includes("❌") || log.message.includes("ERROR") || log.message.includes("failed");
                               const isSuccess = log.message.includes("✅") || log.message.includes("succeeded");
