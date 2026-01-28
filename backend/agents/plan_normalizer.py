@@ -165,6 +165,83 @@ def normalize_plan_dict(plan_dict: Dict[str, Any], profile: Optional[Dict[str, A
     return normalized
 
 
+def _generate_feature_transforms_from_profile(profile: Optional[Dict[str, Any]], target: Optional[str]) -> List[Dict[str, Any]]:
+    """
+    Generate feature_transforms from profile when LLM response is missing them.
+    This is a fallback to ensure the plan is always executable.
+    """
+    if not profile:
+        return []
+    
+    cols = profile.get("columns", [])
+    id_like = set(profile.get("identifier_like_columns", []))
+    numeric_cols = set(profile.get("numeric_cols", []))
+    dtypes = profile.get("dtypes", {})
+    nunique = profile.get("nunique", {})
+    missing_pct = profile.get("missing_percent", {})
+    
+    feature_transforms = []
+    for c in cols:
+        if c == target:
+            feature_transforms.append({
+                "name": c,
+                "inferred_dtype": str(dtypes.get(c, "unknown")),
+                "kind": "unknown",
+                "kind_confidence": 1.0,
+                "drop": True,
+                "impute": "none",
+                "encode": "none",
+                "scale": "none",
+                "notes_md": "Target column - dropped from features",
+                "transform_confidence": 1.0,
+            })
+        elif c in id_like:
+            feature_transforms.append({
+                "name": c,
+                "inferred_dtype": str(dtypes.get(c, "unknown")),
+                "kind": "identifier",
+                "kind_confidence": 0.9,
+                "drop": True,
+                "impute": "none",
+                "encode": "none",
+                "scale": "none",
+                "notes_md": "Identifier column - dropped",
+                "transform_confidence": 1.0,
+            })
+        elif c in numeric_cols:
+            missing = float(missing_pct.get(c, 0.0))
+            feature_transforms.append({
+                "name": c,
+                "inferred_dtype": str(dtypes.get(c, "unknown")),
+                "kind": "continuous",
+                "kind_confidence": 0.8,
+                "drop": False,
+                "impute": "median" if missing > 0 else "none",
+                "encode": "none",
+                "scale": "standard",  # Default scaling for numeric
+                "notes_md": "Numeric feature - standard scaling",
+                "transform_confidence": 0.7,
+            })
+        else:
+            missing = float(missing_pct.get(c, 0.0))
+            nunq = int(nunique.get(c, 0))
+            encode_strategy = "one_hot" if nunq <= 30 else "frequency"
+            feature_transforms.append({
+                "name": c,
+                "inferred_dtype": str(dtypes.get(c, "unknown")),
+                "kind": "binary" if nunq == 2 else "nominal",
+                "kind_confidence": 0.8,
+                "drop": False,
+                "impute": "most_frequent" if missing > 0 else "none",
+                "encode": encode_strategy,
+                "scale": "none",
+                "notes_md": f"Categorical feature - {encode_strategy} encoding",
+                "transform_confidence": 0.7,
+            })
+    
+    return feature_transforms
+
+
 def _normalize_feature_kind(kind: Any) -> FeatureKind:
     """Normalize feature kind to valid enum value."""
     kind_str = str(kind).lower()
