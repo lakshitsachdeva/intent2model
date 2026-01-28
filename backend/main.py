@@ -847,6 +847,21 @@ async def train_model(request: TrainRequest):
             config["model"] = selected_model
             config["model_code"] = _model_code_for_notebook(task, selected_model)
         
+        # Get plan from train_result if available (from autonomous executor)
+        final_plan = plan
+        if "plan" in train_result:
+            plan_from_result = train_result["plan"]
+            if isinstance(plan_from_result, dict):
+                # Already a dict
+                final_plan_dict = plan_from_result
+            elif hasattr(plan_from_result, "model_dump"):
+                # AutoMLPlan object
+                final_plan_dict = plan_from_result.model_dump()
+            else:
+                final_plan_dict = plan.model_dump()
+        else:
+            final_plan_dict = plan.model_dump()
+        
         trained_models_cache[run_id] = {
             "model": train_result["best_model"],
             "target": request.target,
@@ -857,7 +872,8 @@ async def train_model(request: TrainRequest):
             "model_name": train_result.get("model_name", config.get("model") if config else None),
             "selected_model": selected_model,
             "pipelines_by_model": pipelines_by_model,
-            "automl_plan": plan.model_dump(),
+            "automl_plan": final_plan_dict,  # Store plan dict for notebook generation
+            "plan": final_plan_dict,  # Also store as "plan" for compatibility
             "df": df.copy(),  # Store dataset for artifact generation
             "metrics": train_result["metrics"],
             "feature_importance": train_result.get("feature_importance"),
