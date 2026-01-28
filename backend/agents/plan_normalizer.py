@@ -68,14 +68,20 @@ def normalize_plan_dict(plan_dict: Dict[str, Any], profile: Optional[Dict[str, A
     else:
         normalized["feature_transforms"] = []
     
-    # 3. Normalize model_candidates
+    # 3. Normalize model_candidates (CRITICAL: convert sklearn class names to internal keys)
     if "model_candidates" in plan_dict:
         normalized["model_candidates"] = []
         for mc in plan_dict["model_candidates"]:
             if not isinstance(mc, dict) or "model_name" not in mc:
                 continue
+            raw_name = str(mc["model_name"])
+            # Normalize sklearn class names to internal keys
+            normalized_name = _normalize_model_name(raw_name)
+            if not normalized_name:
+                print(f"⚠️  Warning: Unknown model name '{raw_name}', skipping")
+                continue
             normalized["model_candidates"].append({
-                "model_name": str(mc["model_name"]),
+                "model_name": normalized_name,
                 "reason_md": str(mc.get("reason_md", "")),
                 "params": dict(mc.get("params", {})),
             })
@@ -186,6 +192,82 @@ def _normalize_scale_strategy(strategy: Any) -> ScaleStrategy:
     strategy_str = str(strategy).lower()
     valid = ["none", "standard", "robust"]
     return strategy_str if strategy_str in valid else "none"
+
+
+def _normalize_model_name(raw_name: str) -> Optional[str]:
+    """
+    Normalize sklearn class names to internal model keys.
+    
+    Examples:
+        LogisticRegression -> logistic_regression
+        RandomForestClassifier -> random_forest
+        XGBClassifier -> xgboost
+        SVC -> svm
+    """
+    raw_lower = raw_name.lower().strip()
+    
+    # Direct mapping for common sklearn class names
+    mapping = {
+        # Classification
+        "logisticregression": "logistic_regression",
+        "logistic_regression": "logistic_regression",
+        "randomforestclassifier": "random_forest",
+        "randomforest": "random_forest",
+        "random_forest": "random_forest",
+        "random_forest_classifier": "random_forest",
+        "xgboostclassifier": "xgboost",
+        "xgbclassifier": "xgboost",
+        "xgboost": "xgboost",
+        "svc": "svm",
+        "svm": "svm",
+        "supportvectormachine": "svm",
+        "gaussiannb": "naive_bayes",
+        "naivebayes": "naive_bayes",
+        "naive_bayes": "naive_bayes",
+        "gradientboostingclassifier": "gradient_boosting",
+        "gradientboosting": "gradient_boosting",
+        "gradient_boosting": "gradient_boosting",
+        "gradient_boosting_classifier": "gradient_boosting",
+        "kneighborsclassifier": "knn",  # Note: KNN might not be in pipeline_builder
+        "knn": "knn",
+        
+        # Regression
+        "linearregression": "linear_regression",
+        "linear_regression": "linear_regression",
+        "randomforestregressor": "random_forest",
+        "random_forest_regressor": "random_forest",
+        "xgboostregressor": "xgboost",
+        "xgbregressor": "xgboost",
+        "svr": "svm",
+        "gradientboostingregressor": "gradient_boosting",
+        "gradient_boosting_regressor": "gradient_boosting",
+        "ridge": "ridge",
+        "ridge_regression": "ridge",
+        "lasso": "lasso",
+        "lasso_regression": "lasso",
+    }
+    
+    # Try exact match first
+    if raw_lower in mapping:
+        return mapping[raw_lower]
+    
+    # Try removing common suffixes
+    for suffix in ["classifier", "regressor", "model"]:
+        if raw_lower.endswith(suffix):
+            base = raw_lower[:-len(suffix)].strip("_")
+            if base in mapping:
+                return mapping[base]
+    
+    # If already a valid key, return as-is
+    valid_keys = [
+        "logistic_regression", "random_forest", "xgboost", "svm",
+        "naive_bayes", "gradient_boosting", "linear_regression",
+        "ridge", "lasso"
+    ]
+    if raw_lower in valid_keys:
+        return raw_lower
+    
+    return None
 
 
 def _infer_task_type(profile: Dict[str, Any], target: str) -> str:

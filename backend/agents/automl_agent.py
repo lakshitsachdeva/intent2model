@@ -48,11 +48,19 @@ def plan_automl(df: pd.DataFrame, requested_target: Optional[str] = None, llm_pr
             # Validate plan (logical consistency beyond schema)
             _validate_plan(plan_dict, profile)
             
+            print(f"✅ AutoML planning attempt {attempt+1} succeeded")
             return AutoMLPlan(**plan_dict)
         except Exception as e:
             last_error = e
             error_str = str(e)
-            print(f"❌ AutoML planning attempt {attempt+1} failed: {error_str[:300]}")
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"❌ AutoML planning attempt {attempt+1} failed:")
+            print(f"   Error: {error_str[:500]}")
+            if "validation error" in error_str.lower():
+                print(f"   Full traceback:\n{error_details[:1000]}")
+            if last_response:
+                print(f"   LLM response preview: {last_response[:500]}...")
 
     # Hard fallback: rule-based minimal plan (marked as low confidence)
     print("⚠️  LLM planning failed after all retries. Using rule-based fallback (low confidence).")
