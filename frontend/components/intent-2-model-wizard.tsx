@@ -53,6 +53,9 @@ export default function Intent2ModelWizard() {
   const [devLogs, setDevLogs] = useState<any>(null);
   const [devLogsError, setDevLogsError] = useState<string | null>(null);
   const [backendLogTail, setBackendLogTail] = useState<string[]>([]);
+  const [liveLogs, setLiveLogs] = useState<Array<{ts: string, message: string, stage?: string, progress?: number}>>([]);
+  const [currentRunId, setCurrentRunId] = useState<string | null>(null);
+  const [currentStage, setCurrentStage] = useState<string>("");
 
   const fetchLlmStatus = async () => {
     try {
@@ -198,6 +201,12 @@ export default function Intent2ModelWizard() {
       const data = await response.json();
       
       if (response.ok && data.run_id) {
+        // Set run_id for real-time log polling
+        setCurrentRunId(data.run_id);
+        
+        // Start polling logs immediately
+        fetchRunLogs(data.run_id);
+        
         if (progressInterval) clearInterval(progressInterval);
         if (logsInterval) clearInterval(logsInterval);
         setProgress(100);
@@ -265,14 +274,40 @@ export default function Intent2ModelWizard() {
       const data = await resp.json();
       setDevLogs(data);
       setDevLogsError(null);
+      
+      // Update live logs for real-time display
+      if (data.events && Array.isArray(data.events)) {
+        setLiveLogs(data.events);
+      }
+      
       // If backend provides progress, prefer it
       if (typeof data.progress === "number") {
         setProgress(Math.max(0, Math.min(100, data.progress)));
+      }
+      
+      // Update current stage
+      if (data.stage) {
+        setCurrentStage(data.stage);
       }
     } catch (e: any) {
       setDevLogsError(e?.message || "Failed to fetch logs");
     }
   };
+  
+  // Poll run logs in real-time during training
+  useEffect(() => {
+    if (!training || !currentRunId) return;
+    
+    // Fetch immediately
+    fetchRunLogs(currentRunId);
+    
+    // Then poll every 500ms for real-time updates
+    const interval = setInterval(() => {
+      fetchRunLogs(currentRunId);
+    }, 500);
+    
+    return () => clearInterval(interval);
+  }, [training, currentRunId]);
 
   const fetchBackendLogTail = async () => {
     try {
@@ -587,30 +622,74 @@ export default function Intent2ModelWizard() {
                   </div>
                 ) : (
                   <div className="space-y-6">
-                    <div className="flex justify-between text-sm font-medium">
-                      <span>Training progress</span>
-                      <span>{Math.round(progress)}%</span>
+                    {/* Progress Bar */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-sm font-medium">
+                        <span>{currentStage ? `Stage: ${currentStage}` : "Training in progress"}</span>
+                        <span>{Math.round(progress)}%</span>
+                      </div>
+                      <Progress value={progress} className="h-3" />
                     </div>
-                    <Progress value={progress} className="h-3" />
                     
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      {[
-                        "Analyzing feature importance...",
-                        "Optimizing weights...",
-                        "Cross-validating models...",
-                        "Finalizing ensemble logic..."
-                      ].map((task, i) => (
-                        <div key={i} className="flex items-center space-x-3 text-sm">
-                          {progress > (i + 1) * 25 ? (
-                            <CheckCircle2 className="w-4 h-4 text-green-500" />
-                          ) : (
-                            <div className="w-4 h-4 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />
-                          )}
-                          <span className={progress > (i + 1) * 25 ? "text-muted-foreground line-through" : ""}>
-                            {task}
-                          </span>
-                        </div>
-                      ))}
+                    {/* Live Logs - Real-time updates */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-sm font-semibold">Live Activity</h4>
+                        <Badge variant="outline" className="text-xs">
+                          {liveLogs.length} events
+                        </Badge>
+                      </div>
+                      <div className="rounded-lg border bg-muted/30 p-4 max-h-[400px] overflow-y-auto">
+                        {liveLogs.length > 0 ? (
+                          <div className="space-y-2 font-mono text-xs">
+                            {liveLogs.slice(-50).map((log, idx) => {
+                              const isError = log.message.includes("❌") || log.message.includes("ERROR") || log.message.includes("failed");
+                              const isSuccess = log.message.includes("✅") || log.message.includes("succeeded");
+                              const isWarning = log.message.includes("⚠️") || log.message.includes("WARNING");
+                              const isRepair = log.message.includes("🔧") || log.message.includes("repair");
+                              const isRetry = log.message.includes("🔄") || log.message.includes("retry");
+                              
+                              return (
+                                <div
+                                  key={idx}
+                                  className={`p-2 rounded border-l-2 ${
+                                    isError
+                                      ? "bg-red-50 dark:bg-red-950/20 border-red-500 text-red-700 dark:text-red-300"
+                                      : isSuccess
+                                      ? "bg-green-50 dark:bg-green-950/20 border-green-500 text-green-700 dark:text-green-300"
+                                      : isWarning
+                                      ? "bg-yellow-50 dark:bg-yellow-950/20 border-yellow-500 text-yellow-700 dark:text-yellow-300"
+                                      : isRepair
+                                      ? "bg-blue-50 dark:bg-blue-950/20 border-blue-500 text-blue-700 dark:text-blue-300"
+                                      : isRetry
+                                      ? "bg-purple-50 dark:bg-purple-950/20 border-purple-500 text-purple-700 dark:text-purple-300"
+                                      : "bg-background border-gray-300 dark:border-gray-700"
+                                  }`}
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <span className="flex-1 break-words">{log.message}</span>
+                                    {log.progress !== undefined && (
+                                      <span className="text-xs text-muted-foreground shrink-0">
+                                        {Math.round(log.progress)}%
+                                      </span>
+                                    )}
+                                  </div>
+                                  {log.stage && (
+                                    <div className="text-xs text-muted-foreground mt-1">
+                                      Stage: {log.stage}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="text-center text-muted-foreground py-8">
+                            <div className="w-8 h-8 rounded-full border-2 border-primary/30 border-t-primary animate-spin mx-auto mb-2" />
+                            <p>Waiting for activity logs...</p>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}

@@ -19,9 +19,17 @@ class AutonomousExecutor:
     Tries → Fails → Learns → Fixes → Retries → Succeeds
     """
     
-    def __init__(self):
+    def __init__(self, run_id: Optional[str] = None, log_callback=None):
         self.max_attempts = 5
         self.attempt_history = []
+        self.run_id = run_id
+        self.log_callback = log_callback  # Function to call for logging
+    
+    def _log(self, message: str, stage: str = "executor", progress: Optional[float] = None):
+        """Log a message (to callback if available, and print)."""
+        if self.log_callback:
+            self.log_callback(self.run_id, message, stage, progress)
+        print(f"[AutonomousExecutor] {message}")
     
     def execute_with_auto_fix(
         self,
@@ -40,14 +48,17 @@ class AutonomousExecutor:
         
         for attempt in range(self.max_attempts):
             try:
-                print(f"\n🔄 Attempt {attempt + 1}/{self.max_attempts}: Planning and training...")
+                self._log(f"🔄 Attempt {attempt + 1}/{self.max_attempts}: Starting planning and training...", "executor", 30 + attempt * 10)
                 
                 # Step 1: Get plan (or repair previous plan)
                 if attempt == 0:
                     # First attempt: get plan from LLM
+                    self._log("📋 Step 1: Getting plan from LLM...", "plan", 35)
                     plan = plan_automl(df, requested_target=requested_target, llm_provider="gemini")
+                    self._log(f"✅ Plan received: {len(plan.feature_transforms)} feature transforms, {len(plan.model_candidates)} models", "plan", 40)
                 else:
                     # Subsequent attempts: repair the plan based on previous errors
+                    self._log(f"🔧 Step 1: Repairing plan based on previous errors (attempt {attempt})...", "repair", 35)
                     plan = self._repair_plan_from_errors(
                         df=df,
                         profile=profile,
@@ -56,22 +67,27 @@ class AutonomousExecutor:
                         previous_errors=self.attempt_history,
                         requested_target=requested_target
                     )
+                    self._log(f"✅ Plan repaired: {len(plan.feature_transforms)} feature transforms", "repair", 40)
                 
                 # Step 2: Validate plan has features
                 if not plan.feature_transforms or all(ft.drop for ft in plan.feature_transforms):
-                    print("⚠️  Plan has no features - auto-generating feature_transforms...")
+                    self._log("⚠️  Plan has no features - auto-generating feature_transforms...", "repair", 42)
                     plan.feature_transforms = _generate_feature_transforms_from_profile(
                         profile=profile,
                         target=plan.inferred_target
                     )
-                    print(f"✅ Generated {len([ft for ft in plan.feature_transforms if not ft.drop])} features")
+                    kept_count = len([ft for ft in plan.feature_transforms if not ft.drop])
+                    self._log(f"✅ Generated {kept_count} features from dataset", "repair", 45)
                 
                 # Step 3: Build config from plan
+                self._log("⚙️  Step 2: Building pipeline configuration from plan...", "config", 50)
                 config = self._plan_to_config(plan, profile)
+                self._log(f"✅ Config built: {len(config.get('feature_transforms', []))} feature transforms", "config", 55)
                 
                 # Step 4: Try training
-                print(f"🚀 Training models: {model_candidates}")
+                self._log(f"🚀 Step 3: Training models: {', '.join(model_candidates)}...", "train", 60)
                 if len(model_candidates) > 1:
+                    self._log(f"📊 Comparing {len(model_candidates)} models...", "train", 62)
                     result = compare_models(
                         df=df,
                         target=target,
@@ -80,15 +96,18 @@ class AutonomousExecutor:
                         model_candidates=model_candidates,
                         base_config=config
                     )
+                    self._log(f"✅ Model comparison complete: {len(result.get('all_models', []))} models trained", "train", 68)
                 else:
+                    self._log(f"🎯 Training single model: {model_candidates[0]}...", "train", 62)
                     if task == "classification":
                         result = train_classification(df, target, metric, config)
                     else:
                         result = train_regression(df, target, metric, config)
                     result["model_name"] = model_candidates[0] if model_candidates else "unknown"
+                    self._log(f"✅ Model trained: {result['model_name']}", "train", 68)
                 
                 # Step 5: Success!
-                print(f"✅ Training succeeded on attempt {attempt + 1}!")
+                self._log(f"🎉 Training succeeded on attempt {attempt + 1}!", "success", 70)
                 result["plan"] = plan.model_dump()
                 result["attempts"] = attempt + 1
                 return result
@@ -98,7 +117,7 @@ class AutonomousExecutor:
                 error_type = type(e).__name__
                 error_trace = traceback.format_exc()
                 
-                print(f"❌ Attempt {attempt + 1} failed: {error_type}: {error_msg[:200]}")
+                self._log(f"❌ Attempt {attempt + 1} failed: {error_type}: {error_msg[:150]}...", "error", 50)
                 
                 # Store error for learning
                 self.attempt_history.append({
@@ -111,14 +130,14 @@ class AutonomousExecutor:
                 
                 # Check if it's a fixable error
                 if self._is_fixable_error(error_msg):
-                    print(f"🔧 Error is fixable - will repair and retry...")
+                    self._log("🔧 Error is fixable - analyzing and preparing repair...", "repair", 45)
                     continue
                 elif attempt < self.max_attempts - 1:
-                    print(f"🔄 Will try different approach on next attempt...")
+                    self._log(f"🔄 Will try different approach on attempt {attempt + 2}...", "retry", 40)
                     continue
                 else:
                     # Last attempt failed - use ultimate fallback
-                    print(f"⚠️  All attempts failed - using ultimate fallback...")
+                    self._log("⚠️  All attempts failed - using ultimate fallback configuration...", "fallback", 50)
                     return self._ultimate_fallback(df, target, task, metric, model_candidates, profile)
         
         # Should never reach here, but just in case
@@ -150,7 +169,7 @@ class AutonomousExecutor:
         Repair plan based on previous errors.
         Automatically fixes common issues.
         """
-        print("🔧 Repairing plan based on previous errors...")
+        self._log("🔧 Analyzing previous errors and repairing plan...", "repair", 35)
         
         # Get the last plan (if available)
         last_plan_dict = None
@@ -163,7 +182,7 @@ class AutonomousExecutor:
         # Common fixes:
         # 1. If all features dropped, generate new feature_transforms
         if "all features" in all_errors.lower() or "no features" in all_errors.lower():
-            print("  → Fix: Generating feature_transforms from dataset...")
+            self._log("  → Fix: All features were dropped - generating new feature_transforms from dataset...", "repair", 37)
             if not last_plan_dict:
                 last_plan_dict = {}
             
@@ -173,6 +192,9 @@ class AutonomousExecutor:
                 target=target
             )
             
+            kept_count = len([ft for ft in feature_transforms if not ft.get("drop", False)])
+            self._log(f"  → Generated {kept_count} features that will be kept", "repair", 38)
+            
             last_plan_dict["feature_transforms"] = [ft if isinstance(ft, dict) else ft.model_dump() for ft in feature_transforms]
             last_plan_dict["inferred_target"] = target
             last_plan_dict["task_type"] = task
@@ -181,7 +203,7 @@ class AutonomousExecutor:
         
         # 2. If plan missing, create minimal plan
         if not last_plan_dict:
-            print("  → Fix: Creating minimal plan from dataset...")
+            self._log("  → Fix: Plan missing - creating minimal plan from dataset...", "repair", 37)
             last_plan_dict = {
                 "plan_schema_version": "v1",
                 "inferred_target": target,
@@ -237,7 +259,7 @@ class AutonomousExecutor:
         Ultimate fallback - use simplest possible configuration.
         This should ALWAYS work.
         """
-        print("🆘 Using ultimate fallback - simplest configuration...")
+        self._log("🆘 Using ultimate fallback - simplest configuration that always works...", "fallback", 50)
         
         # Create minimal config that always works
         config = {

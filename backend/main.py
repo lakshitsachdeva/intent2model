@@ -718,11 +718,15 @@ async def train_model(request: TrainRequest):
         # AUTONOMOUS EXECUTOR: Try, fail, learn, fix, retry until it works
         from agents.autonomous_executor import AutonomousExecutor
         
-        _log_run_event(run_id, "Starting autonomous training (will auto-fix errors)", stage="train", progress=35)
+        _log_run_event(run_id, "🚀 Starting autonomous training (will auto-fix errors)", stage="train", progress=35)
         trace.append("Using autonomous executor - will automatically fix errors and retry")
         
         try:
-            executor = AutonomousExecutor()
+            # Pass log callback to executor so it can log in real-time
+            executor = AutonomousExecutor(
+                run_id=run_id,
+                log_callback=_log_run_event
+            )
             train_result = executor.execute_with_auto_fix(
                 df=df,
                 target=request.target,
