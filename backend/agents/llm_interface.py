@@ -77,8 +77,9 @@ class LLMInterface:
         # Prefer explicit GEMINI_CLI_CMD, else try Homebrew path on macOS, else "gemini"
         default_cmd = "/opt/homebrew/bin/gemini" if os.path.exists("/opt/homebrew/bin/gemini") else "gemini"
         cmd = os.getenv("GEMINI_CLI_CMD", default_cmd).strip() or default_cmd
-        # Default args: non-interactive + read-only (no tool approvals)
-        args_str = os.getenv("GEMINI_CLI_ARGS", "--approval-mode plan").strip()
+        # Default args: keep empty to avoid requiring experimental flags.
+        # Users can set GEMINI_CLI_ARGS if they want extra flags.
+        args_str = os.getenv("GEMINI_CLI_ARGS", "").strip()
         args = shlex.split(args_str) if args_str else []
 
         exe = shutil.which(cmd)

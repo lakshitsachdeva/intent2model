@@ -283,10 +283,34 @@ class AutonomousExecutor:
                     result = train_regression(df, target, metric, config)
                 result["model_name"] = model_candidates[0] if model_candidates else "unknown"
             
-            result["plan"] = {
-                "planning_source": "ultimate_fallback",
-                "plan_quality": "high_confidence"
+            # IMPORTANT: notebook/compiler expects a schema-valid AutoMLPlan dict.
+            # Ultimate fallback must still match schema exactly (marked as fallback).
+            from agents.plan_normalizer import normalize_plan_dict
+            fallback_plan = {
+                "plan_schema_version": "v1",
+                "inferred_target": target,
+                "target_confidence": 1.0,
+                "alternative_targets": [],
+                "task_type": "regression" if task == "regression" else "binary_classification",
+                "task_confidence": 1.0,
+                "task_inference_md": f"Ultimate fallback used. Task='{task}' selected from request/execution context.",
+                "dataset_intelligence_md": "Ultimate fallback (no LLM): dataset profiled execution-side.",
+                "transformation_strategy_md": "Ultimate fallback (no LLM): conservative preprocessing based on profile.",
+                "model_selection_md": f"Ultimate fallback: selected baseline model '{config.get('model')}'.",
+                "training_validation_md": "Ultimate fallback: minimal robust training flow.",
+                "error_behavior_analysis_md": "Ultimate fallback: basic error analysis.",
+                "explainability_md": "Ultimate fallback: basic explainability if supported.",
+                "primary_metric": metric or ("accuracy" if task == "classification" else "r2"),
+                "additional_metrics": ["precision", "recall", "f1"] if task == "classification" else ["mae", "rmse"],
+                "feature_transforms": config.get("feature_transforms") or [],
+                "model_candidates": [{"model_name": config.get("model", "random_forest"), "reason_md": "Ultimate fallback baseline.", "params": {}}],
+                "planning_source": "fallback",
+                "planning_error": "ultimate_fallback",
+                "plan_warnings": ["Ultimate fallback was used because planning/execution failed multiple times."],
+                "plan_quality": "fallback_low_confidence",
             }
+            fallback_plan = normalize_plan_dict(fallback_plan, profile=profile, requested_target=target)
+            result["plan"] = fallback_plan
             result["attempts"] = self.max_attempts
             return result
         except Exception as e:
