@@ -118,6 +118,24 @@ class AutonomousExecutor:
                 error_msg = str(e)
                 error_type = type(e).__name__
                 error_trace = traceback.format_exc()
+
+                # Heuristic auto-fix: if task is regression but errors indicate classification mismatch,
+                # flip task to classification for next attempt.
+                if task == "regression":
+                    mismatch_signals = [
+                        "unknown regression model: logistic_regression",
+                        "unknown regression model: naive_bayes",
+                        "could not convert string to float",
+                    ]
+                    if any(sig in error_msg.lower() for sig in mismatch_signals):
+                        self._log("🔧 Detected regression/classification mismatch — switching task to classification", "repair", 45)
+                        task = "classification"
+                        metric = "accuracy"
+                        # Keep only classification-safe models
+                        model_candidates = [m for m in model_candidates if m in ["logistic_regression", "random_forest", "svm", "naive_bayes", "gradient_boosting"]]
+                        if not model_candidates:
+                            model_candidates = ["logistic_regression", "random_forest"]
+                        self._log(f"✅ Updated task={task}, metric={metric}, models={model_candidates}", "repair", 48)
                 
                 self._log(f"❌ Attempt {attempt + 1} failed: {error_type}: {error_msg[:150]}...", "error", 50)
                 

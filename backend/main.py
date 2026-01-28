@@ -721,6 +721,23 @@ async def train_model(request: TrainRequest):
         # Frontend will get run_id from response, but we log it here first
         print(f"📋 Run ID created: {run_id} - frontend can start polling /run/{run_id}/logs")
 
+        def _infer_execution_task(df_: pd.DataFrame, target_: str) -> str:
+            """Authoritative task inference from actual target values (execution-side)."""
+            try:
+                if target_ not in df_.columns:
+                    return "classification"
+                s = df_[target_]
+                # If non-numeric dtype, it's classification
+                if str(s.dtype) in ["object", "string", "category", "bool"]:
+                    return "classification"
+                # If very low unique count, likely classification
+                nunq = int(s.nunique(dropna=True))
+                if nunq <= 20:
+                    return "classification"
+                return "regression"
+            except Exception:
+                return "classification"
+
         # STEP 0–3: LLM-driven AutoML planning BEFORE any model training
         trace.append("STEP 0–3: Planning (target/task/feature strategy/model shortlist) via AutoML agent.")
         _log_run_event(run_id, "AutoML planning started (Step 0–3)", stage="plan", progress=5)
@@ -734,11 +751,17 @@ async def train_model(request: TrainRequest):
         )
         trace.append(f"Planned: target={plan.inferred_target}, task_type={plan.task_type}, primary_metric={plan.primary_metric}")
 
-        # Keep a classic task label for trainer
-        if plan.task_type == "regression":
-            task = "regression"
-        else:
-            task = "classification"
+        # Execution-side task inference is AUTHORITATIVE (prevents regression/classification mismatch)
+        exec_task = _infer_execution_task(df, plan.inferred_target)
+        planned_task = "regression" if plan.task_type == "regression" else "classification"
+        if exec_task != planned_task:
+            _log_run_event(
+                run_id,
+                f"⚠️ Overriding planned task '{planned_task}' -> '{exec_task}' based on target values (prevents y dtype mismatch)",
+                stage="plan",
+                progress=18,
+            )
+        task = exec_task
 
         # Use plan target (validated)
         request.target = plan.inferred_target
