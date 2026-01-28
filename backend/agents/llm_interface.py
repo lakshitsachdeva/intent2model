@@ -74,7 +74,9 @@ class LLMInterface:
         
         We pass a single combined prompt via STDIN and read STDOUT.
         """
-        cmd = os.getenv("GEMINI_CLI_CMD", "gemini").strip() or "gemini"
+        # Prefer explicit GEMINI_CLI_CMD, else try Homebrew path on macOS, else "gemini"
+        default_cmd = "/opt/homebrew/bin/gemini" if os.path.exists("/opt/homebrew/bin/gemini") else "gemini"
+        cmd = os.getenv("GEMINI_CLI_CMD", default_cmd).strip() or default_cmd
         args_str = os.getenv("GEMINI_CLI_ARGS", "").strip()
         args = shlex.split(args_str) if args_str else []
 

@@ -38,7 +38,8 @@ class AutonomousExecutor:
         task: str,
         metric: str,
         model_candidates: List[str],
-        requested_target: Optional[str] = None
+        requested_target: Optional[str] = None,
+        llm_provider: str = "gemini",
     ) -> Dict[str, Any]:
         """
         Execute training with automatic error detection and fixing.
@@ -54,7 +55,7 @@ class AutonomousExecutor:
                 if attempt == 0:
                     # First attempt: get plan from LLM
                     self._log("📋 Step 1: Getting plan from LLM...", "plan", 35)
-                    plan = plan_automl(df, requested_target=requested_target, llm_provider="gemini")
+                    plan = plan_automl(df, requested_target=requested_target, llm_provider=llm_provider)
                     self._log(f"✅ Plan received: {len(plan.feature_transforms)} feature transforms, {len(plan.model_candidates)} models", "plan", 40)
                 else:
                     # Subsequent attempts: repair the plan based on previous errors
@@ -65,7 +66,8 @@ class AutonomousExecutor:
                         target=target,
                         task=task,
                         previous_errors=self.attempt_history,
-                        requested_target=requested_target
+                        requested_target=requested_target,
+                        llm_provider=llm_provider,
                     )
                     self._log(f"✅ Plan repaired: {len(plan.feature_transforms)} feature transforms", "repair", 40)
                 
@@ -163,7 +165,8 @@ class AutonomousExecutor:
         target: str,
         task: str,
         previous_errors: List[Dict[str, Any]],
-        requested_target: Optional[str] = None
+        requested_target: Optional[str] = None,
+        llm_provider: str = "gemini",
     ) -> AutoMLPlan:
         """
         Repair plan based on previous errors.

@@ -230,6 +230,7 @@ class TrainRequest(BaseModel):
     task: Optional[Literal["classification", "regression"]] = None
     metric: Optional[str] = None
     dataset_id: Optional[str] = None
+    llm_provider: Optional[str] = None
 
 
 class SelectModelRequest(BaseModel):
@@ -723,7 +724,8 @@ async def train_model(request: TrainRequest):
         # STEP 0–3: LLM-driven AutoML planning BEFORE any model training
         trace.append("STEP 0–3: Planning (target/task/feature strategy/model shortlist) via AutoML agent.")
         _log_run_event(run_id, "AutoML planning started (Step 0–3)", stage="plan", progress=5)
-        plan = plan_automl(df, requested_target=request.target, llm_provider="gemini")
+        chosen_llm_provider = (request.llm_provider or os.getenv("LLM_PROVIDER") or "gemini").strip()
+        plan = plan_automl(df, requested_target=request.target, llm_provider=chosen_llm_provider)
         _log_run_event(
             run_id,
             f"AutoML planning finished (source={getattr(plan, 'planning_source', 'unknown')})",
@@ -784,7 +786,8 @@ async def train_model(request: TrainRequest):
                 task=task,
                 metric=metric,
                 model_candidates=model_candidates,
-                requested_target=request.target
+                requested_target=request.target,
+                llm_provider=chosen_llm_provider,
             )
             
             trace.append(f"Training succeeded after {train_result.get('attempts', 1)} attempt(s)")

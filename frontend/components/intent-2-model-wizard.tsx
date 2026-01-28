@@ -48,6 +48,7 @@ export default function Intent2ModelWizard() {
   const [apiKeyStatus, setApiKeyStatus] = useState<any>(null);
   const [llmStatus, setLlmStatus] = useState<any>(null);
   const [isSettingApiKey, setIsSettingApiKey] = useState(false);
+  const [selectedLlmProvider, setSelectedLlmProvider] = useState<string>("gemini");
   const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
   const [showDevLogs, setShowDevLogs] = useState(false);
   const [devLogs, setDevLogs] = useState<any>(null);
@@ -63,6 +64,13 @@ export default function Intent2ModelWizard() {
       const resp = await fetch("http://localhost:8000/health");
       const data = await resp.json();
       setLlmStatus(data);
+      // Default provider selection from backend health (if present)
+      if (data?.llm_provider && typeof data.llm_provider === "string") {
+        // llm_provider can be "rule-based-fallback" if unavailable; keep user choice in that case
+        if (data.llm_provider !== "rule-based-fallback") {
+          setSelectedLlmProvider(data.llm_provider);
+        }
+      }
     } catch (e) {
       console.error("Failed to fetch LLM status:", e);
     }
@@ -82,7 +90,7 @@ export default function Intent2ModelWizard() {
       const resp = await fetch("http://localhost:8000/api/set-api-key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: apiKey, provider: "gemini" }),
+        body: JSON.stringify({ api_key: apiKey, provider: selectedLlmProvider }),
       });
       const data = await resp.json();
       setApiKeyStatus(data);
@@ -235,6 +243,7 @@ export default function Intent2ModelWizard() {
         body: JSON.stringify({
           dataset_id: ensuredDatasetId,
           target: targetColumn,
+          llm_provider: selectedLlmProvider,
         }),
       });
 
@@ -278,6 +287,7 @@ export default function Intent2ModelWizard() {
             body: JSON.stringify({
               dataset_id: ensuredDatasetId,
               target: availableColumns[0],
+              llm_provider: selectedLlmProvider,
             }),
           });
           const fallbackData = await fallbackResponse.json();
@@ -1347,7 +1357,25 @@ export default function Intent2ModelWizard() {
                   )}
 
                   <div className="space-y-2">
-                    <Label htmlFor="api-key">Gemini API Key (leave empty to use default)</Label>
+                    <Label htmlFor="llm-provider">LLM Provider</Label>
+                    <select
+                      id="llm-provider"
+                      className="w-full h-10 rounded-md border bg-background px-3 text-sm"
+                      value={selectedLlmProvider}
+                      onChange={(e) => setSelectedLlmProvider(e.target.value)}
+                    >
+                      <option value="gemini">Gemini API (key-based)</option>
+                      <option value="gemini_cli">Gemini CLI (local)</option>
+                    </select>
+                    <p className="text-xs text-muted-foreground">
+                      Use CLI for cheaper testing. It still has quota, but avoids burning API keys during development.
+                      CLI detected: <strong>{llmStatus?.gemini_cli_available ? "yes" : "no"}</strong>
+                      {llmStatus?.gemini_cli_cmd ? ` (cmd: ${llmStatus.gemini_cli_cmd})` : ""}
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="api-key">API Key (only used for Gemini API provider)</Label>
                     <Input
                       id="api-key"
                       type="password"
