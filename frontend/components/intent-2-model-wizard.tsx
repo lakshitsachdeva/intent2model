@@ -1390,14 +1390,16 @@ export default function Intent2ModelWizard() {
                       <option value="gemini_cli">Gemini CLI (local)</option>
                     </select>
                     <p className="text-xs text-muted-foreground">
-                      Use CLI for cheaper testing. It still has quota, but avoids burning API keys during development.
+                      CLI still uses Gemini auth (usually via <code>GOOGLE_API_KEY</code> or your Gemini key). We automatically pass your configured key to the CLI process.
                       CLI detected: <strong>{llmStatus?.gemini_cli_available ? "yes" : "no"}</strong>
                       {llmStatus?.gemini_cli_cmd ? ` (cmd: ${llmStatus.gemini_cli_cmd})` : ""}
                     </p>
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="api-key">API Key (only used for Gemini API provider)</Label>
+                    <Label htmlFor="api-key">
+                      API Key {selectedLlmProvider === "gemini_cli" ? "(also used for CLI if needed)" : "(Gemini API)"}
+                    </Label>
                     <Input
                       id="api-key"
                       type="password"

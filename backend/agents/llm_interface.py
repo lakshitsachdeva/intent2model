@@ -97,12 +97,22 @@ class LLMInterface:
         _current_model_reason = "Using local Gemini CLI (no API key consumed by this backend)"
 
         try:
+            # Gemini CLI often reads GOOGLE_API_KEY. Map our GEMINI_API_KEY/custom key to GOOGLE_API_KEY for the subprocess.
+            from utils.api_key_manager import get_api_key
+            gemini_key = get_api_key(provider="gemini") or ""
+            child_env = os.environ.copy()
+            if gemini_key and not child_env.get("GOOGLE_API_KEY"):
+                child_env["GOOGLE_API_KEY"] = gemini_key
+            if gemini_key and not child_env.get("GEMINI_API_KEY"):
+                child_env["GEMINI_API_KEY"] = gemini_key
+
             # Use -p to ensure one-shot prompt execution (avoid interactive UI)
             proc = subprocess.run(
                 [exe, *args, "-p", full_prompt],
                 input="",
                 text=True,
                 capture_output=True,
+                env=child_env,
                 timeout=int(os.getenv("GEMINI_CLI_TIMEOUT_SEC", "180")),
             )
         except subprocess.TimeoutExpired:
