@@ -193,10 +193,10 @@ export default function Intent2ModelWizard() {
         });
       }, 1000);
       
-      // Start polling backend logs immediately (before we get run_id)
+      // Start polling backend logs immediately (before we get run_id) - faster!
       logsInterval = setInterval(() => {
         fetchBackendLogTail();
-      }, 500);
+      }, 200);
 
       const response = await fetch('http://localhost:8000/train', {
         method: 'POST',
@@ -316,10 +316,10 @@ export default function Intent2ModelWizard() {
     // Fetch immediately
     fetchRunLogs(currentRunId);
     
-    // Then poll every 500ms for real-time updates
+    // Then poll every 200ms for real-time updates (faster!)
     const interval = setInterval(() => {
       fetchRunLogs(currentRunId);
-    }, 500);
+    }, 200);
     
     return () => clearInterval(interval);
   }, [training, currentRunId]);
@@ -653,15 +653,36 @@ export default function Intent2ModelWizard() {
                       <Progress value={progress} className="h-3" />
                     </div>
                     
-                    {/* Live Logs - Real-time updates */}
+                    {/* Old Progress Indicators - Keep these! */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {[
+                        "Analyzing feature importance...",
+                        "Optimizing weights...",
+                        "Cross-validating models...",
+                        "Finalizing ensemble logic..."
+                      ].map((task, i) => (
+                        <div key={i} className="flex items-center space-x-3 text-sm">
+                          {progress > (i + 1) * 25 ? (
+                            <CheckCircle2 className="w-4 h-4 text-green-500" />
+                          ) : (
+                            <div className="w-4 h-4 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />
+                          )}
+                          <span className={progress > (i + 1) * 25 ? "text-muted-foreground line-through" : ""}>
+                            {task}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    
+                    {/* Live Logs - Real-time updates (BOTH old and new!) */}
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <h4 className="text-sm font-semibold">Live Activity</h4>
+                        <h4 className="text-sm font-semibold">Live Activity Logs</h4>
                         <Badge variant="outline" className="text-xs">
                           {liveLogs.length} events
                         </Badge>
                       </div>
-                      <div className="rounded-lg border bg-muted/30 p-4 max-h-[400px] overflow-y-auto">
+                      <div className="rounded-lg border bg-muted/30 p-4 max-h-[300px] overflow-y-auto">
                         {liveLogs.length > 0 || (training && backendLogTail.length > 0) ? (
                           <div className="space-y-2 font-mono text-xs">
                             {/* Show structured run logs if available */}

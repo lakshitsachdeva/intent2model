@@ -1382,23 +1382,36 @@ async def download_notebook(run_id: str):
     automl_plan = model_info.get("automl_plan", {})
     if not automl_plan:
         print(f"⚠️  Warning: No automl_plan found for run {run_id}. Notebook will use fallback code.")
+        # Try to get plan from train_result if available
+        if "plan" in model_info:
+            automl_plan = model_info["plan"]
     
-    notebook_json = generate_notebook(
-        df=df,
-        target=model_info["target"],
-        task=model_info["task"],
-        config={
-            **(model_info.get("config", {}) or {}),
-            "model": model_name,
-            "feature_columns": model_info.get("feature_columns", []),
-            "model_code": _model_code_for_notebook(model_info["task"], model_name),
-            "feature_transforms": (model_info.get("config", {}) or {}).get("feature_transforms", []),
-            "automl_plan": automl_plan,  # CRITICAL: plan drives code generation
-        },
-        metrics=model_info.get("metrics", {}),
-        feature_importance=model_info.get("feature_importance"),
-        model=model_info["model"]
-    )
+    try:
+        notebook_json = generate_notebook(
+            df=df,
+            target=model_info["target"],
+            task=model_info["task"],
+            config={
+                **(model_info.get("config", {}) or {}),
+                "model": model_name,
+                "feature_columns": model_info.get("feature_columns", []),
+                "model_code": _model_code_for_notebook(model_info["task"], model_name),
+                "feature_transforms": (model_info.get("config", {}) or {}).get("feature_transforms", []),
+                "automl_plan": automl_plan,  # CRITICAL: plan drives code generation
+            },
+            metrics=model_info.get("metrics", {}),
+            feature_importance=model_info.get("feature_importance"),
+            model=model_info["model"]
+        )
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"❌ Error generating notebook: {e}")
+        print(f"Traceback: {error_trace[:500]}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate notebook: {str(e)}"
+        )
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.ipynb', delete=False) as f:
         f.write(notebook_json)
