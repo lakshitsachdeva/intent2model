@@ -715,28 +715,25 @@ async def train_model(request: TrainRequest):
         
         use_model_comparison = True  # Always compare multiple models
         
-        # Train model(s) with automatic error fixing
-        from agents.auto_fix_agent import auto_fix_training_error
+        # AUTONOMOUS EXECUTOR: Try, fail, learn, fix, retry until it works
+        from agents.autonomous_executor import AutonomousExecutor
         
-        training_context = {
-            "target": request.target,
-            "task": task,
-            "metric": metric,
-            "dataset_shape": df.shape,
-            "target_dtype": str(df[request.target].dtype),
-            "target_unique_count": df[request.target].nunique()
-        }
+        _log_run_event(run_id, "Starting autonomous training (will auto-fix errors)", stage="train", progress=35)
+        trace.append("Using autonomous executor - will automatically fix errors and retry")
         
         try:
-            if use_model_comparison:
-                trace.append(f"Training & comparing models: {model_candidates}")
-                _log_run_event(run_id, "Training started (model comparison)", stage="train", progress=35)
-                # Try multiple models and get ALL results
-                train_result = auto_fix_training_error(
-                    compare_models,
-                    df, request.target, task, metric, model_candidates, config,
-                    context=training_context
-                )
+            executor = AutonomousExecutor()
+            train_result = executor.execute_with_auto_fix(
+                df=df,
+                target=request.target,
+                task=task,
+                metric=metric,
+                model_candidates=model_candidates,
+                requested_target=request.target
+            )
+            
+            trace.append(f"Training succeeded after {train_result.get('attempts', 1)} attempt(s)")
+            _log_run_event(run_id, f"Training succeeded (attempt {train_result.get('attempts', 1)})", stage="train", progress=70)
                 _log_run_event(run_id, "Training finished (model comparison)", stage="train", progress=70)
                 
                 # Add LLM explanations for each model
@@ -784,20 +781,14 @@ async def train_model(request: TrainRequest):
                 train_result["all_models"] = all_models_with_explanations
                 trace.append("Generated per-model explanations (LLM if available, otherwise rule-based).")
                 _log_run_event(run_id, "Model explanations generated", stage="explain", progress=78)
-            else:
-                # Single model training with auto-fix
-                if task == "classification":
-                    train_result = auto_fix_training_error(
-                        train_classification,
-                        df, request.target, metric, config,
-                        context=training_context
-                    )
-                else:
-                    train_result = auto_fix_training_error(
-                        train_regression,
-                        df, request.target, metric, config,
-                        context=training_context
-                    )
+            
+            # Extract plan from result if available
+            if "plan" in train_result:
+                plan_dict = train_result["plan"]
+                if isinstance(plan_dict, dict):
+                    config["automl_plan"] = plan_dict
+                elif hasattr(plan_dict, "model_dump"):
+                    config["automl_plan"] = plan_dict.model_dump()
         except Exception as training_error:
             # If auto-fix failed, fall through to error analysis
             raise training_error
