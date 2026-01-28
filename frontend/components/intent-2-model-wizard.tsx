@@ -49,6 +49,10 @@ export default function Intent2ModelWizard() {
   const [llmStatus, setLlmStatus] = useState<any>(null);
   const [isSettingApiKey, setIsSettingApiKey] = useState(false);
   const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
+  const [showDevLogs, setShowDevLogs] = useState(false);
+  const [devLogs, setDevLogs] = useState<any>(null);
+  const [devLogsError, setDevLogsError] = useState<string | null>(null);
+  const [backendLogTail, setBackendLogTail] = useState<string[]>([]);
 
   const fetchLlmStatus = async () => {
     try {
@@ -167,8 +171,9 @@ export default function Intent2ModelWizard() {
       targetColumn = availableColumns[0];
     }
     
-    // Real progress tracking - update based on actual training stages
+    // Progress tracking
     let progressInterval: NodeJS.Timeout | null = null;
+    let logsInterval: NodeJS.Timeout | null = null;
     
     try {
       // Start progress simulation
@@ -194,6 +199,7 @@ export default function Intent2ModelWizard() {
       
       if (response.ok && data.run_id) {
         if (progressInterval) clearInterval(progressInterval);
+        if (logsInterval) clearInterval(logsInterval);
         setProgress(100);
         setTrainedModel(data);
         setSelectedModelName(data.selected_model || data.pipeline_config?.model || null);
@@ -222,6 +228,7 @@ export default function Intent2ModelWizard() {
           const fallbackData = await fallbackResponse.json();
           if (fallbackResponse.ok) {
             if (progressInterval) clearInterval(progressInterval);
+            if (logsInterval) clearInterval(logsInterval);
             setProgress(100);
             setTrainedModel(fallbackData);
             setSelectedModelName(fallbackData.selected_model || fallbackData.pipeline_config?.model || null);
@@ -237,6 +244,7 @@ export default function Intent2ModelWizard() {
     } catch (error) {
       console.error('Training error:', error);
       if (progressInterval) clearInterval(progressInterval);
+      if (logsInterval) clearInterval(logsInterval);
       // Still show success (autonomous - backend handles retries)
       setProgress(100);
       setTimeout(() => {
@@ -245,6 +253,44 @@ export default function Intent2ModelWizard() {
       }, 1000);
     }
   };
+
+  const fetchRunLogs = async (runId: string) => {
+    try {
+      const resp = await fetch(`http://localhost:8000/run/${runId}/logs?limit=200`);
+      if (!resp.ok) {
+        const err = await resp.text();
+        setDevLogsError(err || "Failed to fetch logs");
+        return;
+      }
+      const data = await resp.json();
+      setDevLogs(data);
+      setDevLogsError(null);
+      // If backend provides progress, prefer it
+      if (typeof data.progress === "number") {
+        setProgress(Math.max(0, Math.min(100, data.progress)));
+      }
+    } catch (e: any) {
+      setDevLogsError(e?.message || "Failed to fetch logs");
+    }
+  };
+
+  const fetchBackendLogTail = async () => {
+    try {
+      const resp = await fetch("http://localhost:8000/logs/backend?limit=200");
+      const data = await resp.json();
+      setBackendLogTail(Array.isArray(data.lines) ? data.lines : []);
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  // Poll backend log tail while training and dev panel is open
+  useEffect(() => {
+    if (!showDevLogs || !training) return;
+    fetchBackendLogTail();
+    const t = setInterval(() => fetchBackendLogTail(), 1200);
+    return () => clearInterval(t);
+  }, [showDevLogs, training]);
 
   const selectModel = async (modelName: string) => {
     if (!trainedModel?.run_id) return;
@@ -506,8 +552,23 @@ export default function Intent2ModelWizard() {
           >
             <Card>
               <CardHeader>
-                <CardTitle>Autonomous Training</CardTitle>
-                <CardDescription>We're selecting the best architecture and hyperparameters for your intent.</CardDescription>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <CardTitle>Autonomous Training</CardTitle>
+                    <CardDescription>We're selecting the best architecture and hyperparameters for your intent.</CardDescription>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setShowDevLogs(true);
+                      fetchLlmStatus();
+                      fetchBackendLogTail();
+                    }}
+                  >
+                    Developer Logs
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent className="space-y-8 py-10">
                 {!training ? (
@@ -557,6 +618,61 @@ export default function Intent2ModelWizard() {
             </Card>
           </motion.div>
         )}
+
+        <AnimatePresence>
+          {showDevLogs && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+              onClick={() => setShowDevLogs(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.98 }}
+                animate={{ scale: 1 }}
+                exit={{ scale: 0.98 }}
+                className="w-full max-w-4xl rounded-lg bg-background border shadow-lg"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between border-b p-4">
+                  <div>
+                    <div className="font-semibold">Developer Logs</div>
+                    <div className="text-xs text-muted-foreground">
+                      Live backend log tail + current LLM status.
+                    </div>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => setShowDevLogs(false)}>
+                    Close
+                  </Button>
+                </div>
+                <div className="p-4 space-y-3">
+                  <div className="text-sm">
+                    <div className="font-medium">LLM Status</div>
+                    <div className="text-muted-foreground">
+                      {llmStatus?.llm_available ? (
+                        <>Active: <strong>{llmStatus.current_model || "unknown"}</strong></>
+                      ) : llmStatus?.llm_rate_limited ? (
+                        <>Rate-limited: planning may fall back until quota clears or key changes.</>
+                      ) : (
+                        <>Unavailable: using fallbacks.</>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="text-sm">
+                    <div className="font-medium">Backend Log (tail)</div>
+                    <div className="mt-2 rounded-md border bg-muted/30 p-3 font-mono text-xs max-h-[50vh] overflow-auto whitespace-pre">
+                      {backendLogTail.length ? backendLogTail.join("\n") : "No logs yet."}
+                    </div>
+                  </div>
+
+                  {devLogsError && <div className="text-sm text-red-500">{devLogsError}</div>}
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {step === 4 && (
           <motion.div

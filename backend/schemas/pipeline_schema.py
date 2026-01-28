@@ -112,6 +112,15 @@ class AutoMLPlan(BaseModel):
     feature_transforms: List[FeatureTransform] = Field(default_factory=list)
     model_candidates: List[ModelCandidate] = Field(default_factory=list)
 
+    planning_source: Literal["llm", "fallback"] = Field(
+        default="fallback",
+        description="Whether this plan was produced by the LLM or the rule-based fallback",
+    )
+    planning_error: Optional[str] = Field(
+        default=None,
+        description="If fallback was used, a short reason (e.g., rate limit / invalid JSON)",
+    )
+
     class Config:
         extra = "forbid"
 

@@ -35,6 +35,7 @@ import re
 import tempfile
 import base64
 from dotenv import load_dotenv
+import subprocess
 
 # Load environment variables from .env file (if it exists)
 load_dotenv()
@@ -150,6 +151,7 @@ app.add_middleware(
 
 # Check LLM availability on startup
 LLM_AVAILABLE = False
+LLM_RATE_LIMITED = False
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
@@ -172,7 +174,9 @@ if api_key and api_key.strip():
         else:
             print(f"⚠️  LLM ({LLM_PROVIDER}) responded but with empty content")
     except Exception as e:
-        print(f"⚠️  LLM ({LLM_PROVIDER}) is configured but not available: {str(e)[:200]}")
+        err = str(e)
+        LLM_RATE_LIMITED = ("rate limit" in err.lower()) or ("quota" in err.lower()) or ("429" in err)
+        print(f"⚠️  LLM ({LLM_PROVIDER}) is configured but not available: {err[:200]}")
         print("   System will use rule-based fallbacks (still fully functional)")
         print("   Note: LLM features will be disabled, but all core ML functionality works")
 else:
@@ -182,6 +186,32 @@ else:
 # In-memory storage for uploaded datasets (in production, use proper storage)
 dataset_cache = {}
 trained_models_cache = {}  # Store trained models for prediction
+run_logs_cache: Dict[str, Any] = {}  # run_id -> {"events": [...], "progress": float, "stage": str}
+
+
+def _log_run_event(run_id: str, message: str, stage: Optional[str] = None, progress: Optional[float] = None):
+    """Append a structured log event for a run (for Developer Logs UI)."""
+    if not run_id:
+        return
+    entry = {
+        "ts": pd.Timestamp.now().isoformat(),
+        "message": str(message),
+    }
+    if stage is not None:
+        entry["stage"] = str(stage)
+    if progress is not None:
+        try:
+            entry["progress"] = float(progress)
+        except Exception:
+            pass
+
+    cur = run_logs_cache.get(run_id) or {"events": [], "progress": 0.0, "stage": "init"}
+    cur["events"] = (cur.get("events") or [])[-500:] + [entry]
+    if progress is not None:
+        cur["progress"] = entry.get("progress", cur.get("progress", 0.0))
+    if stage is not None:
+        cur["stage"] = entry.get("stage", cur.get("stage", ""))
+    run_logs_cache[run_id] = cur
 
 # API key management - allow users to provide custom keys
 from utils.api_key_manager import set_custom_api_key, get_api_key
@@ -199,6 +229,25 @@ class TrainRequest(BaseModel):
 class SelectModelRequest(BaseModel):
     run_id: str
     model_name: str
+
+
+@app.get("/run/{run_id}/logs")
+async def get_run_logs(run_id: str, limit: int = 200):
+    """Fetch recent structured log events for a run (for Developer Logs UI)."""
+    if run_id not in run_logs_cache:
+        raise HTTPException(status_code=404, detail="Run logs not found")
+    cur = run_logs_cache[run_id]
+    events = cur.get("events") or []
+    try:
+        lim = max(1, min(int(limit), 500))
+    except Exception:
+        lim = 200
+    return {
+        "run_id": run_id,
+        "stage": cur.get("stage"),
+        "progress": cur.get("progress"),
+        "events": events[-lim:],
+    }
 
 
 @app.get("/")
@@ -229,11 +278,37 @@ async def health():
     return {
         "status": "healthy",
         "llm_available": LLM_AVAILABLE,
+        "llm_rate_limited": LLM_RATE_LIMITED,
         "llm_provider": LLM_PROVIDER if LLM_AVAILABLE else "rule-based-fallback",
         "current_model": model_info.get("model") or current_llm_model,
         "model_reason": model_info.get("reason") or current_llm_reason,
-        "message": f"✅ LLM enabled - using {model_info.get('model') or current_llm_model or 'AI-powered planning'}" if LLM_AVAILABLE else "⚠️  Using rule-based fallbacks (fully functional, but less intelligent)"
+        "message": (
+            f"✅ LLM enabled - using {model_info.get('model') or current_llm_model or 'AI-powered planning'}"
+            if LLM_AVAILABLE
+            else ("⚠️  LLM is rate-limited; using fallbacks for planning/explanations" if LLM_RATE_LIMITED else "⚠️  Using rule-based fallbacks (fully functional, but less intelligent)")
+        )
     }
+
+
+@app.get("/logs/backend")
+async def backend_logs(limit: int = 200):
+    """Tail backend.log for developer debugging in the UI."""
+    try:
+        lim = max(10, min(int(limit), 500))
+    except Exception:
+        lim = 200
+    log_path = Path(__file__).parent.parent / "backend.log"
+    if not log_path.exists():
+        return {"path": str(log_path), "lines": []}
+    try:
+        # Use tail for efficiency
+        out = subprocess.check_output(["tail", "-n", str(lim), str(log_path)], text=True, stderr=subprocess.STDOUT)
+        lines = out.splitlines()
+    except Exception:
+        # fallback: read last bytes
+        txt = log_path.read_text(errors="ignore")
+        lines = txt.splitlines()[-lim:]
+    return {"path": str(log_path), "lines": lines}
 
 class ApiKeyRequest(BaseModel):
     api_key: str
@@ -591,9 +666,19 @@ async def train_model(request: TrainRequest):
     
     trace = []
     try:
+        run_id = create_run_id()
+        _log_run_event(run_id, "Run created", stage="init", progress=1)
+
         # STEP 0–3: LLM-driven AutoML planning BEFORE any model training
         trace.append("STEP 0–3: Planning (target/task/feature strategy/model shortlist) via AutoML agent.")
+        _log_run_event(run_id, "AutoML planning started (Step 0–3)", stage="plan", progress=5)
         plan = plan_automl(df, requested_target=request.target, llm_provider="gemini")
+        _log_run_event(
+            run_id,
+            f"AutoML planning finished (source={getattr(plan, 'planning_source', 'unknown')})",
+            stage="plan",
+            progress=15,
+        )
         trace.append(f"Planned: target={plan.inferred_target}, task_type={plan.task_type}, primary_metric={plan.primary_metric}")
 
         # Keep a classic task label for trainer
@@ -608,6 +693,7 @@ async def train_model(request: TrainRequest):
         # Profile still useful for downstream warnings + reports
         trace.append("Profiled dataset and inferred column types (execution-side).")
         profile = profile_dataset(df)
+        _log_run_event(run_id, "Dataset profiled (execution-side)", stage="profile", progress=20)
         
         # Metric selection (agent-driven)
         metric = (request.metric or "").strip() or plan.primary_metric
@@ -618,6 +704,7 @@ async def train_model(request: TrainRequest):
             # last-resort minimal set
             model_candidates = ["random_forest"] if task == "classification" else ["random_forest"]
         trace.append(f"Model shortlist (agent): {model_candidates}")
+        _log_run_event(run_id, f"Model shortlist: {model_candidates}", stage="models", progress=25)
 
         # Build a per-model config using plan feature transforms (no static assumptions)
         base_config = {
@@ -643,12 +730,14 @@ async def train_model(request: TrainRequest):
         try:
             if use_model_comparison:
                 trace.append(f"Training & comparing models: {model_candidates}")
+                _log_run_event(run_id, "Training started (model comparison)", stage="train", progress=35)
                 # Try multiple models and get ALL results
                 train_result = auto_fix_training_error(
                     compare_models,
                     df, request.target, task, metric, model_candidates, config,
                     context=training_context
                 )
+                _log_run_event(run_id, "Training finished (model comparison)", stage="train", progress=70)
                 
                 # Add LLM explanations for each model
                 from agents.model_explainer import explain_model_performance
@@ -694,6 +783,7 @@ async def train_model(request: TrainRequest):
                 
                 train_result["all_models"] = all_models_with_explanations
                 trace.append("Generated per-model explanations (LLM if available, otherwise rule-based).")
+                _log_run_event(run_id, "Model explanations generated", stage="explain", progress=78)
             else:
                 # Single model training with auto-fix
                 if task == "classification":
@@ -715,9 +805,8 @@ async def train_model(request: TrainRequest):
         # Evaluate dataset
         eval_result = evaluate_dataset(df, request.target, task)
         trace.append("Evaluated dataset for warnings/leakage/imbalance.")
+        _log_run_event(run_id, "Evaluation complete (warnings/leakage/imbalance)", stage="eval", progress=82)
         
-        # Create run ID and log
-        run_id = create_run_id()
         log_run(
             run_id,
             {
@@ -778,6 +867,7 @@ async def train_model(request: TrainRequest):
             "preprocessing_recommendations": preprocessing_recommendations  # Store preprocessing recs for report
         }
         trace.append("Cached best fitted pipeline server-side for prediction/downloads.")
+        _log_run_event(run_id, "Run cached (model + artifacts metadata)", stage="done", progress=95)
         
         response_payload = {
             "run_id": run_id,
@@ -804,9 +894,16 @@ async def train_model(request: TrainRequest):
                 "model": train_result.get("model_name", config.get("model", "unknown")) if config else "unknown"
             }
         }
+        _log_run_event(run_id, "Train request complete", stage="done", progress=100)
         return _json_safe(response_payload)
     except Exception as e:
         error_msg = str(e)
+        # If we managed to create a run_id, log the failure
+        try:
+            if "run_id" in locals() and run_id:
+                _log_run_event(run_id, f"Training failed: {error_msg[:200]}", stage="error", progress=100)
+        except Exception:
+            pass
         
         # Use LLM to analyze the error and provide helpful explanation
         try:

@@ -32,10 +32,14 @@ def plan_automl(df: pd.DataFrame, requested_target: Optional[str] = None, llm_pr
     try:
         response = llm.generate(prompt, system_prompt)
         plan_dict = _extract_json(response)
+        plan_dict["planning_source"] = "llm"
+        plan_dict["planning_error"] = None
         return AutoMLPlan(**plan_dict)
     except Exception as e:
         # Hard fallback: rule-based minimal plan (still data-driven, not template)
         plan_dict = _rule_based_plan(profile, requested_target=requested_target)
+        plan_dict["planning_source"] = "fallback"
+        plan_dict["planning_error"] = str(e)[:200]
         try:
             return AutoMLPlan(**plan_dict)
         except Exception as e2:
