@@ -758,7 +758,11 @@ async def train_model(request: TrainRequest):
         trace.append(f"Planned: target={plan.inferred_target}, task_type={plan.task_type}, primary_metric={plan.primary_metric}")
 
         # Execution-side task inference is AUTHORITATIVE (prevents regression/classification mismatch)
-        exec_task = _infer_execution_task(df, plan.inferred_target)
+        # If user explicitly chose task, respect it (UI toggle)
+        if request.task in ["classification", "regression"]:
+            exec_task = request.task
+        else:
+            exec_task = _infer_execution_task(df, plan.inferred_target)
         planned_task = "regression" if plan.task_type == "regression" else "classification"
         _log_run_event(run_id, f"Execution task inferred: {exec_task} (planned: {planned_task})", stage="plan", progress=17)
         if exec_task != planned_task:

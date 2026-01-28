@@ -51,6 +51,7 @@ export default function Intent2ModelWizard() {
   const [isSettingApiKey, setIsSettingApiKey] = useState(false);
   const [selectedLlmProvider, setSelectedLlmProvider] = useState<string>("gemini");
   const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
+  const [selectedTaskType, setSelectedTaskType] = useState<"classification" | "regression" | null>(null);
   const [showDevLogs, setShowDevLogs] = useState(false);
   const [devLogs, setDevLogs] = useState<any>(null);
   const [devLogsError, setDevLogsError] = useState<string | null>(null);
@@ -262,6 +263,7 @@ export default function Intent2ModelWizard() {
         body: JSON.stringify({
           dataset_id: ensuredDatasetId,
           target: targetColumn,
+          task: selectedTaskType || undefined,
           llm_provider: selectedLlmProvider,
         }),
       });
@@ -306,6 +308,7 @@ export default function Intent2ModelWizard() {
             body: JSON.stringify({
               dataset_id: ensuredDatasetId,
               target: availableColumns[0],
+              task: selectedTaskType || undefined,
               llm_provider: selectedLlmProvider,
             }),
           });
@@ -691,11 +694,21 @@ export default function Intent2ModelWizard() {
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
-                  <div className="p-4 rounded-lg border bg-card hover:border-primary/50 cursor-pointer transition-colors">
+                  <div
+                    className={`p-4 rounded-lg border bg-card cursor-pointer transition-colors ${
+                      selectedTaskType === "regression" ? "border-primary ring-2 ring-primary/20" : "hover:border-primary/50"
+                    }`}
+                    onClick={() => setSelectedTaskType("regression")}
+                  >
                     <h4 className="font-semibold mb-1">Regression</h4>
                     <p className="text-xs text-muted-foreground">Predict continuous values (prices, time, quantity)</p>
                   </div>
-                  <div className="p-4 rounded-lg border bg-card hover:border-primary/50 cursor-pointer transition-colors">
+                  <div
+                    className={`p-4 rounded-lg border bg-card cursor-pointer transition-colors ${
+                      selectedTaskType === "classification" ? "border-primary ring-2 ring-primary/20" : "hover:border-primary/50"
+                    }`}
+                    onClick={() => setSelectedTaskType("classification")}
+                  >
                     <h4 className="font-semibold mb-1">Classification</h4>
                     <p className="text-xs text-muted-foreground">Categorize data into discrete labels</p>
                   </div>

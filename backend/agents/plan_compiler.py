@@ -186,35 +186,27 @@ def compile_preprocessing_code(plan: AutoMLPlan, df: pd.DataFrame) -> str:
     if dropped_features:
         lines.append(f"# Dropped features (from plan): {dropped_features}\n")
     
-    # CRITICAL: If no transformers were generated, something is wrong with the plan
-    # Generate a fallback based on dataset structure
-    if not transformers:
-        lines.append("# ⚠️ WARNING: No transformers generated from plan.feature_transforms!\n")
-        lines.append("# This suggests the plan is incomplete. Generating fallback preprocessing.\n")
-        lines.append("\n")
-        
-        # Infer from dataframe
-        numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        categorical_cols = [c for c in df.columns if c not in numeric_cols]
-        
-        # Remove target and dropped features
-        target = plan.inferred_target
-        numeric_cols = [c for c in numeric_cols if c != target and c not in dropped_features]
-        categorical_cols = [c for c in categorical_cols if c != target and c not in dropped_features]
-        
-        if numeric_cols:
-            lines.append(f"# Fallback: numeric features\n")
-            lines.append(f"numeric_cols = {numeric_cols}\n")
-            lines.append(f"transformers.append(('num_scaled', Pipeline([('scaler', StandardScaler())]), numeric_cols))\n")
-        
-        if categorical_cols:
-            lines.append(f"# Fallback: categorical features\n")
-            lines.append(f"categorical_cols = {categorical_cols}\n")
-            lines.append(f"try:\n")
-            lines.append(f"    ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False, min_frequency=5)\n")
-            lines.append(f"except TypeError:\n")
-            lines.append(f"    ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False)\n")
-            lines.append(f"transformers.append(('cat_onehot', Pipeline([('onehot', ohe)]), categorical_cols))\n")
+    # CRITICAL: If no transformers were generated from plan.feature_transforms, add a RUNTIME fallback.
+    # (Do NOT reference a Python variable named `transformers` in this compiler function.)
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    categorical_cols = [c for c in df.columns if c not in numeric_cols]
+    target = plan.inferred_target
+    numeric_cols = [c for c in numeric_cols if c != target and c not in dropped_features]
+    categorical_cols = [c for c in categorical_cols if c != target and c not in dropped_features]
+
+    lines.append("\n")
+    lines.append("if len(transformers) == 0:\n")
+    lines.append("    # ⚠️ WARNING: No transformers generated from plan.feature_transforms! Using runtime fallback.\n")
+    if numeric_cols:
+        lines.append(f"    numeric_cols = {numeric_cols}\n")
+        lines.append("    transformers.append(('num_scaled', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), numeric_cols))\n")
+    if categorical_cols:
+        lines.append(f"    categorical_cols = {categorical_cols}\n")
+        lines.append("    try:\n")
+        lines.append("        ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False, min_frequency=5)\n")
+        lines.append("    except TypeError:\n")
+        lines.append("        ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False)\n")
+        lines.append("    transformers.append(('cat_onehot', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', ohe)]), categorical_cols))\n")
     
     lines.append("preprocessor = ColumnTransformer(transformers, remainder='drop')\n")
     lines.append("\n")

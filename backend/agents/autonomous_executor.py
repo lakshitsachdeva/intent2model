@@ -84,6 +84,9 @@ class AutonomousExecutor:
                 # Step 3: Build config from plan
                 self._log("⚙️  Step 2: Building pipeline configuration from plan...", "config", 50)
                 config = self._plan_to_config(plan, profile)
+                # CRITICAL: execution-side task is authoritative; don't let plan.task_type drift override it.
+                # plan.task_type is from LLM and may be wrong; config.task controls model family selection.
+                config["task"] = task
                 self._log(f"✅ Config built: {len(config.get('feature_transforms', []))} feature transforms", "config", 55)
                 
                 # Step 4: Try training
