@@ -687,7 +687,15 @@ export default function Intent2ModelWizard() {
                   const plan = trainedModel.automl_plan;
                   const planQuality = plan.plan_quality || "high_confidence";
                   const planningSource = plan.planning_source || "unknown";
-                  const isLowConfidence = planQuality === "fallback_low_confidence" || planQuality === "medium_confidence";
+                  const targetConf = plan.target_confidence || 1.0;
+                  const taskConf = plan.task_confidence || 1.0;
+                  
+                  // Show warning only if BOTH plan_quality is low AND actual confidence scores are low
+                  // Don't show warning if confidence scores are high (>= 0.9) even if it's a fallback
+                  const isLowConfidence = (
+                    (planQuality === "fallback_low_confidence" || planQuality === "medium_confidence") &&
+                    (targetConf < 0.9 || taskConf < 0.9)
+                  );
                   
                   if (isLowConfidence) {
                     return (
