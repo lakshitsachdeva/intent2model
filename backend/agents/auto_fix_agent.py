@@ -159,3 +159,23 @@ def auto_fix_training_error(
     """
     agent = AutoFixAgent()
     return agent.fix_and_retry(func, *args, context=context, **kwargs)
+
+
+def auto_repair_code_error(
+    error: Exception,
+    code: str,
+    context: Dict[str, Any]
+) -> str:
+    """
+    Automatically repair code errors using LLM.
+    
+    Returns fixed code.
+    """
+    from agents.code_repair_agent import CodeRepairAgent
+    agent = CodeRepairAgent()
+    result = agent.repair_code_error(
+        error=error,
+        code_snippet=code,
+        context=context
+    )
+    return result.get("fixed_code", code)

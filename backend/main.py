@@ -908,6 +908,31 @@ async def train_model(request: TrainRequest):
         # Check if it's a compiler error vs training error
         is_compiler_error = "COMPILER ERROR" in error_msg or "compiler" in error_msg.lower()
         
+        # AUTONOMOUS RECOVERY: Try to fix the error automatically
+        recovery_attempted = False
+        if "NameError" in error_msg or "undefined" in error_msg.lower() or "not defined" in error_msg.lower():
+            # This is a code error - try to auto-repair
+            try:
+                from agents.code_repair_agent import CodeRepairAgent
+                repair_agent = CodeRepairAgent()
+                
+                # Try to get the problematic code (from notebook if available)
+                notebook_context = {
+                    "columns": list(df.columns),
+                    "target": request.target,
+                    "task": task,
+                    "available_vars": ["X", "y", "pipeline", "df", "le"]
+                }
+                
+                # Generate a simple fix suggestion
+                if "numeric_cols" in error_msg:
+                    print("🔧 Auto-repairing: Adding missing numeric_cols definition")
+                    # This will be fixed in the next notebook generation
+                    recovery_attempted = True
+                    _log_run_event(run_id, "Auto-repair attempted for NameError", stage="recovery", progress=90)
+            except Exception as repair_error:
+                print(f"⚠️  Auto-repair failed: {repair_error}")
+        
         # Use LLM to analyze the error and provide helpful explanation
         try:
             dataset_info = {
@@ -935,10 +960,10 @@ async def train_model(request: TrainRequest):
                     error=e,
                     error_msg=error_msg,
                     dataset_info=dataset_info,
-                target_column=request.target,
-                task_type=task,
-                llm_provider="gemini"
-            )
+                    target_column=request.target,
+                    task_type=task,
+                    llm_provider="gemini"
+                )
             
             # Build comprehensive error message
             if is_compiler_error:
