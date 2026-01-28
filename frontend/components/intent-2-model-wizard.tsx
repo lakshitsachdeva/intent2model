@@ -406,7 +406,18 @@ export default function Intent2ModelWizard() {
     try {
       const resp = await fetch("http://localhost:8000/logs/backend?limit=200");
       const data = await resp.json();
-      setBackendLogTail(Array.isArray(data.lines) ? data.lines : []);
+      const lines = Array.isArray(data.lines) ? data.lines : [];
+      setBackendLogTail(lines);
+
+      // If we don't have a run_id yet, try to extract it from backend logs so Live Activity starts immediately.
+      if (!currentRunId && training && lines.length) {
+        const joined = lines.slice(-80).join("\n");
+        const m = joined.match(/Run ID created:\s*([0-9a-fA-F-]{36})/);
+        if (m && m[1]) {
+          setCurrentRunId(m[1]);
+          fetchRunLogs(m[1]);
+        }
+      }
     } catch (e) {
       // ignore
     }

@@ -108,6 +108,14 @@ def normalize_plan_dict(plan_dict: Dict[str, Any], profile: Optional[Dict[str, A
     
     normalized["target_confidence"] = float(plan_dict.get("target_confidence", 1.0))
     normalized["alternative_targets"] = [str(t) for t in plan_dict.get("alternative_targets", [])]
+
+    # CRITICAL: Remove target from feature_transforms if LLM included it.
+    # Our compiler/validator expects feature_transforms to refer to X columns only (df without target).
+    if normalized.get("feature_transforms"):
+        normalized["feature_transforms"] = [
+            ft for ft in normalized["feature_transforms"]
+            if str(ft.get("name")) != str(normalized.get("inferred_target"))
+        ]
     
     # 5. Task type (required field)
     if "task_type" in plan_dict:
