@@ -965,7 +965,10 @@ async def train_model(request: TrainRequest):
         except Exception as llm_error:
             # Fallback if LLM analysis fails
             print(f"LLM error analysis failed: {llm_error}")
-            if "could not convert string to float" in error_msg or "ValueError" in error_msg:
+            if "COMPILER ERROR" in error_msg or is_compiler_error:
+                # Compiler errors - show directly
+                user_msg = f"❌ COMPILER ERROR\n\n{error_msg}\n\nThis is a pipeline compilation error, NOT a training error. The compiled pipeline is invalid and cannot be executed."
+            elif "could not convert string to float" in error_msg or "ValueError" in error_msg:
                 user_msg = f"❌ The target column '{request.target}' contains text values. This column might not be suitable for {task}. Try a different column?"
             elif "All the" in error_msg and "fits failed" in error_msg:
                 user_msg = f"❌ Couldn't train with '{request.target}'. The data might not be suitable for this type of model. Try a different column?"
