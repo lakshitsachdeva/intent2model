@@ -104,9 +104,14 @@ export default function Intent2ModelWizard() {
     }
   };
 
-  // Fetch LLM status on mount
+  // Fetch LLM status on mount and auto-refresh every 5 seconds (to detect .env changes)
   useEffect(() => {
     fetchLlmStatus();
+    // Auto-refresh LLM status every 5 seconds to detect .env changes
+    const interval = setInterval(() => {
+      fetchLlmStatus();
+    }, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const onDrop = async (acceptedFiles: File[]) => {

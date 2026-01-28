@@ -285,7 +285,28 @@ sys.modules[__name__].get_llm_with_custom_key = get_llm_with_custom_key
 
 @app.get("/health")
 async def health():
-    """Detailed health check with LLM status."""
+    """Detailed health check with LLM status. Reloads .env to detect API key changes."""
+    # Reload .env file to detect API key changes (fast, no LLM test)
+    from dotenv import load_dotenv
+    load_dotenv(override=True)  # override=True to reload existing vars
+    
+    # Re-check if API key exists (don't test LLM - too slow)
+    from utils.api_key_manager import get_api_key
+    api_key = get_api_key(provider="gemini")
+    
+    # Update global state if API key changed
+    global LLM_AVAILABLE, LLM_RATE_LIMITED, LLM_PROVIDER, current_llm_model, current_llm_reason
+    if api_key and api_key.strip():
+        # API key exists - assume available (actual test happens during training)
+        LLM_AVAILABLE = True
+        LLM_RATE_LIMITED = False
+        LLM_PROVIDER = "gemini"
+        current_llm_model = "gemini-2.0-flash-exp"
+        current_llm_reason = "API key configured"
+    else:
+        LLM_AVAILABLE = False
+        LLM_RATE_LIMITED = False
+    
     model_info = get_current_model_info()
     return {
         "status": "healthy",
