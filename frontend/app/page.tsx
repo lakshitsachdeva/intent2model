@@ -29,7 +29,7 @@ export default function Home() {
       <footer className="border-t py-8 bg-white dark:bg-black">
         <div className="max-w-7xl mx-auto px-4 text-center">
           <p className="text-sm text-muted-foreground">
-            Built with ❤️ for autonomous machine learning. &copy; 2026 Intent2Model Inc.
+            Built with ❤️ by lakshit for autonomous machine learning. &copy; 2026 Intent2Model Inc.
           </p>
         </div>
       </footer>

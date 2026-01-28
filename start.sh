@@ -34,18 +34,8 @@ sleep 2
 
 # Load API key from .env file if it exists, otherwise use default
 if [ -f .env ]; then
-    # Source the .env file to load variables
-    set -a
-    source .env
-    set +a
+    export $(grep -v '^#' .env | xargs)
     echo "${GREEN}✅ Loaded API key from .env file${NC}"
-    if [ -z "$GEMINI_API_KEY" ]; then
-        echo "${YELLOW}⚠️  GEMINI_API_KEY not found in .env file${NC}"
-    else
-        # Explicitly export to ensure it's available to child processes
-        export GEMINI_API_KEY
-        echo "${GREEN}   API key: ${GEMINI_API_KEY:0:20}...${NC}"
-    fi
 else
     # Fallback to default (user can change in .env file)
     export GEMINI_API_KEY=AIzaSyAuxa5b792g6AaiD_ZURSrvGvLh-M-3bUw
@@ -87,10 +77,8 @@ if [ ! -f "main.py" ]; then
     exit 1
 fi
 
-# Start backend in background with explicit environment variable
-# Ensure GEMINI_API_KEY is available to the uvicorn process
-# Note: --reload can cause issues with module-level initialization, so we disable it for now
-nohup env GEMINI_API_KEY="$GEMINI_API_KEY" python -m uvicorn main:app --host 0.0.0.0 --port 8000 > ../backend.log 2>&1 &
+# Start backend in background
+nohup python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload > ../backend.log 2>&1 &
 BACKEND_PID=$!
 cd ..
 

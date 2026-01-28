@@ -48,6 +48,7 @@ export default function Intent2ModelWizard() {
   const [apiKeyStatus, setApiKeyStatus] = useState<any>(null);
   const [llmStatus, setLlmStatus] = useState<any>(null);
   const [isSettingApiKey, setIsSettingApiKey] = useState(false);
+  const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
 
   const fetchLlmStatus = async () => {
     try {
@@ -195,6 +196,7 @@ export default function Intent2ModelWizard() {
         if (progressInterval) clearInterval(progressInterval);
         setProgress(100);
         setTrainedModel(data);
+        setSelectedModelName(data.selected_model || data.pipeline_config?.model || null);
         // Dynamic prediction inputs
         const cols = Array.isArray(data.feature_columns) ? data.feature_columns : [];
         setFeatureColumns(cols);
@@ -222,6 +224,7 @@ export default function Intent2ModelWizard() {
             if (progressInterval) clearInterval(progressInterval);
             setProgress(100);
             setTrainedModel(fallbackData);
+            setSelectedModelName(fallbackData.selected_model || fallbackData.pipeline_config?.model || null);
             setTimeout(() => {
               setTraining(false);
               setStep(4);
@@ -240,6 +243,22 @@ export default function Intent2ModelWizard() {
         setTraining(false);
         setStep(4);
       }, 1000);
+    }
+  };
+
+  const selectModel = async (modelName: string) => {
+    if (!trainedModel?.run_id) return;
+    try {
+      // Optimistic UI
+      setSelectedModelName(modelName);
+      setTrainedModel((prev: any) => ({ ...(prev || {}), selected_model: modelName }));
+      await fetch("http://localhost:8000/run/select-model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: trainedModel.run_id, model_name: modelName }),
+      });
+    } catch (e) {
+      console.error("Failed to select model:", e);
     }
   };
 
@@ -568,10 +587,12 @@ export default function Intent2ModelWizard() {
                         </thead>
                         <tbody>
                           {trainedModel.all_models.map((model: any, idx: number) => {
+                            const modelName = model.model_name;
+                            const isSelected = (selectedModelName || trainedModel?.selected_model || trainedModel?.pipeline_config?.model) === modelName;
                             const isBest = idx === 0;
                             const primaryMetric = model.primary_metric || (model.metrics && Object.keys(model.metrics).length > 0 ? model.metrics[Object.keys(model.metrics)[0]] : 0) || 0;
                             return (
-                              <tr key={idx} className={`border-b hover:bg-muted/50 ${isBest ? 'bg-green-50 dark:bg-green-950/20' : ''}`}>
+                              <tr key={idx} className={`border-b hover:bg-muted/50 ${isSelected ? 'bg-green-50 dark:bg-green-950/20' : ''}`}>
                                 <td className="p-3">
                                   <div className="font-medium capitalize">{model.model_name?.replace('_', ' ')}</div>
                                   {isBest && <Badge variant="default" className="mt-1">Best</Badge>}
@@ -580,8 +601,10 @@ export default function Intent2ModelWizard() {
                                 <td className="text-right p-3 text-muted-foreground">{model.cv_mean?.toFixed(4) || 'N/A'}</td>
                                 <td className="text-right p-3 text-muted-foreground">{model.cv_std?.toFixed(4) || 'N/A'}</td>
                                 <td className="text-center p-3">
-                                  {isBest ? (
+                                  {isSelected ? (
                                     <Badge variant="default">Recommended</Badge>
+                                  ) : isBest ? (
+                                    <Badge variant="secondary">Recommended</Badge>
                                   ) : (
                                     <Badge variant="secondary">Available</Badge>
                                   )}
@@ -589,13 +612,13 @@ export default function Intent2ModelWizard() {
                                 <td className="text-center p-3">
                                   <Button 
                                     size="sm" 
-                                    variant={isBest ? "default" : "outline"}
+                                    variant={isSelected ? "default" : "outline"}
+                                    disabled={isSelected}
                                     onClick={() => {
-                                      // Store selected model
-                                      setTrainedModel({...trainedModel, selectedModel: model});
+                                      if (modelName) selectModel(modelName);
                                     }}
                                   >
-                                    {isBest ? 'Using' : 'Select'}
+                                    {isSelected ? 'Using' : 'Select'}
                                   </Button>
                                 </td>
                               </tr>

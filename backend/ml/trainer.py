@@ -439,6 +439,19 @@ def compare_models(
         }
 
     all_models_safe = [_json_safe_model_result(r) for r in results]
+    # Keep fitted pipelines/encoders server-side (NOT JSON-serializable)
+    pipelines_by_model = {
+        str(r.get("model_name")): {
+            "pipeline": r.get("best_model"),
+            "label_encoder": r.get("label_encoder"),
+            "cv_mean": r.get("cv_mean"),
+            "cv_std": r.get("cv_std"),
+            "metrics": r.get("metrics"),
+            "feature_importance": r.get("feature_importance"),
+        }
+        for r in results
+        if r.get("model_name") and r.get("best_model") is not None
+    }
 
     # Build comprehensive comparison (JSON-safe)
     comparison = {
@@ -458,5 +471,6 @@ def compare_models(
     # but return JSON-safe all_models for UI.
     best_result["model_comparison"] = comparison
     best_result["all_models"] = all_models_safe
+    best_result["pipelines_by_model"] = pipelines_by_model
 
     return best_result
