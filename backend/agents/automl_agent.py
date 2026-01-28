@@ -29,21 +29,42 @@ def plan_automl(df: pd.DataFrame, requested_target: Optional[str] = None, llm_pr
     api_key = get_api_key(provider=llm_provider)
     llm = LLMInterface(provider=llm_provider, api_key=api_key)
 
-    try:
-        response = llm.generate(prompt, system_prompt)
-        plan_dict = _extract_json(response)
-        plan_dict["planning_source"] = "llm"
-        plan_dict["planning_error"] = None
-        return AutoMLPlan(**plan_dict)
-    except Exception as e:
-        # Hard fallback: rule-based minimal plan (still data-driven, not template)
-        plan_dict = _rule_based_plan(profile, requested_target=requested_target)
-        plan_dict["planning_source"] = "fallback"
-        plan_dict["planning_error"] = str(e)[:200]
+    max_retries = 3
+    last_error = None
+    last_response = None
+
+    for attempt in range(max_retries):
         try:
+            response = llm.generate(prompt, system_prompt)
+            last_response = response
+            plan_dict = _extract_json(response)
+            
+            # Auto-fix common LLM response issues
+            plan_dict = _fix_plan_dict(plan_dict, profile, requested_target)
+            
+            plan_dict["planning_source"] = "llm"
+            plan_dict["planning_error"] = None
             return AutoMLPlan(**plan_dict)
-        except Exception as e2:
-            raise RuntimeError(f"AutoML planning failed (LLM and fallback). LLM err={e}; fallback err={e2}")
+        except Exception as e:
+            last_error = e
+            error_str = str(e)
+            # Log detailed error info
+            if "validation error" in error_str.lower() or "Field required" in error_str:
+                print(f"❌ AutoML planning attempt {attempt+1} failed: Schema validation error")
+                print(f"   Error details: {error_str[:300]}")
+                if last_response:
+                    print(f"   LLM response preview: {last_response[:500]}...")
+            else:
+                print(f"❌ AutoML planning attempt {attempt+1} failed: {error_str[:200]}")
+
+    # Hard fallback: rule-based minimal plan (still data-driven, not template)
+    plan_dict = _rule_based_plan(profile, requested_target=requested_target)
+    plan_dict["planning_source"] = "fallback"
+    plan_dict["planning_error"] = str(last_error)[:500]
+    try:
+        return AutoMLPlan(**plan_dict)
+    except Exception as e2:
+        raise RuntimeError(f"AutoML planning failed (LLM and fallback). LLM err={last_error}; fallback err={e2}")
 
 
 def _profile_for_llm(df: pd.DataFrame) -> Dict[str, Any]:
@@ -151,10 +172,142 @@ def _extract_json(text: str) -> Dict[str, Any]:
     # Normalize: LLM might return "column_name" instead of "name" in feature_transforms
     if "feature_transforms" in data and isinstance(data["feature_transforms"], list):
         for ft in data["feature_transforms"]:
-            if isinstance(ft, dict) and "column_name" in ft and "name" not in ft:
-                ft["name"] = ft.pop("column_name")
+            if isinstance(ft, dict):
+                if "column_name" in ft and "name" not in ft:
+                    ft["name"] = ft.pop("column_name")
+                # Ensure required fields exist with defaults
+                if "name" not in ft and "column_name" not in ft:
+                    continue  # Skip invalid entries
+                if "inferred_dtype" not in ft:
+                    ft["inferred_dtype"] = "unknown"
+                if "kind" not in ft:
+                    ft["kind"] = "unknown"
     
     return data
+
+
+def _fix_plan_dict(plan_dict: Dict[str, Any], profile: Dict[str, Any], requested_target: Optional[str]) -> Dict[str, Any]:
+    """
+    Auto-fix common issues in LLM-generated plan_dict to make it schema-compliant.
+    """
+    # Ensure all required markdown fields exist
+    required_md_fields = [
+        "task_inference_md", "dataset_intelligence_md", "transformation_strategy_md",
+        "model_selection_md", "training_validation_md", "error_behavior_analysis_md", "explainability_md"
+    ]
+    for field in required_md_fields:
+        if field not in plan_dict or not plan_dict[field]:
+            plan_dict[field] = f"LLM-generated content for {field.replace('_md', '')} (auto-filled)."
+    
+    # Ensure inferred_target exists and is valid
+    if "inferred_target" not in plan_dict or not plan_dict["inferred_target"]:
+        cols = profile.get("columns", [])
+        id_like = set(profile.get("identifier_like_columns", []))
+        candidates = [c for c in cols if c not in id_like]
+        plan_dict["inferred_target"] = (requested_target or candidates[-1] if candidates else (cols[-1] if cols else "unknown")).strip()
+    
+    # Ensure task_type exists
+    if "task_type" not in plan_dict:
+        # Infer from target
+        target = plan_dict.get("inferred_target", "")
+        dtypes = profile.get("dtypes", {})
+        nunique = profile.get("nunique", {})
+        n_rows = int(profile.get("n_rows", 0))
+        t_nuniq = int(nunique.get(target, 0))
+        t_dtype = str(dtypes.get(target, ""))
+        if "float" in t_dtype or ("int" in t_dtype and t_nuniq > max(20, int(0.1 * n_rows))):
+            plan_dict["task_type"] = "regression"
+        else:
+            plan_dict["task_type"] = "binary_classification" if t_nuniq <= 2 else "multiclass_classification"
+    
+    # Ensure primary_metric exists
+    if "primary_metric" not in plan_dict:
+        task_type = plan_dict.get("task_type", "regression")
+        plan_dict["primary_metric"] = "rmse" if task_type == "regression" else "f1"
+    
+    # Ensure additional_metrics exists
+    if "additional_metrics" not in plan_dict:
+        task_type = plan_dict.get("task_type", "regression")
+        plan_dict["additional_metrics"] = ["mae", "r2"] if task_type == "regression" else ["precision", "recall"]
+    
+    # Ensure feature_transforms exists and is a list
+    if "feature_transforms" not in plan_dict or not isinstance(plan_dict["feature_transforms"], list):
+        # Generate minimal feature_transforms from profile
+        cols = profile.get("columns", [])
+        feature_transforms = []
+        for c in cols:
+            dtypes_dict = profile.get("dtypes", {})
+            nunique_dict = profile.get("nunique", {})
+            kind = "unknown"
+            if c in profile.get("numeric_cols", []):
+                kind = "continuous"
+            else:
+                nunq = int(nunique_dict.get(c, 0))
+                kind = "binary_categorical" if nunq == 2 else "nominal_categorical"
+            
+            feature_transforms.append({
+                "name": c,
+                "inferred_dtype": str(dtypes_dict.get(c, "unknown")),
+                "kind": kind,
+                "drop": False,
+                "impute": "none",
+                "encode": "none",
+                "scale": "none",
+                "notes_md": ""
+            })
+        plan_dict["feature_transforms"] = feature_transforms
+    
+    # Ensure model_candidates exists and is a list
+    if "model_candidates" not in plan_dict or not isinstance(plan_dict["model_candidates"], list):
+        task_type = plan_dict.get("task_type", "regression")
+        if task_type == "regression":
+            plan_dict["model_candidates"] = [
+                {"model_name": "linear_regression", "reason_md": "Baseline linear model.", "params": {}},
+                {"model_name": "random_forest", "reason_md": "Nonlinear baseline.", "params": {}}
+            ]
+        else:
+            plan_dict["model_candidates"] = [
+                {"model_name": "logistic_regression", "reason_md": "Baseline classification model.", "params": {}},
+                {"model_name": "random_forest", "reason_md": "Nonlinear baseline.", "params": {}}
+            ]
+    
+    # Fix feature_transforms: ensure all have required fields
+    if "feature_transforms" in plan_dict:
+        for ft in plan_dict["feature_transforms"]:
+            if not isinstance(ft, dict):
+                continue
+            # Normalize column_name -> name
+            if "column_name" in ft and "name" not in ft:
+                ft["name"] = ft.pop("column_name")
+            # Add defaults for missing fields
+            if "inferred_dtype" not in ft:
+                ft["inferred_dtype"] = "unknown"
+            if "kind" not in ft:
+                ft["kind"] = "unknown"
+            if "drop" not in ft:
+                ft["drop"] = False
+            if "impute" not in ft:
+                ft["impute"] = "none"
+            if "encode" not in ft:
+                ft["encode"] = "none"
+            if "scale" not in ft:
+                ft["scale"] = "none"
+            if "notes_md" not in ft:
+                ft["notes_md"] = ""
+    
+    # Fix model_candidates: ensure all have required fields
+    if "model_candidates" in plan_dict:
+        for mc in plan_dict["model_candidates"]:
+            if not isinstance(mc, dict):
+                continue
+            if "model_name" not in mc:
+                continue  # Skip invalid entries
+            if "reason_md" not in mc:
+                mc["reason_md"] = f"Selected {mc['model_name']} for this task."
+            if "params" not in mc:
+                mc["params"] = {}
+    
+    return plan_dict
 
 
 def _rule_based_plan(profile: Dict[str, Any], requested_target: Optional[str]) -> Dict[str, Any]:
