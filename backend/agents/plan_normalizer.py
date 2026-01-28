@@ -65,8 +65,13 @@ def normalize_plan_dict(plan_dict: Dict[str, Any], profile: Optional[Dict[str, A
                 "transform_confidence": float(ft.get("transform_confidence", 1.0)),
             }
             normalized["feature_transforms"].append(normalized_ft)
-    else:
-        normalized["feature_transforms"] = []
+    
+    # CRITICAL: If feature_transforms is missing or empty, generate from profile
+    if not normalized.get("feature_transforms"):
+        print("⚠️  Warning: feature_transforms is missing or empty. Generating from profile.")
+        normalized["feature_transforms"] = _generate_feature_transforms_from_profile(
+            profile, normalized.get("inferred_target")
+        )
     
     # 3. Normalize model_candidates (CRITICAL: convert sklearn class names to internal keys)
     if "model_candidates" in plan_dict:
