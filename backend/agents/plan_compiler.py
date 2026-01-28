@@ -162,7 +162,7 @@ def compile_preprocessing_code(plan: AutoMLPlan, df: pd.DataFrame) -> str:
         lines.append(f"            X = np.asarray(X, dtype=object)\n")
         lines.append(f"            out = np.zeros((X.shape[0], X.shape[1]), dtype=float)\n")
         lines.append(f"            for j in range(X.shape[1]):\n")
-        lines.append(f"                m = self.maps_.get(j, {{}})\n")
+        lines.append(f"                m = self.maps_[j] if j < len(self.maps_) else {{}}\n")
         lines.append(f"                col = [\"\" if v is None else str(v) for v in X[:, j]]\n")
         lines.append(f"                out[:, j] = [float(m.get(v, 0.0)) for v in col]\n")
         lines.append(f"            return out\n")
