@@ -408,6 +408,7 @@ export default function Intent2ModelWizard() {
       const data = await resp.json();
       const lines = Array.isArray(data.lines) ? data.lines : [];
       setBackendLogTail(lines);
+      setBackendOnline(true);
 
       // If we don't have a run_id yet, try to extract it from backend logs so Live Activity starts immediately.
       if (!currentRunId && training && lines.length) {
@@ -419,7 +420,8 @@ export default function Intent2ModelWizard() {
         }
       }
     } catch (e) {
-      // ignore
+      // Backend might be restarting/offline; mark offline so UI explains why logs are empty
+      setBackendOnline(false);
     }
   };
 

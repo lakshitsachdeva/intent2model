@@ -728,8 +728,14 @@ async def train_model(request: TrainRequest):
                     return "classification"
                 s = df_[target_]
                 # If non-numeric dtype, it's classification
-                if str(s.dtype) in ["object", "string", "category", "bool"]:
-                    return "classification"
+                try:
+                    import pandas as _pd  # type: ignore
+                    if not _pd.api.types.is_numeric_dtype(s):
+                        return "classification"
+                except Exception:
+                    # fallback to string checks
+                    if "object" in str(s.dtype) or "string" in str(s.dtype) or "category" in str(s.dtype) or "bool" in str(s.dtype):
+                        return "classification"
                 # If very low unique count, likely classification
                 nunq = int(s.nunique(dropna=True))
                 if nunq <= 20:
@@ -754,6 +760,7 @@ async def train_model(request: TrainRequest):
         # Execution-side task inference is AUTHORITATIVE (prevents regression/classification mismatch)
         exec_task = _infer_execution_task(df, plan.inferred_target)
         planned_task = "regression" if plan.task_type == "regression" else "classification"
+        _log_run_event(run_id, f"Execution task inferred: {exec_task} (planned: {planned_task})", stage="plan", progress=17)
         if exec_task != planned_task:
             _log_run_event(
                 run_id,
