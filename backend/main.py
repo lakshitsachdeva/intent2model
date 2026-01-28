@@ -1405,48 +1405,72 @@ async def download_readme(run_id: str):
 @app.get("/download/{run_id}/report")
 async def download_report(run_id: str):
     """Download detailed model analysis report with all explanations."""
-    if run_id not in trained_models_cache:
-        raise HTTPException(status_code=404, detail="Model not found")
-    
-    model_info = trained_models_cache[run_id]
-    
-    # Get all models data
-    all_models = model_info.get("all_models", [])
-    df = model_info.get("df")
-    
-    # Build dataset info
-    dataset_info = {}
-    if df is not None:
-        dataset_info = {
-            "n_rows": len(df),
-            "n_cols": len(df.columns),
-            "numeric_cols": df.select_dtypes(include=['number']).columns.tolist(),
-            "categorical_cols": df.select_dtypes(include=['object', 'category']).columns.tolist()
-        }
-    
-    # Get trace and preprocessing recommendations from the training response
-    trace = model_info.get("trace", [])
-    preprocessing_recommendations = model_info.get("preprocessing_recommendations", [])
-    
-    report_content = generate_model_report(
-        all_models=all_models,
-        target=model_info["target"],
-        task=model_info["task"],
-        dataset_info=dataset_info,
-        trace=trace,
-        preprocessing_recommendations=preprocessing_recommendations
-    )
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
-        f.write(report_content)
-        temp_path = f.name
-    
-    return FileResponse(
-        temp_path,
-        media_type='text/markdown',
-        filename=f'Model_Report_{run_id[:8]}.md',
-        background=lambda: os.unlink(temp_path)
-    )
+    try:
+        if run_id not in trained_models_cache:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        model_info = trained_models_cache[run_id]
+        
+        # Get all models data
+        all_models = model_info.get("all_models", [])
+        if not all_models:
+            # Fallback: create a minimal model entry from cached data
+            all_models = [{
+                "model_name": model_info.get("model_name", "unknown"),
+                "primary_metric": model_info.get("metrics", {}).get(list(model_info.get("metrics", {}).keys())[0] if model_info.get("metrics") else "accuracy", 0),
+                "metrics": model_info.get("metrics", {}),
+                "cv_mean": model_info.get("cv_mean"),
+                "cv_std": model_info.get("cv_std"),
+                "cv_scores": [],
+                "feature_importance": model_info.get("feature_importance", {})
+            }]
+        
+        df = model_info.get("df")
+        
+        # Build dataset info
+        dataset_info = {}
+        if df is not None:
+            try:
+                dataset_info = {
+                    "n_rows": len(df),
+                    "n_cols": len(df.columns),
+                    "numeric_cols": df.select_dtypes(include=['number']).columns.tolist(),
+                    "categorical_cols": df.select_dtypes(include=['object', 'category']).columns.tolist()
+                }
+            except Exception as e:
+                print(f"Warning: Could not build dataset_info: {e}")
+                dataset_info = {}
+        
+        # Get trace and preprocessing recommendations from the training response
+        trace = model_info.get("trace", [])
+        preprocessing_recommendations = model_info.get("preprocessing_recommendations", [])
+        
+        report_content = generate_model_report(
+            all_models=all_models,
+            target=model_info.get("target", "unknown"),
+            task=model_info.get("task", "classification"),
+            dataset_info=dataset_info,
+            trace=trace,
+            preprocessing_recommendations=preprocessing_recommendations
+        )
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+            f.write(report_content)
+            temp_path = f.name
+        
+        return FileResponse(
+            temp_path,
+            media_type='text/markdown',
+            filename=f'Model_Report_{run_id[:8]}.md',
+            background=lambda: os.unlink(temp_path)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Error generating report for {run_id}: {error_details}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
 
 
 @app.get("/download/{run_id}/all")

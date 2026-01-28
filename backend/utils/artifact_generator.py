@@ -30,15 +30,20 @@ def generate_notebook(
     # Expect markdown sections in automl_plan if present
     md_sections = []
     if isinstance(automl_plan, dict) and automl_plan:
+        # Always show sections if they exist (even if fallback text)
+        planning_source = automl_plan.get("planning_source", "unknown")
         md_sections = [
-            ("STEP 0 — TASK INFERENCE", automl_plan.get("task_inference_md", "")),
-            ("STEP 1 — DATASET INTELLIGENCE", automl_plan.get("dataset_intelligence_md", "")),
-            ("STEP 2 — TRANSFORMATION STRATEGY", automl_plan.get("transformation_strategy_md", "")),
-            ("STEP 3 — MODEL CANDIDATE SELECTION", automl_plan.get("model_selection_md", "")),
-            ("STEP 4 — TRAINING & VALIDATION", automl_plan.get("training_validation_md", "")),
-            ("STEP 5 — ERROR & BEHAVIOR ANALYSIS", automl_plan.get("error_behavior_analysis_md", "")),
-            ("STEP 6 — EXPLAINABILITY", automl_plan.get("explainability_md", "")),
+            ("STEP 0 — TASK INFERENCE", automl_plan.get("task_inference_md", "") or f"Rule-based fallback task inference (LLM unavailable)."),
+            ("STEP 1 — DATASET INTELLIGENCE", automl_plan.get("dataset_intelligence_md", "") or f"Rule-based fallback dataset intelligence (LLM unavailable)."),
+            ("STEP 2 — TRANSFORMATION STRATEGY", automl_plan.get("transformation_strategy_md", "") or f"Rule-based fallback transformation strategy (LLM unavailable)."),
+            ("STEP 3 — MODEL CANDIDATE SELECTION", automl_plan.get("model_selection_md", "") or f"Rule-based fallback model selection (LLM unavailable)."),
+            ("STEP 4 — TRAINING & VALIDATION", automl_plan.get("training_validation_md", "") or "Use cross-validation by default with task-appropriate metrics."),
+            ("STEP 5 — ERROR & BEHAVIOR ANALYSIS", automl_plan.get("error_behavior_analysis_md", "") or "Analyze residuals/confusion matrix and error slices."),
+            ("STEP 6 — EXPLAINABILITY", automl_plan.get("explainability_md", "") or "Use feature_importances_ when available and align post-encoding names."),
         ]
+        # Add planning source note if available
+        if planning_source and planning_source != "unknown":
+            md_sections.insert(0, ("PLANNING SOURCE", f"**Planning Method:** {planning_source.upper()}\n\n" + (automl_plan.get("planning_error", "") or "")))
 
     notebook = {
         "cells": [
@@ -568,9 +573,18 @@ def generate_model_report(
     
     for idx, model in enumerate(all_models):
         model_name = model.get('model_name', 'Unknown').replace('_', ' ').title()
-        primary_metric = model.get('primary_metric', 0)
-        cv_mean = model.get('cv_mean', 0)
-        cv_std = model.get('cv_std', 0)
+        primary_metric = model.get('primary_metric')
+        if primary_metric is None:
+            # Try to get from metrics dict
+            metrics_dict = model.get('metrics', {})
+            if metrics_dict:
+                # Use first metric value as fallback
+                primary_metric = next(iter(metrics_dict.values()), 0)
+            else:
+                primary_metric = 0
+        primary_metric = float(primary_metric) if primary_metric is not None else 0.0
+        cv_mean = float(model.get('cv_mean', 0)) if model.get('cv_mean') is not None else 0.0
+        cv_std = float(model.get('cv_std', 0)) if model.get('cv_std') is not None else 0.0
         status = "⭐ Best" if idx == 0 else "Available"
         
         report_lines.append(f"| {model_name} | {primary_metric:.4f} | {cv_mean:.4f} | {cv_std:.4f} | {status} |")
@@ -587,13 +601,22 @@ def generate_model_report(
         report_lines.append(f"### {model_name} {'⭐ (Recommended)' if is_best else ''}\n")
         
         # Metrics
-        if model.get('metrics'):
+        metrics_dict = model.get('metrics', {})
+        if metrics_dict:
             report_lines.append("#### Performance Metrics\n")
-            for metric_name, value in model.get('metrics', {}).items():
-                report_lines.append(f"- **{metric_name}:** {value:.4f}")
+            for metric_name, value in metrics_dict.items():
+                if value is not None:
+                    try:
+                        report_lines.append(f"- **{metric_name}:** {float(value):.4f}")
+                    except (ValueError, TypeError):
+                        report_lines.append(f"- **{metric_name}:** {value}")
             report_lines.append("")
         
-        # Full Explanation
+        # Primary metric highlight
+        if model.get('primary_metric') is not None:
+            report_lines.append(f"**Primary Metric Score:** {float(model.get('primary_metric', 0)):.4f}\n")
+        
+        # Full Explanation (if available from LLM explainer)
         explanation = model.get('explanation', {})
         if explanation:
             if isinstance(explanation, dict):
