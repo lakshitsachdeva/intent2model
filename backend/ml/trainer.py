@@ -400,6 +400,21 @@ def compare_models(
         - all_models: List of ALL model results with full details
         - model_comparison: Comparison summary
     """
+    # CRITICAL: Define numeric_cols and categorical_cols BEFORE using them
+    profile = profile_dataset(df)
+    numeric_cols = list(profile["numeric_cols"])
+    categorical_cols = list(profile["categorical_cols"])
+    
+    # Remove target from column lists if present
+    if target in numeric_cols:
+        numeric_cols.remove(target)
+    if target in categorical_cols:
+        categorical_cols.remove(target)
+    
+    # Prepare X for validation
+    X = df.drop(columns=[target])
+    y = df[target]
+    
     results = []
     
     for model_name in model_candidates:
@@ -431,6 +446,19 @@ def compare_models(
     if not results:
         # Check if it's a compiler error vs training error
         error_summary = []
+        # Ensure numeric_cols and categorical_cols are defined (they should be from above)
+        if 'numeric_cols' not in locals() or 'categorical_cols' not in locals():
+            # Fallback: define them here if somehow not defined
+            profile = profile_dataset(df)
+            numeric_cols = list(profile["numeric_cols"])
+            categorical_cols = list(profile["categorical_cols"])
+            if target in numeric_cols:
+                numeric_cols.remove(target)
+            if target in categorical_cols:
+                categorical_cols.remove(target)
+            X = df.drop(columns=[target])
+            y = df[target]
+        
         for model_name in model_candidates:
             # Try to build and validate pipeline for this model
             try:
