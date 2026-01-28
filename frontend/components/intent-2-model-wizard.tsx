@@ -687,6 +687,15 @@ export default function Intent2ModelWizard() {
                   <CardHeader>
                     <CardTitle>Model Comparison</CardTitle>
                     <CardDescription>All trained models with performance metrics. Select one to use.</CardDescription>
+                    <details className="mt-4 text-sm">
+                      <summary className="cursor-pointer text-primary hover:underline">📊 What do these metrics mean?</summary>
+                      <div className="mt-3 space-y-2 pl-4 border-l-2 border-primary/20">
+                        <p><strong>Primary Metric:</strong> The main score used to rank models. For regression: RMSE/MAE (lower is better) or R² (higher is better). For classification: Accuracy/F1/Precision/Recall (higher is better).</p>
+                        <p><strong>CV Mean:</strong> Average performance across all cross-validation folds. Shows how well the model generalizes to unseen data. Higher is better (except for RMSE/MAE where lower is better).</p>
+                        <p><strong>CV Std:</strong> Standard deviation of CV scores. Lower = more consistent performance. High CV Std means the model's performance varies a lot across different data splits (unstable).</p>
+                        <p><strong>Status:</strong> "Recommended" = best overall model. "Available" = other trained models you can switch to.</p>
+                      </div>
+                    </details>
                   </CardHeader>
                   <CardContent>
                     <div className="overflow-x-auto">
