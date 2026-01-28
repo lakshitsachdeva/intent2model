@@ -143,7 +143,12 @@ def normalize_plan_dict(plan_dict: Dict[str, Any], profile: Optional[Dict[str, A
     normalized["model_selection_confidence"] = float(plan_dict.get("model_selection_confidence", 1.0))
     
     # 9. Planning metadata
-    normalized["planning_source"] = plan_dict.get("planning_source", "fallback")
+    # IMPORTANT: Only set default to "fallback" if planning_source is truly missing
+    # If it's already set (e.g., "llm"), preserve it
+    if "planning_source" in plan_dict:
+        normalized["planning_source"] = plan_dict["planning_source"]
+    else:
+        normalized["planning_source"] = "fallback"  # Default only if not provided
     normalized["planning_error"] = plan_dict.get("planning_error")
     
     # Determine plan quality based on ACTUAL confidence scores, not just source

@@ -66,14 +66,15 @@ def generate_notebook(
         
         # If LLM was used, show LLM-generated content (even if empty, don't say "LLM unavailable")
         # Only show fallback text if planning_source is actually "fallback"
-        is_llm_plan = planning_source == "llm"
-        fallback_text = "" if is_llm_plan else " (LLM unavailable - using rule-based fallback)"
+        is_llm_plan = planning_source == "llm" or planning_source == "auto_repair"
+        fallback_text = " (LLM unavailable - using rule-based fallback)" if planning_source == "fallback" else ""
         
+        # For LLM plans, use generic descriptions if markdown is missing (don't say "LLM unavailable")
         md_sections = [
-            ("STEP 0 — TASK INFERENCE", automl_plan.get("task_inference_md", "") or (f"Rule-based fallback task inference{fallback_text}." if not is_llm_plan else "Task inference based on dataset analysis.")),
-            ("STEP 1 — DATASET INTELLIGENCE", automl_plan.get("dataset_intelligence_md", "") or (f"Rule-based fallback dataset intelligence{fallback_text}." if not is_llm_plan else "Dataset intelligence analysis.")),
-            ("STEP 2 — TRANSFORMATION STRATEGY", automl_plan.get("transformation_strategy_md", "") or (f"Rule-based fallback transformation strategy{fallback_text}." if not is_llm_plan else "Transformation strategy based on feature analysis.")),
-            ("STEP 3 — MODEL CANDIDATE SELECTION", automl_plan.get("model_selection_md", "") or (f"Rule-based fallback model selection{fallback_text}." if not is_llm_plan else "Model selection based on task and dataset characteristics.")),
+            ("STEP 0 — TASK INFERENCE", automl_plan.get("task_inference_md", "") or ("Task inference based on dataset analysis." if is_llm_plan else f"Rule-based fallback task inference{fallback_text}.")),
+            ("STEP 1 — DATASET INTELLIGENCE", automl_plan.get("dataset_intelligence_md", "") or ("Dataset intelligence analysis." if is_llm_plan else f"Rule-based fallback dataset intelligence{fallback_text}.")),
+            ("STEP 2 — TRANSFORMATION STRATEGY", automl_plan.get("transformation_strategy_md", "") or ("Transformation strategy based on feature analysis." if is_llm_plan else f"Rule-based fallback transformation strategy{fallback_text}.")),
+            ("STEP 3 — MODEL CANDIDATE SELECTION", automl_plan.get("model_selection_md", "") or ("Model selection based on task and dataset characteristics." if is_llm_plan else f"Rule-based fallback model selection{fallback_text}.")),
             ("STEP 4 — TRAINING & VALIDATION", automl_plan.get("training_validation_md", "") or "Use cross-validation by default with task-appropriate metrics."),
             ("STEP 5 — ERROR & BEHAVIOR ANALYSIS", automl_plan.get("error_behavior_analysis_md", "") or "Analyze residuals/confusion matrix and error slices."),
             ("STEP 6 — EXPLAINABILITY", automl_plan.get("explainability_md", "") or "Use feature_importances_ when available and align post-encoding names."),
