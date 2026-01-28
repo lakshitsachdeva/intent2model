@@ -654,9 +654,10 @@ export default function Intent2ModelWizard() {
                         </Badge>
                       </div>
                       <div className="rounded-lg border bg-muted/30 p-4 max-h-[400px] overflow-y-auto">
-                        {liveLogs.length > 0 ? (
+                        {liveLogs.length > 0 || (training && backendLogTail.length > 0) ? (
                           <div className="space-y-2 font-mono text-xs">
-                            {liveLogs.slice(-50).map((log, idx) => {
+                            {/* Show structured run logs if available */}
+                            {liveLogs.length > 0 ? liveLogs.slice(-50).map((log, idx) => {
                               const isError = log.message.includes("❌") || log.message.includes("ERROR") || log.message.includes("failed");
                               const isSuccess = log.message.includes("✅") || log.message.includes("succeeded");
                               const isWarning = log.message.includes("⚠️") || log.message.includes("WARNING");
@@ -695,12 +696,26 @@ export default function Intent2ModelWizard() {
                                   )}
                                 </div>
                               );
-                            })}
+                            }) : null}
+                            
+                            {/* Fallback: Show backend log tail if run logs not available yet */}
+                            {liveLogs.length === 0 && training && backendLogTail.length > 0 && (
+                              <div className="text-xs text-muted-foreground space-y-1">
+                                {backendLogTail.slice(-20).map((line, idx) => (
+                                  <div key={idx} className="p-1 rounded">
+                                    {line}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <div className="text-center text-muted-foreground py-8">
                             <div className="w-8 h-8 rounded-full border-2 border-primary/30 border-t-primary animate-spin mx-auto mb-2" />
                             <p>Waiting for activity logs...</p>
+                            {training && (
+                              <p className="text-xs mt-2">Training in progress... logs will appear here</p>
+                            )}
                           </div>
                         )}
                       </div>
