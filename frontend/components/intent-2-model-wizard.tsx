@@ -348,6 +348,31 @@ export default function Intent2ModelWizard() {
     const t = setInterval(() => fetchBackendLogTail(), 1200);
     return () => clearInterval(t);
   }, [showDevLogs, training]);
+  
+  // Poll run logs in real-time during training (ALWAYS, not just when dev panel is open)
+  useEffect(() => {
+    if (!training) return;
+    
+    // Poll backend logs immediately (even before run_id is available)
+    fetchBackendLogTail();
+    const backendInterval = setInterval(() => {
+      fetchBackendLogTail();
+    }, 200);
+    
+    // If we have run_id, also poll structured run logs
+    let runLogInterval: NodeJS.Timeout | null = null;
+    if (currentRunId) {
+      fetchRunLogs(currentRunId);
+      runLogInterval = setInterval(() => {
+        fetchRunLogs(currentRunId);
+      }, 200);
+    }
+    
+    return () => {
+      clearInterval(backendInterval);
+      if (runLogInterval) clearInterval(runLogInterval);
+    };
+  }, [training, currentRunId]);
 
   const selectModel = async (modelName: string) => {
     if (!trainedModel?.run_id) return;

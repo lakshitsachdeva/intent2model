@@ -234,8 +234,14 @@ class SelectModelRequest(BaseModel):
 @app.get("/run/{run_id}/logs")
 async def get_run_logs(run_id: str, limit: int = 200):
     """Fetch recent structured log events for a run (for Developer Logs UI)."""
+    # If run_id doesn't exist yet, return empty (training might not have started)
     if run_id not in run_logs_cache:
-        raise HTTPException(status_code=404, detail="Run logs not found")
+        return {
+            "run_id": run_id,
+            "stage": "init",
+            "progress": 0,
+            "events": [{"ts": "", "message": "Run not started yet - logs will appear here soon..."}],
+        }
     cur = run_logs_cache[run_id]
     events = cur.get("events") or []
     try:
@@ -244,8 +250,8 @@ async def get_run_logs(run_id: str, limit: int = 200):
         lim = 200
     return {
         "run_id": run_id,
-        "stage": cur.get("stage"),
-        "progress": cur.get("progress"),
+        "stage": cur.get("stage", "init"),
+        "progress": cur.get("progress", 0),
         "events": events[-lim:],
     }
 
@@ -670,8 +676,9 @@ async def train_model(request: TrainRequest):
         run_id = create_run_id()
         _log_run_event(run_id, "🚀 Run created - training request received", stage="init", progress=1)
         
-        # IMPORTANT: Return run_id immediately so frontend can start polling logs
-        # We'll stream updates via the logs endpoint
+        # CRITICAL: Log run_id immediately so frontend can start polling
+        # Frontend will get run_id from response, but we log it here first
+        print(f"📋 Run ID created: {run_id} - frontend can start polling /run/{run_id}/logs")
 
         # STEP 0–3: LLM-driven AutoML planning BEFORE any model training
         trace.append("STEP 0–3: Planning (target/task/feature strategy/model shortlist) via AutoML agent.")
