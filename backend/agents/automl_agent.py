@@ -40,10 +40,12 @@ def plan_automl(df: pd.DataFrame, requested_target: Optional[str] = None, llm_pr
             last_response = response
             plan_dict = _extract_json(response)
             
-            # CENTRAL NORMALIZATION LAYER (single source of truth)
-            plan_dict = normalize_plan_dict(plan_dict, profile=profile, requested_target=requested_target)
+            # Set planning_source BEFORE normalization (so it's preserved)
             plan_dict["planning_source"] = "llm"
             plan_dict["planning_error"] = None
+            
+            # CENTRAL NORMALIZATION LAYER (single source of truth)
+            plan_dict = normalize_plan_dict(plan_dict, profile=profile, requested_target=requested_target)
             
             # Validate plan (logical consistency beyond schema)
             _validate_plan(plan_dict, profile)
