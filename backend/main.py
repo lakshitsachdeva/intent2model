@@ -13,6 +13,11 @@ import pandas as pd
 import io
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (in project root)
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -34,10 +39,7 @@ import json
 import re
 import tempfile
 import base64
-from dotenv import load_dotenv
-
-# Load environment variables from .env file (if it exists)
-load_dotenv()
+# Note: load_dotenv() is already called at the top of the file with the correct path
 
 
 app = FastAPI(title="Intent2Model API", version="1.0.0")
@@ -151,32 +153,99 @@ app.add_middleware(
 # Check LLM availability on startup
 LLM_AVAILABLE = False
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")
+
+# Load .env file explicitly (in case it wasn't loaded earlier)
+env_path = Path(__file__).parent.parent / '.env'
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path, override=True)
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # Try to get API key from api_key_manager (which checks custom keys first, then env)
 from utils.api_key_manager import get_api_key
 api_key = get_api_key(provider="gemini") or GEMINI_API_KEY
 
-if api_key:
+# Write startup info to a file for debugging
+startup_log_path = Path(__file__).parent.parent / 'backend_startup.log'
+try:
+    with open(startup_log_path, 'w') as f:
+        f.write(f"🔍 LLM Startup Test:\n")
+        f.write(f"   LLM_PROVIDER: {LLM_PROVIDER}\n")
+        f.write(f"   GEMINI_API_KEY from env: {'Found' if GEMINI_API_KEY else 'Not found'}\n")
+        f.write(f"   API key from manager: {'Found' if api_key else 'Not found'}\n")
+        f.flush()
+except Exception:
+    pass
+
+print(f"🔍 LLM Startup Test:", flush=True)
+print(f"   LLM_PROVIDER: {LLM_PROVIDER}", flush=True)
+print(f"   GEMINI_API_KEY from env: {'Found' if GEMINI_API_KEY else 'Not found'}", flush=True)
+print(f"   API key from manager: {'Found' if api_key else 'Not found'}", flush=True)
+
+if api_key and api_key.strip():
     try:
+        print(f"🔑 Testing LLM with API key: {api_key[:20]}...", flush=True)
+        try:
+            with open(startup_log_path, 'a') as f:
+                f.write(f"🔑 Testing LLM with API key: {api_key[:20]}...\n")
+                f.flush()
+        except Exception:
+            pass
+        
         llm_test = LLMInterface(provider=LLM_PROVIDER, api_key=api_key)
         # Quick test call (with timeout protection)
         test_response = llm_test.generate("Say 'OK'", "You are a test assistant.")
         if test_response and len(test_response.strip()) > 0:
             LLM_AVAILABLE = True
             model_info = get_current_model_info()
-            print(f"✅ LLM ({LLM_PROVIDER}) is available and working")
+            print(f"✅ LLM ({LLM_PROVIDER}) is available and working", flush=True)
             if model_info.get("model"):
-                print(f"   Using model: {model_info.get('model')} - {model_info.get('reason', '')}")
+                print(f"   Using model: {model_info.get('model')} - {model_info.get('reason', '')}", flush=True)
+            try:
+                with open(startup_log_path, 'a') as f:
+                    f.write(f"✅ LLM ({LLM_PROVIDER}) is available and working\n")
+                    if model_info.get("model"):
+                        f.write(f"   Using model: {model_info.get('model')} - {model_info.get('reason', '')}\n")
+                    f.flush()
+            except Exception:
+                pass
         else:
-            print(f"⚠️  LLM ({LLM_PROVIDER}) responded but with empty content")
+            print(f"⚠️  LLM ({LLM_PROVIDER}) responded but with empty content", flush=True)
+            try:
+                with open(startup_log_path, 'a') as f:
+                    f.write(f"⚠️  LLM ({LLM_PROVIDER}) responded but with empty content\n")
+                    f.flush()
+            except Exception:
+                pass
     except Exception as e:
-        print(f"⚠️  LLM ({LLM_PROVIDER}) is configured but not available: {str(e)[:150]}")
-        print("   System will use rule-based fallbacks (still fully functional)")
-        print("   Note: LLM features will be disabled, but all core ML functionality works")
+        import traceback
+        error_msg = f"⚠️  LLM ({LLM_PROVIDER}) is configured but not available: {str(e)[:200]}"
+        print(error_msg, flush=True)
+        print(f"   Exception type: {type(e).__name__}", flush=True)
+        print(f"   Full traceback:", flush=True)
+        traceback.print_exc()
+        print("   System will use rule-based fallbacks (still fully functional)", flush=True)
+        print("   Note: LLM features will be disabled, but all core ML functionality works", flush=True)
+        try:
+            with open(startup_log_path, 'a') as f:
+                f.write(f"{error_msg}\n")
+                f.write(f"   Exception type: {type(e).__name__}\n")
+                f.write("   Full traceback:\n")
+                f.write(traceback.format_exc())
+                f.flush()
+        except Exception:
+            pass
 else:
-    print("⚠️  No GEMINI_API_KEY found. System will use rule-based fallbacks (still fully functional)")
-    print("   To enable LLM features, set GEMINI_API_KEY environment variable")
+    error_msg = f"⚠️  No API key found. LLM features will be disabled."
+    print(error_msg, flush=True)
+    print(f"   Set GEMINI_API_KEY in .env file or use the API key manager endpoint.", flush=True)
+    try:
+        with open(startup_log_path, 'a') as f:
+            f.write(f"{error_msg}\n")
+            f.write(f"   Set GEMINI_API_KEY in .env file or use the API key manager endpoint.\n")
+            f.flush()
+    except Exception:
+        pass
 
 # In-memory storage for uploaded datasets (in production, use proper storage)
 dataset_cache = {}
@@ -1249,48 +1318,73 @@ async def download_readme(run_id: str):
 @app.get("/download/{run_id}/report")
 async def download_report(run_id: str):
     """Download detailed model analysis report with all explanations."""
-    if run_id not in trained_models_cache:
-        raise HTTPException(status_code=404, detail="Model not found")
-    
-    model_info = trained_models_cache[run_id]
-    
-    # Get all models data
-    all_models = model_info.get("all_models", [])
-    df = model_info.get("df")
-    
-    # Build dataset info
-    dataset_info = {}
-    if df is not None:
-        dataset_info = {
-            "n_rows": len(df),
-            "n_cols": len(df.columns),
-            "numeric_cols": df.select_dtypes(include=['number']).columns.tolist(),
-            "categorical_cols": df.select_dtypes(include=['object', 'category']).columns.tolist()
-        }
-    
-    # Get trace and preprocessing recommendations from the training response
-    trace = model_info.get("trace", [])
-    preprocessing_recommendations = model_info.get("preprocessing_recommendations", [])
-    
-    report_content = generate_model_report(
-        all_models=all_models,
-        target=model_info["target"],
-        task=model_info["task"],
-        dataset_info=dataset_info,
-        trace=trace,
-        preprocessing_recommendations=preprocessing_recommendations
-    )
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
-        f.write(report_content)
-        temp_path = f.name
-    
-    return FileResponse(
-        temp_path,
-        media_type='text/markdown',
-        filename=f'Model_Report_{run_id[:8]}.md',
-        background=lambda: os.unlink(temp_path)
-    )
+    try:
+        if run_id not in trained_models_cache:
+            raise HTTPException(status_code=404, detail="Model not found")
+        
+        model_info = trained_models_cache[run_id]
+        
+        # Get all models data
+        all_models = model_info.get("all_models", [])
+        df = model_info.get("df")
+        
+        # Build dataset info
+        dataset_info = {}
+        if df is not None:
+            try:
+                dataset_info = {
+                    "n_rows": len(df),
+                    "n_cols": len(df.columns),
+                    "numeric_cols": df.select_dtypes(include=['number']).columns.tolist(),
+                    "categorical_cols": df.select_dtypes(include=['object', 'category']).columns.tolist()
+                }
+            except Exception as e:
+                print(f"Error building dataset info: {e}")
+                dataset_info = {}
+        
+        # Get trace and preprocessing recommendations from the training response
+        trace = model_info.get("trace", [])
+        preprocessing_recommendations = model_info.get("preprocessing_recommendations", {})
+        
+        # Handle preprocessing_recommendations - it might be a dict with "recommendations" key
+        if isinstance(preprocessing_recommendations, dict):
+            preprocessing_recommendations = preprocessing_recommendations.get("recommendations", [])
+        if not isinstance(preprocessing_recommendations, list):
+            preprocessing_recommendations = []
+        
+        # Get target and task with defaults
+        target = model_info.get("target", "unknown")
+        task = model_info.get("task", "classification")
+        
+        report_content = generate_model_report(
+            all_models=all_models,
+            target=target,
+            task=task,
+            dataset_info=dataset_info,
+            trace=trace if isinstance(trace, list) else [],
+            preprocessing_recommendations=preprocessing_recommendations
+        )
+        
+        # Write to temp file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+            f.write(report_content)
+            temp_path = f.name
+        
+        # Return file response (temp file will be cleaned up by OS eventually)
+        # For production, consider using a proper file storage system
+        return FileResponse(
+            temp_path,
+            media_type='text/markdown',
+            filename=f'Model_Report_{run_id[:8]}.md'
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_msg = f"Error generating report: {str(e)}"
+        print(error_msg)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @app.get("/download/{run_id}/all")
