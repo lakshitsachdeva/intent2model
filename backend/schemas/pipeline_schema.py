@@ -1,11 +1,11 @@
 """
-Pydantic schemas for Intent2Model pipeline configuration.
+Pydantic schemas for Intent2Model pipeline configuration & AutoML planning.
 
 All LLM outputs must validate against these schemas.
 """
 
 from pydantic import BaseModel, Field
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 
 class PipelineConfig(BaseModel):
@@ -43,6 +43,77 @@ class PipelineConfig(BaseModel):
     
     class Config:
         extra = "forbid"  # Reject any extra fields
+
+
+FeatureKind = Literal[
+    "continuous",
+    "ordinal",
+    "binary_categorical",
+    "nominal_categorical",
+    "identifier",
+    "leakage_risk",
+    "unknown",
+]
+
+ImputeStrategy = Literal["none", "mean", "median", "most_frequent", "constant"]
+ScaleStrategy = Literal["none", "standard", "robust"]
+EncodeStrategy = Literal["none", "one_hot", "ordinal", "frequency"]
+
+
+class FeatureTransform(BaseModel):
+    """Per-feature transformation decision."""
+
+    name: str
+    inferred_dtype: str = Field(..., description="String dtype representation from pandas")
+    kind: FeatureKind
+    drop: bool = Field(False, description="Whether to drop this feature")
+
+    impute: ImputeStrategy = "none"
+    encode: EncodeStrategy = "none"
+    scale: ScaleStrategy = "none"
+
+    notes_md: str = Field("", description="Markdown justification for this feature decision")
+
+    class Config:
+        extra = "forbid"
+
+
+class ModelCandidate(BaseModel):
+    """Candidate model with justification."""
+
+    model_name: str = Field(..., description="Internal model key (e.g., logistic_regression, random_forest, xgboost)")
+    reason_md: str = Field(..., description="Markdown justification")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Optional hyperparameters")
+
+    class Config:
+        extra = "forbid"
+
+
+class AutoMLPlan(BaseModel):
+    """
+    Dataset-agnostic AutoML engineer plan.
+    LLM must produce this BEFORE any model code is executed.
+    """
+
+    inferred_target: str = Field(..., description="Target column inferred from dataset (or validated)")
+    task_type: Literal["regression", "binary_classification", "multiclass_classification"]
+    task_inference_md: str
+
+    dataset_intelligence_md: str
+    transformation_strategy_md: str
+    model_selection_md: str
+    training_validation_md: str
+    error_behavior_analysis_md: str
+    explainability_md: str
+
+    primary_metric: str = Field(..., description="Main metric to optimize")
+    additional_metrics: List[str] = Field(default_factory=list)
+
+    feature_transforms: List[FeatureTransform] = Field(default_factory=list)
+    model_candidates: List[ModelCandidate] = Field(default_factory=list)
+
+    class Config:
+        extra = "forbid"
 
 
 class QuestionResponse(BaseModel):

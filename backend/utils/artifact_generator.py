@@ -26,6 +26,20 @@ def generate_notebook(
     """
     Generate a Jupyter notebook with complete training code.
     """
+    automl_plan = (config or {}).get("automl_plan") or {}
+    # Expect markdown sections in automl_plan if present
+    md_sections = []
+    if isinstance(automl_plan, dict) and automl_plan:
+        md_sections = [
+            ("STEP 0 — TASK INFERENCE", automl_plan.get("task_inference_md", "")),
+            ("STEP 1 — DATASET INTELLIGENCE", automl_plan.get("dataset_intelligence_md", "")),
+            ("STEP 2 — TRANSFORMATION STRATEGY", automl_plan.get("transformation_strategy_md", "")),
+            ("STEP 3 — MODEL CANDIDATE SELECTION", automl_plan.get("model_selection_md", "")),
+            ("STEP 4 — TRAINING & VALIDATION", automl_plan.get("training_validation_md", "")),
+            ("STEP 5 — ERROR & BEHAVIOR ANALYSIS", automl_plan.get("error_behavior_analysis_md", "")),
+            ("STEP 6 — EXPLAINABILITY", automl_plan.get("explainability_md", "")),
+        ]
+
     notebook = {
         "cells": [
             {
@@ -41,6 +55,15 @@ def generate_notebook(
                     f"**Model:** {config.get('model', 'unknown')}\n"
                 ]
             },
+            *([
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": [f"## {title}\n\n{body}\n"]
+                }
+                for title, body in md_sections
+                if body and str(body).strip()
+            ]),
             {
                 "cell_type": "markdown",
                 "metadata": {},
@@ -131,24 +154,57 @@ def generate_notebook(
                     "numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()\n",
                     "categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()\n",
                     "\n",
-                    "# Create preprocessing steps\n",
-                    "numeric_transformer = Pipeline(steps=[\n",
-                    "    ('imputer', SimpleImputer(strategy='mean')),\n",
-                    "    ('scaler', StandardScaler())\n",
-                    "])\n",
+                    "# Build preprocessing dynamically from AutoML plan (if provided)\n",
+                    "feature_transforms = " + json.dumps((config or {}).get("feature_transforms", [])) + "\n",
+                    "transformers = []\n",
+                    "dropped = set([ft['name'] for ft in feature_transforms if ft.get('drop')])\n",
+                    "num_scaled = [ft['name'] for ft in feature_transforms if ft.get('name') in numeric_cols and ft.get('scale') == 'standard' and not ft.get('drop')]\n",
+                    "num_plain = [c for c in numeric_cols if c not in dropped and c not in num_scaled]\n",
+                    "cat_onehot = [ft['name'] for ft in feature_transforms if ft.get('name') in categorical_cols and ft.get('encode') == 'one_hot' and not ft.get('drop')]\n",
+                    "cat_ordinal = [ft['name'] for ft in feature_transforms if ft.get('name') in categorical_cols and ft.get('encode') == 'ordinal' and not ft.get('drop')]\n",
+                    "cat_freq = [ft['name'] for ft in feature_transforms if ft.get('name') in categorical_cols and ft.get('encode') == 'frequency' and not ft.get('drop')]\n",
                     "\n",
-                    "categorical_transformer = Pipeline(steps=[\n",
-                    "    ('imputer', SimpleImputer(strategy='most_frequent')),\n",
-                    "    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))\n",
-                    "])\n",
+                    "if num_scaled:\n",
+                    "    transformers.append(('num_scaled', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), num_scaled))\n",
+                    "if num_plain:\n",
+                    "    transformers.append(('num', Pipeline([('imputer', SimpleImputer(strategy='median'))]), num_plain))\n",
+                    "if cat_onehot:\n",
+                    "    try:\n",
+                    "        ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False, min_frequency=5)\n",
+                    "    except TypeError:\n",
+                    "        ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False)\n",
+                    "    transformers.append(('cat_onehot', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', ohe)]), cat_onehot))\n",
+                    "if cat_ordinal:\n",
+                    "    from sklearn.preprocessing import OrdinalEncoder\n",
+                    "    transformers.append(('cat_ordinal', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('ordinal', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1))]), cat_ordinal))\n",
+                    "if cat_freq:\n",
+                    "    # Simple frequency encoding\n",
+                    "    from sklearn.base import BaseEstimator, TransformerMixin\n",
+                    "    class FrequencyEncoder(BaseEstimator, TransformerMixin):\n",
+                    "        def fit(self, X, y=None):\n",
+                    "            import numpy as np\n",
+                    "            X = np.asarray(X, dtype=object)\n",
+                    "            self.maps_ = []\n",
+                    "            for j in range(X.shape[1]):\n",
+                    "                col = [\"\" if v is None else str(v) for v in X[:, j]]\n",
+                    "                counts = {}\n",
+                    "                for v in col:\n",
+                    "                    counts[v] = counts.get(v, 0) + 1\n",
+                    "                n = float(max(1, len(col)))\n",
+                    "                self.maps_.append({k: c / n for k, c in counts.items()})\n",
+                    "            return self\n",
+                    "        def transform(self, X):\n",
+                    "            import numpy as np\n",
+                    "            X = np.asarray(X, dtype=object)\n",
+                    "            out = np.zeros((X.shape[0], X.shape[1]), dtype=float)\n",
+                    "            for j in range(X.shape[1]):\n",
+                    "                m = self.maps_[j]\n",
+                    "                col = [\"\" if v is None else str(v) for v in X[:, j]]\n",
+                    "                out[:, j] = [float(m.get(v, 0.0)) for v in col]\n",
+                    "            return out\n",
+                    "    transformers.append(('cat_freq', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('freq', FrequencyEncoder())]), cat_freq))\n",
                     "\n",
-                    "# Combine preprocessing\n",
-                    "preprocessor = ColumnTransformer(\n",
-                    "    transformers=[\n",
-                    "        ('num', numeric_transformer, numeric_cols),\n",
-                    "        ('cat', categorical_transformer, categorical_cols)\n",
-                    "    ]\n",
-                    ")\n",
+                    "preprocessor = ColumnTransformer(transformers=transformers, remainder='drop')\n",
                     "\n",
                     "# Create model (auto-generated for this dataset/run)\n",
                 ] + (

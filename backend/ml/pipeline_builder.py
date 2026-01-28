@@ -5,13 +5,56 @@ Converts pipeline configuration dictionaries to sklearn Pipeline objects.
 """
 
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder, FunctionTransformer
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 import pandas as pd
 from typing import Dict, List, Any, Optional
+
+
+class FrequencyEncoder(BaseEstimator, TransformerMixin):
+    """
+    Simple frequency encoder for high-cardinality categoricals (train-time frequency, test-time unknown -> 0).
+    Produces a single numeric column per input column.
+    """
+
+    def __init__(self):
+        self.maps_: Dict[int, Dict[str, float]] = {}
+
+    def fit(self, X, y=None):
+        import numpy as np
+        X_arr = X
+        if hasattr(X, "to_numpy"):
+            X_arr = X.to_numpy()
+        X_arr = np.asarray(X_arr, dtype=object)
+        self.maps_ = {}
+        for j in range(X_arr.shape[1]):
+            col = X_arr[:, j]
+            # normalize to string, keep None
+            col_s = [("" if v is None else str(v)) for v in col]
+            counts: Dict[str, int] = {}
+            for v in col_s:
+                counts[v] = counts.get(v, 0) + 1
+            n = float(max(1, len(col_s)))
+            self.maps_[j] = {k: c / n for k, c in counts.items()}
+        return self
+
+    def transform(self, X):
+        import numpy as np
+        X_arr = X
+        if hasattr(X, "to_numpy"):
+            X_arr = X.to_numpy()
+        X_arr = np.asarray(X_arr, dtype=object)
+        out = np.zeros((X_arr.shape[0], X_arr.shape[1]), dtype=float)
+        for j in range(X_arr.shape[1]):
+            m = self.maps_.get(j, {})
+            col = X_arr[:, j]
+            col_s = [("" if v is None else str(v)) for v in col]
+            out[:, j] = [float(m.get(v, 0.0)) for v in col_s]
+        return out
 
 
 def build_pipeline(
@@ -36,9 +79,125 @@ def build_pipeline(
     task = config.get("task", "classification")
     preprocessing = config.get("preprocessing", [])
     model_name = config.get("model", "random_forest")
+    feature_transforms = config.get("feature_transforms")
     
     # Build preprocessing transformers
     transformers = []
+
+    # If we have per-feature transforms, use them (agent-driven, dataset-specific).
+    if isinstance(feature_transforms, list) and len(feature_transforms) > 0:
+        # Split columns into groups according to plan
+        num_cols_scale: List[str] = []
+        num_cols_noscale: List[str] = []
+        cat_cols_onehot: List[str] = []
+        cat_cols_ordinal: List[str] = []
+        cat_cols_freq: List[str] = []
+
+        impute_num_mean: List[str] = []
+        impute_num_median: List[str] = []
+        impute_cat_mf: List[str] = []
+        impute_cat_const: List[str] = []
+        dropped: set[str] = set()
+
+        for ft in feature_transforms:
+            try:
+                name = ft.get("name")
+                if not name:
+                    continue
+                if ft.get("drop") is True:
+                    dropped.add(name)
+                    continue
+
+                kind = ft.get("kind")
+                encode = ft.get("encode", "none")
+                scale = ft.get("scale", "none")
+                impute = ft.get("impute", "none")
+
+                is_numeric = name in numeric_cols
+                is_categorical = name in categorical_cols
+
+                # imputation buckets
+                if is_numeric:
+                    if impute == "mean":
+                        impute_num_mean.append(name)
+                    elif impute == "median":
+                        impute_num_median.append(name)
+                else:
+                    if impute == "most_frequent":
+                        impute_cat_mf.append(name)
+                    elif impute == "constant":
+                        impute_cat_const.append(name)
+
+                # encoding/scaling buckets
+                if is_numeric:
+                    if scale == "standard":
+                        num_cols_scale.append(name)
+                    else:
+                        num_cols_noscale.append(name)
+                elif is_categorical:
+                    if encode == "one_hot":
+                        cat_cols_onehot.append(name)
+                    elif encode == "ordinal":
+                        cat_cols_ordinal.append(name)
+                    elif encode == "frequency":
+                        cat_cols_freq.append(name)
+                    else:
+                        # treat as ordinal-safe by default if agent says none
+                        cat_cols_ordinal.append(name)
+                else:
+                    # unknown: pass-through
+                    num_cols_noscale.append(name)
+            except Exception:
+                continue
+
+        # Build numeric pipelines
+        if num_cols_scale:
+            steps = []
+            # impute
+            steps.append(("imputer", SimpleImputer(strategy="median")))
+            steps.append(("scaler", StandardScaler()))
+            transformers.append(("num_scaled", Pipeline(steps), num_cols_scale))
+
+        if num_cols_noscale:
+            steps = []
+            steps.append(("imputer", SimpleImputer(strategy="median")))
+            transformers.append(("num", Pipeline(steps), num_cols_noscale))
+
+        # Categorical: onehot
+        if cat_cols_onehot:
+            steps = []
+            steps.append(("imputer", SimpleImputer(strategy="most_frequent")))
+            # Use min_frequency to avoid blowups on high cardinality if present in sklearn version
+            try:
+                ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False, min_frequency=5)
+            except TypeError:
+                ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+            steps.append(("onehot", ohe))
+            transformers.append(("cat_onehot", Pipeline(steps), cat_cols_onehot))
+
+        # Categorical: ordinal
+        if cat_cols_ordinal:
+            steps = []
+            steps.append(("imputer", SimpleImputer(strategy="most_frequent")))
+            steps.append(("ordinal", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)))
+            transformers.append(("cat_ordinal", Pipeline(steps), cat_cols_ordinal))
+
+        # Categorical: frequency encoding
+        if cat_cols_freq:
+            steps = []
+            steps.append(("imputer", SimpleImputer(strategy="most_frequent")))
+            steps.append(("freq", FrequencyEncoder()))
+            transformers.append(("cat_freq", Pipeline(steps), cat_cols_freq))
+
+        preprocessor = ColumnTransformer(transformers, remainder="drop")
+
+        # Build model
+        if task == "classification":
+            model = _get_classification_model(model_name)
+        else:
+            model = _get_regression_model(model_name)
+
+        return Pipeline([("preprocessor", preprocessor), ("model", model)])
     
     # Numeric preprocessing
     numeric_steps = []

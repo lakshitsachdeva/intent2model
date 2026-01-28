@@ -21,7 +21,7 @@ from ml.profiler import profile_dataset
 from ml.trainer import train_classification, train_regression, compare_models
 from ml.evaluator import evaluate_dataset
 from utils.logging import create_run_id, log_run
-from agents.planner_agent import plan_pipeline
+from agents.automl_agent import plan_automl
 from schemas.pipeline_schema import UserIntent
 from agents.llm_interface import LLMInterface, get_current_model_info
 from agents.error_analyzer import analyze_training_error
@@ -190,7 +190,7 @@ current_llm_reason = None  # Why this model was chosen
 
 
 class TrainRequest(BaseModel):
-    target: str
+    target: Optional[str] = None
     task: Optional[Literal["classification", "regression"]] = None
     metric: Optional[str] = None
     dataset_id: Optional[str] = None
@@ -520,6 +520,10 @@ async def train_model(request: TrainRequest):
             detail="No dataset available. Please upload a CSV file first."
         )
     
+    # AUTONOMOUS: If target not provided, infer from dataset (agent-driven)
+    if not request.target or not str(request.target).strip():
+        request.target = list(df.columns)[-1] if len(df.columns) else ""
+
     # AUTONOMOUS: If target column doesn't exist, try to find it (case-insensitive, partial match)
     original_target = request.target
     if request.target not in df.columns:
@@ -587,53 +591,40 @@ async def train_model(request: TrainRequest):
     
     trace = []
     try:
-        # Get dataset profile for planning
-        trace.append("Profiled dataset and inferred column types.")
+        # STEP 0–3: LLM-driven AutoML planning BEFORE any model training
+        trace.append("STEP 0–3: Planning (target/task/feature strategy/model shortlist) via AutoML agent.")
+        plan = plan_automl(df, requested_target=request.target, llm_provider="gemini")
+        trace.append(f"Planned: target={plan.inferred_target}, task_type={plan.task_type}, primary_metric={plan.primary_metric}")
+
+        # Keep a classic task label for trainer
+        if plan.task_type == "regression":
+            task = "regression"
+        else:
+            task = "classification"
+
+        # Use plan target (validated)
+        request.target = plan.inferred_target
+
+        # Profile still useful for downstream warnings + reports
+        trace.append("Profiled dataset and inferred column types (execution-side).")
         profile = profile_dataset(df)
         
-        # Use LLM planner to generate optimal pipeline config
-        user_intent = UserIntent(
-            target_column=request.target,
-            task_type=task,
-            priority_metric=metric
-        )
-        
-        # ALWAYS use model comparison with comprehensive model list
-        if task == "classification":
-            model_candidates = ["logistic_regression", "random_forest", "gradient_boosting", "naive_bayes"]
-            # Try XGBoost if available
-            try:
-                import xgboost
-                model_candidates.append("xgboost")
-            except:
-                pass
-        else:
-            model_candidates = ["linear_regression", "random_forest", "gradient_boosting", "ridge"]
-            # Try XGBoost if available
-            try:
-                import xgboost
-                model_candidates.append("xgboost")
-            except:
-                pass
-        
-        try:
-            pipeline_config = plan_pipeline(profile, user_intent, llm_provider="gemini")
-            trace.append(f"LLM planned pipeline: preprocessing={pipeline_config.preprocessing}, model_candidates={pipeline_config.model_candidates}")
-            # Use LLM-generated config
-            config = {
-                "task": pipeline_config.task,
-                "preprocessing": pipeline_config.preprocessing,
-                "model": model_candidates[0]  # Use first as default
-            }
-            # Override with LLM suggestions if available
-            if pipeline_config.model_candidates and len(pipeline_config.model_candidates) > 0:
-                # Merge LLM suggestions with defaults
-                model_candidates = list(set(model_candidates + pipeline_config.model_candidates))
-        except Exception as e:
-            # Fallback to default config if LLM fails
-            print(f"⚠️  LLM planning failed: {e}. Using rule-based fallback.")
-            trace.append(f"⚠️  LLM planning unavailable ({str(e)[:50]}); used rule-based defaults for preprocessing/model candidates.")
-            config = None
+        # Metric selection (agent-driven)
+        metric = (request.metric or "").strip() or plan.primary_metric
+
+        # Model candidates (agent-driven)
+        model_candidates = [m.model_name for m in plan.model_candidates] if plan.model_candidates else []
+        if not model_candidates:
+            # last-resort minimal set
+            model_candidates = ["random_forest"] if task == "classification" else ["random_forest"]
+        trace.append(f"Model shortlist (agent): {model_candidates}")
+
+        # Build a per-model config using plan feature transforms (no static assumptions)
+        base_config = {
+            "task": task,
+            "feature_transforms": [ft.model_dump() for ft in plan.feature_transforms],
+        }
+        config = base_config.copy()
         
         use_model_comparison = True  # Always compare multiple models
         
@@ -778,6 +769,7 @@ async def train_model(request: TrainRequest):
             "model_name": train_result.get("model_name", config.get("model") if config else None),
             "selected_model": selected_model,
             "pipelines_by_model": pipelines_by_model,
+            "automl_plan": plan.model_dump(),
             "df": df.copy(),  # Store dataset for artifact generation
             "metrics": train_result["metrics"],
             "feature_importance": train_result.get("feature_importance"),
@@ -806,6 +798,7 @@ async def train_model(request: TrainRequest):
             "model_comparison": train_result.get("model_comparison"),
             "all_models": train_result.get("all_models", []),  # Return ALL models with explanations
             "selected_model": trained_models_cache[run_id].get("selected_model"),
+            "automl_plan": trained_models_cache[run_id].get("automl_plan"),
             "pipeline_config": {
                 "preprocessing": config.get("preprocessing", []) if config else [],
                 "model": train_result.get("model_name", config.get("model", "unknown")) if config else "unknown"
@@ -1242,6 +1235,8 @@ async def download_notebook(run_id: str):
             "model": model_name,
             "feature_columns": model_info.get("feature_columns", []),
             "model_code": _model_code_for_notebook(model_info["task"], model_name),
+            "feature_transforms": (model_info.get("config", {}) or {}).get("feature_transforms", []),
+            "automl_plan": model_info.get("automl_plan", {}),
         },
         metrics=model_info.get("metrics", {}),
         feature_importance=model_info.get("feature_importance"),
