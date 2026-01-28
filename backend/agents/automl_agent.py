@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from agents.llm_interface import LLMInterface
+from agents.plan_normalizer import normalize_plan_dict
 from schemas.pipeline_schema import AutoMLPlan
 from utils.api_key_manager import get_api_key
 
@@ -39,37 +40,43 @@ def plan_automl(df: pd.DataFrame, requested_target: Optional[str] = None, llm_pr
             last_response = response
             plan_dict = _extract_json(response)
             
-            # Auto-fix common LLM response issues
-            plan_dict = _fix_plan_dict(plan_dict, profile, requested_target)
-            
+            # CENTRAL NORMALIZATION LAYER (single source of truth)
+            plan_dict = normalize_plan_dict(plan_dict, profile=profile, requested_target=requested_target)
             plan_dict["planning_source"] = "llm"
             plan_dict["planning_error"] = None
+            
+            # Validate plan (logical consistency beyond schema)
+            _validate_plan(plan_dict, profile)
+            
             return AutoMLPlan(**plan_dict)
         except Exception as e:
             last_error = e
             error_str = str(e)
-            # Log detailed error info
-            if "validation error" in error_str.lower() or "Field required" in error_str:
-                print(f"❌ AutoML planning attempt {attempt+1} failed: Schema validation error")
-                # Try to extract which field is missing
-                import re
-                field_match = re.search(r"Field required.*?\[type=missing.*?input_value=({[^}]+})", error_str, re.DOTALL)
-                if field_match:
-                    print(f"   Missing field in: {field_match.group(1)[:200]}...")
-                print(f"   Full error: {error_str[:500]}")
-                if last_response:
-                    print(f"   LLM response preview: {last_response[:800]}...")
-            else:
-                print(f"❌ AutoML planning attempt {attempt+1} failed: {error_str[:200]}")
+            print(f"❌ AutoML planning attempt {attempt+1} failed: {error_str[:300]}")
 
-    # Hard fallback: rule-based minimal plan (still data-driven, not template)
+    # Hard fallback: rule-based minimal plan (marked as low confidence)
+    print("⚠️  LLM planning failed after all retries. Using rule-based fallback (low confidence).")
     plan_dict = _rule_based_plan(profile, requested_target=requested_target)
     plan_dict["planning_source"] = "fallback"
     plan_dict["planning_error"] = str(last_error)[:500]
+    
+    # CENTRAL NORMALIZATION LAYER (same path for fallback)
+    plan_dict = normalize_plan_dict(plan_dict, profile=profile, requested_target=requested_target)
+    
+    # Validate fallback plan
     try:
+        _validate_plan(plan_dict, profile)
         return AutoMLPlan(**plan_dict)
     except Exception as e2:
-        raise RuntimeError(f"AutoML planning failed (LLM and fallback). LLM err={last_error}; fallback err={e2}")
+        # FAIL LOUDLY - no silent fallback
+        error_msg = (
+            f"AutoML planning FAILED completely.\n"
+            f"LLM errors: {str(last_error)[:500]}\n"
+            f"Fallback validation error: {str(e2)[:500]}\n"
+            f"System cannot proceed safely. Please check dataset and LLM configuration."
+        )
+        print(f"💥 {error_msg}")
+        raise RuntimeError(error_msg)
 
 
 def _profile_for_llm(df: pd.DataFrame) -> Dict[str, Any]:
@@ -165,6 +172,10 @@ def _system_prompt() -> str:
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
+    """
+    Strict JSON extraction with validation.
+    Requires presence of all top-level schema keys.
+    """
     # Prefer fenced JSON, else first object
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
     if fence:
@@ -172,26 +183,64 @@ def _extract_json(text: str) -> Dict[str, Any]:
     m = re.search(r"\{[\s\S]*\}", text)
     if not m:
         raise ValueError("No JSON object found in LLM response")
-    data = json.loads(m.group(0))
     
-    # Normalize: LLM might return "column_name" instead of "name" in feature_transforms
-    if "feature_transforms" in data and isinstance(data["feature_transforms"], list):
-        for ft in data["feature_transforms"]:
-            if isinstance(ft, dict):
-                if "column_name" in ft and "name" not in ft:
-                    ft["name"] = ft.pop("column_name")
-                # Ensure required fields exist with defaults
-                if "name" not in ft and "column_name" not in ft:
-                    continue  # Skip invalid entries
-                if "inferred_dtype" not in ft:
-                    ft["inferred_dtype"] = "unknown"
-                if "kind" not in ft:
-                    ft["kind"] = "unknown"
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in LLM response: {str(e)}")
+    
+    # Validate top-level keys exist (required fields)
+    required_keys = ["inferred_target", "task_type"]
+    missing = [k for k in required_keys if k not in data]
+    if missing:
+        raise ValueError(f"Missing required top-level keys: {missing}")
     
     return data
 
 
+def _validate_plan(plan_dict: Dict[str, Any], profile: Dict[str, Any]) -> None:
+    """
+    Plan verification layer: logical consistency beyond schema validation.
+    
+    Python is AUTHORITATIVE. LLM suggestions are ADVISORY.
+    """
+    # Verify inferred_target exists in dataset
+    target = plan_dict.get("inferred_target")
+    cols = profile.get("columns", [])
+    if target not in cols:
+        raise ValueError(f"inferred_target '{target}' not found in dataset columns: {cols}")
+    
+    # Block dropping high-variance or high-correlation features without justification
+    feature_transforms = plan_dict.get("feature_transforms", [])
+    for ft in feature_transforms:
+        if ft.get("drop") and ft.get("kind") not in ["identifier", "leakage_candidate"]:
+            # Allow dropping target (handled separately)
+            if ft.get("name") == target:
+                continue
+            # Warn but don't block - LLM may have good reason
+            print(f"⚠️  Warning: Dropping feature '{ft.get('name')}' of kind '{ft.get('kind')}' - ensure this is intentional")
+    
+    # Verify task_type matches target characteristics
+    task_type = plan_dict.get("task_type")
+    dtypes = profile.get("dtypes", {})
+    nunique = profile.get("nunique", {})
+    n_rows = int(profile.get("n_rows", 0))
+    t_nuniq = int(nunique.get(target, 0))
+    t_dtype = str(dtypes.get(target, ""))
+    
+    if task_type == "regression":
+        if t_nuniq <= 2:
+            print(f"⚠️  Warning: Task type 'regression' but target has only {t_nuniq} unique values - consider classification")
+    elif task_type in ["binary_classification", "multiclass_classification"]:
+        if "float" in t_dtype and t_nuniq > max(20, int(0.1 * n_rows)):
+            print(f"⚠️  Warning: Task type '{task_type}' but target appears continuous - consider regression")
+
+
 def _fix_plan_dict(plan_dict: Dict[str, Any], profile: Dict[str, Any], requested_target: Optional[str]) -> Dict[str, Any]:
+    """
+    DEPRECATED: Use normalize_plan_dict from plan_normalizer instead.
+    Kept for backward compatibility during migration.
+    """
     """
     Auto-fix common issues in LLM-generated plan_dict to make it schema-compliant.
     """
@@ -352,7 +401,7 @@ def _rule_based_plan(profile: Dict[str, Any], requested_target: Optional[str]) -
             kind = "continuous"
         else:
             nunq = int(nunique.get(c, 0))
-            kind = "binary_categorical" if nunq == 2 else ("nominal_categorical" if nunq <= 30 else "nominal_categorical")
+            kind = "binary" if nunq == 2 else "nominal"  # Use new schema values
 
         missing = float(profile.get("missing_percent", {}).get(c, 0.0))
         impute = "median" if c in profile.get("numeric_cols", []) and missing > 0 else ("most_frequent" if missing > 0 else "none")
@@ -387,20 +436,41 @@ def _rule_based_plan(profile: Dict[str, Any], requested_target: Optional[str]) -
             {"model_name": "naive_bayes", "reason_md": "Fast baseline for high-dimensional sparse encodings.", "params": {}},
         ]
 
+    # Fallback plan MUST match schema exactly (all new fields included)
     return {
+        "plan_schema_version": "v1",
         "inferred_target": target,
+        "target_confidence": 0.5,  # Low confidence for fallback
+        "alternative_targets": [],
         "task_type": task_type,
-        "task_inference_md": "Rule-based fallback task inference (LLM unavailable).",
-        "dataset_intelligence_md": "Rule-based fallback dataset intelligence (LLM unavailable).",
-        "transformation_strategy_md": "Rule-based fallback transformation strategy (LLM unavailable).",
-        "model_selection_md": "Rule-based fallback model selection (LLM unavailable).",
+        "task_confidence": 0.6,  # Low confidence for fallback
+        "task_inference_md": "⚠️ Rule-based fallback task inference (LLM unavailable). Low confidence.",
+        "dataset_intelligence_md": "⚠️ Rule-based fallback dataset intelligence (LLM unavailable). Limited analysis.",
+        "transformation_strategy_md": "⚠️ Rule-based fallback transformation strategy (LLM unavailable). Conservative defaults.",
+        "model_selection_md": "⚠️ Rule-based fallback model selection (LLM unavailable). Baseline models only.",
         "training_validation_md": "Use cross-validation by default with task-appropriate metrics.",
         "error_behavior_analysis_md": "Analyze residuals/confusion matrix and error slices.",
         "explainability_md": "Use feature_importances_ when available and align post-encoding names.",
         "primary_metric": primary_metric,
         "additional_metrics": additional,
-        "feature_transforms": feature_transforms,
+        "metric_selection_confidence": 0.7,
+        "feature_transforms": [
+            {
+                "name": ft["name"],
+                "inferred_dtype": ft["inferred_dtype"],
+                "kind": ft["kind"],
+                "kind_confidence": 0.6,  # Low confidence for fallback
+                "drop": ft["drop"],
+                "impute": ft["impute"],
+                "encode": ft["encode"],
+                "scale": ft["scale"],
+                "notes_md": ft["notes_md"],
+                "transform_confidence": 0.6,  # Low confidence for fallback
+            }
+            for ft in feature_transforms
+        ],
         "model_candidates": models,
+        "model_selection_confidence": 0.5,  # Low confidence for fallback
     }
 
 

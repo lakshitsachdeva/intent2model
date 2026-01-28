@@ -41,9 +41,23 @@ def generate_notebook(
             ("STEP 5 — ERROR & BEHAVIOR ANALYSIS", automl_plan.get("error_behavior_analysis_md", "") or "Analyze residuals/confusion matrix and error slices."),
             ("STEP 6 — EXPLAINABILITY", automl_plan.get("explainability_md", "") or "Use feature_importances_ when available and align post-encoding names."),
         ]
-        # Add planning source note if available
+        # Add planning source note with confidence warning
+        plan_quality = automl_plan.get("plan_quality", "high_confidence")
         if planning_source and planning_source != "unknown":
-            md_sections.insert(0, ("PLANNING SOURCE", f"**Planning Method:** {planning_source.upper()}\n\n" + (automl_plan.get("planning_error", "") or "")))
+            warning = ""
+            if plan_quality == "fallback_low_confidence":
+                warning = "⚠️ **LOW-CONFIDENCE FALLBACK PLAN**\n\nThis plan was generated using rule-based fallbacks because the LLM was unavailable or returned invalid responses. **Results may be suboptimal.**\n\n"
+            elif plan_quality == "medium_confidence":
+                warning = "⚠️ **MEDIUM-CONFIDENCE PLAN**\n\nSome decisions have low confidence scores. Review carefully.\n\n"
+            
+            planning_error = automl_plan.get("planning_error", "")
+            error_note = f"\n**Error:** {planning_error}" if planning_error else ""
+            
+            md_sections.insert(0, ("PLANNING SOURCE", 
+                f"{warning}**Planning Method:** {planning_source.upper()}{error_note}\n\n"
+                f"**Target Confidence:** {automl_plan.get('target_confidence', 1.0):.2f}\n"
+                f"**Task Confidence:** {automl_plan.get('task_confidence', 1.0):.2f}\n"
+                f"**Plan Quality:** {plan_quality.replace('_', ' ').title()}\n"))
 
     notebook = {
         "cells": [

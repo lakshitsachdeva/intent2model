@@ -48,10 +48,13 @@ class PipelineConfig(BaseModel):
 FeatureKind = Literal[
     "continuous",
     "ordinal",
-    "binary_categorical",
-    "nominal_categorical",
+    "count",
+    "binary",
+    "nominal",
+    "datetime",
+    "text",
     "identifier",
-    "leakage_risk",
+    "leakage_candidate",
     "unknown",
 ]
 
@@ -61,11 +64,12 @@ EncodeStrategy = Literal["none", "one_hot", "ordinal", "frequency"]
 
 
 class FeatureTransform(BaseModel):
-    """Per-feature transformation decision."""
+    """Per-feature transformation decision with confidence."""
 
     name: str
     inferred_dtype: str = Field(..., description="String dtype representation from pandas")
     kind: FeatureKind
+    kind_confidence: float = Field(1.0, ge=0.0, le=1.0, description="Confidence in feature kind classification")
     drop: bool = Field(False, description="Whether to drop this feature")
 
     impute: ImputeStrategy = "none"
@@ -73,6 +77,7 @@ class FeatureTransform(BaseModel):
     scale: ScaleStrategy = "none"
 
     notes_md: str = Field("", description="Markdown justification for this feature decision")
+    transform_confidence: float = Field(1.0, ge=0.0, le=1.0, description="Confidence in transformation decisions")
 
     class Config:
         extra = "forbid"
@@ -91,14 +96,24 @@ class ModelCandidate(BaseModel):
 
 class AutoMLPlan(BaseModel):
     """
-    Dataset-agnostic AutoML engineer plan.
-    LLM must produce this BEFORE any model code is executed.
+    Dataset-agnostic AutoML engineer plan with confidence scores.
+    LLM is responsible for reasoning. Python is responsible for verification and execution.
     """
 
+    # Schema versioning
+    plan_schema_version: str = Field("v1", description="Schema version for compatibility checks")
+
+    # Target inference with confidence
     inferred_target: str = Field(..., description="Target column inferred from dataset (or validated)")
+    target_confidence: float = Field(1.0, ge=0.0, le=1.0, description="Confidence in target inference (0-1)")
+    alternative_targets: List[str] = Field(default_factory=list, description="Alternative target candidates if confidence is low")
+
+    # Task inference with confidence
     task_type: Literal["regression", "binary_classification", "multiclass_classification"]
+    task_confidence: float = Field(1.0, ge=0.0, le=1.0, description="Confidence in task type inference")
     task_inference_md: str
 
+    # Reasoning markdown (required)
     dataset_intelligence_md: str
     transformation_strategy_md: str
     model_selection_md: str
@@ -106,12 +121,19 @@ class AutoMLPlan(BaseModel):
     error_behavior_analysis_md: str
     explainability_md: str
 
+    # Metrics
     primary_metric: str = Field(..., description="Main metric to optimize")
     additional_metrics: List[str] = Field(default_factory=list)
+    metric_selection_confidence: float = Field(1.0, ge=0.0, le=1.0, description="Confidence in metric selection")
 
+    # Feature transformations
     feature_transforms: List[FeatureTransform] = Field(default_factory=list)
+    
+    # Model candidates
     model_candidates: List[ModelCandidate] = Field(default_factory=list)
+    model_selection_confidence: float = Field(1.0, ge=0.0, le=1.0, description="Confidence in model selection")
 
+    # Planning metadata
     planning_source: Literal["llm", "fallback"] = Field(
         default="fallback",
         description="Whether this plan was produced by the LLM or the rule-based fallback",
@@ -119,6 +141,10 @@ class AutoMLPlan(BaseModel):
     planning_error: Optional[str] = Field(
         default=None,
         description="If fallback was used, a short reason (e.g., rate limit / invalid JSON)",
+    )
+    plan_quality: Literal["high_confidence", "medium_confidence", "fallback_low_confidence"] = Field(
+        default="high_confidence",
+        description="Overall plan quality indicator"
     )
 
     class Config:
