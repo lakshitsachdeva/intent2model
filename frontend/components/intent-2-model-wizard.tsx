@@ -64,17 +64,31 @@ export default function Intent2ModelWizard() {
       const resp = await fetch("http://localhost:8000/health");
       const data = await resp.json();
       setLlmStatus(data);
-      // Default provider selection from backend health (if present)
-      if (data?.llm_provider && typeof data.llm_provider === "string") {
-        // llm_provider can be "rule-based-fallback" if unavailable; keep user choice in that case
-        if (data.llm_provider !== "rule-based-fallback") {
-          setSelectedLlmProvider(data.llm_provider);
-        }
-      }
+      // IMPORTANT: do NOT override user's selected provider from /health polling.
+      // The backend reports its default provider, but user may have chosen a different one for this session.
     } catch (e) {
       console.error("Failed to fetch LLM status:", e);
     }
   };
+
+  // Load persisted provider selection on mount (so it doesn't flip on refresh / polling)
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("intent2model_llm_provider");
+      if (saved) setSelectedLlmProvider(saved);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Persist provider selection whenever user changes it
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("intent2model_llm_provider", selectedLlmProvider);
+    } catch {
+      // ignore
+    }
+  }, [selectedLlmProvider]);
 
   const handleSetApiKey = async () => {
     // Allow empty to use default
@@ -788,7 +802,7 @@ export default function Intent2ModelWizard() {
                                   }`}
                                 >
                                   <div className="flex items-start justify-between gap-2">
-                                    <span className="flex-1 break-words">{log.message}</span>
+                                    <span className="flex-1 wrap-break-word">{log.message}</span>
                                     {log.progress !== undefined && (
                                       <span className="text-xs text-muted-foreground shrink-0">
                                         {Math.round(log.progress)}%
@@ -816,7 +830,7 @@ export default function Intent2ModelWizard() {
                                   return (
                                     <div 
                                       key={idx} 
-                                      className={`p-1 rounded whitespace-pre-wrap break-words ${
+                                      className={`p-1 rounded whitespace-pre-wrap wrap-break-word ${
                                         isImportant ? "text-foreground font-medium bg-muted/50" : ""
                                       }`}
                                     >
