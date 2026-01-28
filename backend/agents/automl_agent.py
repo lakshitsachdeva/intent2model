@@ -51,9 +51,14 @@ def plan_automl(df: pd.DataFrame, requested_target: Optional[str] = None, llm_pr
             # Log detailed error info
             if "validation error" in error_str.lower() or "Field required" in error_str:
                 print(f"❌ AutoML planning attempt {attempt+1} failed: Schema validation error")
-                print(f"   Error details: {error_str[:300]}")
+                # Try to extract which field is missing
+                import re
+                field_match = re.search(r"Field required.*?\[type=missing.*?input_value=({[^}]+})", error_str, re.DOTALL)
+                if field_match:
+                    print(f"   Missing field in: {field_match.group(1)[:200]}...")
+                print(f"   Full error: {error_str[:500]}")
                 if last_response:
-                    print(f"   LLM response preview: {last_response[:500]}...")
+                    print(f"   LLM response preview: {last_response[:800]}...")
             else:
                 print(f"❌ AutoML planning attempt {attempt+1} failed: {error_str[:200]}")
 
