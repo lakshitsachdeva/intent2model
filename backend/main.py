@@ -154,11 +154,10 @@ app.add_middleware(
 LLM_AVAILABLE = False
 LLM_RATE_LIMITED = False
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-# Try to get API key from api_key_manager (which checks custom keys first, then env)
+# Get API key from api_key_manager (automatically uses .env file)
 from utils.api_key_manager import get_api_key
-api_key = get_api_key(provider="gemini") or GEMINI_API_KEY
+api_key = get_api_key(provider="gemini")
 
 if api_key and api_key.strip():
     try:
@@ -263,8 +262,8 @@ async def root():
     }
 
 def get_llm_with_custom_key(provider: str = "gemini"):
-    """Get LLMInterface with custom API key if available, otherwise use default."""
-    api_key = get_api_key(provider=provider) or GEMINI_API_KEY
+    """Get LLMInterface with API key (automatically uses .env, custom key if set)."""
+    api_key = get_api_key(provider=provider)
     return LLMInterface(provider=provider, api_key=api_key)
 
 # Make this function available to agents via a module-level function

@@ -26,17 +26,17 @@ class LLMInterface:
     
     def __init__(self, provider: str = "gemini", api_key: Optional[str] = None):
         self.provider = provider
-        self.api_key = api_key or self._get_api_key()
+        # Use provided key, or get from api_key_manager (which uses .env by default)
+        if api_key:
+            self.api_key = api_key
+        else:
+            from utils.api_key_manager import get_api_key
+            self.api_key = get_api_key(provider=provider) or ""
     
     def _get_api_key(self) -> str:
-        """Get API key from environment variables."""
-        if self.provider == "openai":
-            return os.getenv("OPENAI_API_KEY", "")
-        elif self.provider == "gemini":
-            return os.getenv("GEMINI_API_KEY", "")
-        elif self.provider == "groq":
-            return os.getenv("GROQ_API_KEY", "")
-        return ""
+        """Get API key from api_key_manager (uses .env by default)."""
+        from utils.api_key_manager import get_api_key
+        return get_api_key(provider=self.provider) or ""
     
     def generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
