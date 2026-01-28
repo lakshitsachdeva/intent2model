@@ -1323,6 +1323,11 @@ async def download_notebook(run_id: str):
         or model_info.get("model_name")
         or (model_info.get("config", {}) or {}).get("model", "unknown")
     )
+    # Get AutoMLPlan from cache (CRITICAL: notebook code is generated from this)
+    automl_plan = model_info.get("automl_plan", {})
+    if not automl_plan:
+        print(f"⚠️  Warning: No automl_plan found for run {run_id}. Notebook will use fallback code.")
+    
     notebook_json = generate_notebook(
         df=df,
         target=model_info["target"],
@@ -1333,7 +1338,7 @@ async def download_notebook(run_id: str):
             "feature_columns": model_info.get("feature_columns", []),
             "model_code": _model_code_for_notebook(model_info["task"], model_name),
             "feature_transforms": (model_info.get("config", {}) or {}).get("feature_transforms", []),
-            "automl_plan": model_info.get("automl_plan", {}),
+            "automl_plan": automl_plan,  # CRITICAL: plan drives code generation
         },
         metrics=model_info.get("metrics", {}),
         feature_importance=model_info.get("feature_importance"),
