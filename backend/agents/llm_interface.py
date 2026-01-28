@@ -77,7 +77,8 @@ class LLMInterface:
         # Prefer explicit GEMINI_CLI_CMD, else try Homebrew path on macOS, else "gemini"
         default_cmd = "/opt/homebrew/bin/gemini" if os.path.exists("/opt/homebrew/bin/gemini") else "gemini"
         cmd = os.getenv("GEMINI_CLI_CMD", default_cmd).strip() or default_cmd
-        args_str = os.getenv("GEMINI_CLI_ARGS", "").strip()
+        # Default args: non-interactive + read-only (no tool approvals)
+        args_str = os.getenv("GEMINI_CLI_ARGS", "--approval-mode plan").strip()
         args = shlex.split(args_str) if args_str else []
 
         exe = shutil.which(cmd)
@@ -96,12 +97,13 @@ class LLMInterface:
         _current_model_reason = "Using local Gemini CLI (no API key consumed by this backend)"
 
         try:
+            # Use -p to ensure one-shot prompt execution (avoid interactive UI)
             proc = subprocess.run(
-                [exe, *args],
-                input=full_prompt,
+                [exe, *args, "-p", full_prompt],
+                input="",
                 text=True,
                 capture_output=True,
-                timeout=int(os.getenv("GEMINI_CLI_TIMEOUT_SEC", "120")),
+                timeout=int(os.getenv("GEMINI_CLI_TIMEOUT_SEC", "180")),
             )
         except subprocess.TimeoutExpired:
             raise Exception("Gemini CLI timed out")

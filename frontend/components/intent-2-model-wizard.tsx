@@ -47,6 +47,7 @@ export default function Intent2ModelWizard() {
   const [apiKey, setApiKey] = useState("");
   const [apiKeyStatus, setApiKeyStatus] = useState<any>(null);
   const [llmStatus, setLlmStatus] = useState<any>(null);
+  const [backendOnline, setBackendOnline] = useState<boolean>(true);
   const [isSettingApiKey, setIsSettingApiKey] = useState(false);
   const [selectedLlmProvider, setSelectedLlmProvider] = useState<string>("gemini");
   const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
@@ -64,10 +65,12 @@ export default function Intent2ModelWizard() {
       const resp = await fetch("http://localhost:8000/health");
       const data = await resp.json();
       setLlmStatus(data);
+      setBackendOnline(true);
       // IMPORTANT: do NOT override user's selected provider from /health polling.
       // The backend reports its default provider, but user may have chosen a different one for this session.
     } catch (e) {
-      console.error("Failed to fetch LLM status:", e);
+      // Backend may be restarting / offline — don't spam console.
+      setBackendOnline(false);
     }
   };
 
@@ -888,6 +891,11 @@ export default function Intent2ModelWizard() {
                   </Button>
                 </div>
                 <div className="p-4 space-y-3">
+                  {!backendOnline && (
+                    <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-300">
+                      Backend offline / restarting — UI will reconnect automatically.
+                    </div>
+                  )}
                   <div className="text-sm">
                     <div className="font-medium">LLM Status</div>
                     <div className="text-muted-foreground">
