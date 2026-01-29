@@ -4,7 +4,7 @@ FastAPI backend for Intent2Model.
 Provides endpoints for dataset upload and model training.
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -37,6 +37,9 @@ import tempfile
 import base64
 from dotenv import load_dotenv
 import subprocess
+import asyncio
+from typing import Set
+import json as json_lib
 
 # Load environment variables from .env file (if it exists)
 load_dotenv()
@@ -188,14 +191,36 @@ dataset_cache = {}
 trained_models_cache = {}  # Store trained models for prediction
 run_logs_cache: Dict[str, Any] = {}  # run_id -> {"events": [...], "progress": float, "stage": str}
 
+# WebSocket connections for real-time log streaming
+websocket_connections: Set[WebSocket] = set()
 
-def _log_run_event(run_id: str, message: str, stage: Optional[str] = None, progress: Optional[float] = None):
-    """Append a structured log event for a run (for Developer Logs UI). Also writes to stdout for backend.log."""
+
+async def _broadcast_log(entry: Dict[str, Any]):
+    """Broadcast log entry to all connected WebSocket clients."""
+    if not websocket_connections:
+        return
+    
+    message = json_lib.dumps(entry)
+    disconnected = set()
+    
+    for ws in websocket_connections:
+        try:
+            await ws.send_text(message)
+        except Exception:
+            disconnected.add(ws)
+    
+    # Remove disconnected clients
+    websocket_connections.difference_update(disconnected)
+
+
+def _log_run_event_sync(run_id: str, message: str, stage: Optional[str] = None, progress: Optional[float] = None):
+    """Synchronous version that queues async broadcast."""
     if not run_id:
         return
     entry = {
         "ts": pd.Timestamp.now().isoformat(),
         "message": str(message),
+        "run_id": run_id,
     }
     if stage is not None:
         entry["stage"] = str(stage)
@@ -218,6 +243,27 @@ def _log_run_event(run_id: str, message: str, stage: Optional[str] = None, progr
     stage_str = f"[{stage}]" if stage else ""
     progress_str = f"({progress:.0f}%)" if progress is not None else ""
     print(f"[{run_id[:8]}] {stage_str} {progress_str} {message}", flush=True)
+    
+    # Broadcast to WebSocket clients (non-blocking)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(_broadcast_log(entry))
+        else:
+            loop.run_until_complete(_broadcast_log(entry))
+    except RuntimeError:
+        # No event loop, create one
+        try:
+            asyncio.run(_broadcast_log(entry))
+        except Exception:
+            pass
+    except Exception:
+        pass  # Ignore WebSocket errors
+
+
+def _log_run_event(run_id: str, message: str, stage: Optional[str] = None, progress: Optional[float] = None):
+    """Append a structured log event for a run (for Developer Logs UI). Also writes to stdout for backend.log."""
+    _log_run_event_sync(run_id, message, stage, progress)
 
 # API key management - allow users to provide custom keys
 from utils.api_key_manager import set_custom_api_key, get_api_key
@@ -236,6 +282,47 @@ class TrainRequest(BaseModel):
 class SelectModelRequest(BaseModel):
     run_id: str
     model_name: str
+
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time log streaming.
+    Connects and receives all log events as they're generated.
+    """
+    await websocket.accept()
+    websocket_connections.add(websocket)
+    
+    try:
+        # Send initial connection message
+        await websocket.send_json({
+            "type": "connected",
+            "message": "Connected to real-time log stream"
+        })
+        
+        # Send recent logs from cache
+        for run_id, cache_data in list(run_logs_cache.items())[-10:]:  # Last 10 runs
+            events = cache_data.get("events", [])[-50:]  # Last 50 events per run
+            for event in events:
+                await websocket.send_json(event)
+        
+        # Keep connection alive and handle incoming messages (ping/pong)
+        while True:
+            try:
+                data = await websocket.receive_text()
+                # Echo back for ping/pong
+                if data == "ping":
+                    await websocket.send_json({"type": "pong"})
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+    finally:
+        websocket_connections.discard(websocket)
 
 
 @app.get("/run/{run_id}/logs")

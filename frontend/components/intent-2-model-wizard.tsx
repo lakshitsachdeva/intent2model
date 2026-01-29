@@ -61,6 +61,7 @@ export default function Intent2ModelWizard() {
   const [currentStage, setCurrentStage] = useState<string>("");
   const [trainingError, setTrainingError] = useState<string | null>(null);
   const logsEndRef = React.useRef<HTMLDivElement>(null);
+  const wsRef = React.useRef<WebSocket | null>(null);
 
   const fetchLlmStatus = async () => {
     try {
@@ -449,38 +450,103 @@ export default function Intent2ModelWizard() {
     }
   };
 
-  // Poll backend log tail while training and dev panel is open
+  // WebSocket connection for real-time logs
+  useEffect(() => {
+    if (!training && !showDevLogs) {
+      // Close WebSocket when not needed
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      return;
+    }
+
+    // Connect to WebSocket
+    const ws = new WebSocket("ws://localhost:8000/ws/logs");
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      console.log("✅ WebSocket connected for real-time logs");
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        
+        // Handle connection confirmation
+        if (data.type === "connected" || data.type === "pong") {
+          return;
+        }
+
+        // Handle log events
+        if (data.message && data.run_id) {
+          // Extract run_id if we don't have it yet
+          if (!currentRunId && data.run_id) {
+            setCurrentRunId(data.run_id);
+          }
+
+          // Add to live logs
+          setLiveLogs((prev) => {
+            const updated = [...prev, data];
+            // Keep last 1000 events
+            return updated.slice(-1000);
+          });
+
+          // Update progress and stage
+          if (typeof data.progress === "number") {
+            setProgress(Math.max(0, Math.min(100, data.progress)));
+          }
+          if (data.stage) {
+            setCurrentStage(data.stage);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to parse WebSocket message:", e);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error("WebSocket error:", error);
+      setBackendOnline(false);
+    };
+
+    ws.onclose = () => {
+      console.log("WebSocket closed");
+      wsRef.current = null;
+      // Try to reconnect after 2 seconds if still training
+      if (training || showDevLogs) {
+        setTimeout(() => {
+          if (training || showDevLogs) {
+            // Trigger reconnection by updating state
+            setBackendOnline(false);
+          }
+        }, 2000);
+      }
+    };
+
+    // Send ping every 30 seconds to keep connection alive
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send("ping");
+      }
+    }, 30000);
+
+    return () => {
+      clearInterval(pingInterval);
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+      wsRef.current = null;
+    };
+  }, [training, showDevLogs, currentRunId]);
+
+  // Fallback: Still poll backend logs for initial connection (before WebSocket is ready)
   useEffect(() => {
     if (!showDevLogs || !training) return;
     fetchBackendLogTail();
-    const t = setInterval(() => fetchBackendLogTail(), 1200);
+    const t = setInterval(() => fetchBackendLogTail(), 5000); // Less frequent now (WebSocket is primary)
     return () => clearInterval(t);
   }, [showDevLogs, training]);
-  
-  // Poll run logs in real-time during training (ALWAYS, not just when dev panel is open)
-  useEffect(() => {
-    if (!training) return;
-    
-    // Poll backend logs immediately (even before run_id is available)
-    fetchBackendLogTail();
-    const backendInterval = setInterval(() => {
-      fetchBackendLogTail();
-    }, 200);
-    
-    // If we have run_id, also poll structured run logs
-    let runLogInterval: NodeJS.Timeout | null = null;
-    if (currentRunId) {
-      fetchRunLogs(currentRunId);
-      runLogInterval = setInterval(() => {
-        fetchRunLogs(currentRunId);
-      }, 200);
-    }
-    
-    return () => {
-      clearInterval(backendInterval);
-      if (runLogInterval) clearInterval(runLogInterval);
-    };
-  }, [training, currentRunId]);
 
   const selectModel = async (modelName: string) => {
     if (!trainedModel?.run_id) return;
