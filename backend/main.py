@@ -812,7 +812,8 @@ async def train_model(request: TrainRequest):
             # Pass log callback to executor so it can log in real-time
             executor = AutonomousExecutor(
                 run_id=run_id,
-                log_callback=_log_run_event
+                log_callback=_log_run_event,
+                llm_provider=chosen_llm_provider
             )
             train_result = executor.execute_with_auto_fix(
                 df=df,
@@ -823,6 +824,25 @@ async def train_model(request: TrainRequest):
                 requested_target=request.target,
                 llm_provider=chosen_llm_provider,
             )
+            
+            # Check if training was REFUSED (epistemically honest failure)
+            if train_result.get("refused"):
+                _log_run_event(run_id, "🛑 Training REFUSED - model quality unacceptable", stage="refuse", progress=100)
+                trace.append("Training refused due to unacceptable error rates")
+                
+                # Return refusal response
+                return _json_safe({
+                    "status": "refused",
+                    "run_id": run_id,
+                    "refusal_reason": train_result.get("refusal_reason", "Model quality unacceptable"),
+                    "failed_gates": train_result.get("failed_gates", []),
+                    "metrics": train_result.get("metrics", {}),
+                    "target_stats": train_result.get("target_stats", {}),
+                    "diagnosis": train_result.get("diagnosis", {}),
+                    "attempts": train_result.get("attempts", 1),
+                    "failure_history": train_result.get("failure_history", []),
+                    "plan": train_result.get("plan", {}),
+                })
             
             trace.append(f"Training succeeded after {train_result.get('attempts', 1)} attempt(s)")
             _log_run_event(run_id, f"Training succeeded (attempt {train_result.get('attempts', 1)})", stage="train", progress=70)

@@ -331,6 +331,51 @@ def train_regression(
         "mse": mse
     }
     
+    # EPISTEMICALLY HONEST ERROR GATING for regression
+    from agents.error_gating import (
+        compute_target_stats,
+        compute_normalized_metrics,
+        check_regression_error_gates,
+        detect_variance_fit_illusion
+    )
+    
+    target_stats = compute_target_stats(y)
+    normalized_metrics = compute_normalized_metrics(y, y_pred, target_stats)
+    
+    # Merge normalized metrics into main metrics dict
+    metrics.update(normalized_metrics)
+    metrics["target_mean"] = target_stats["mean"]
+    metrics["target_std"] = target_stats["std"]
+    metrics["target_IQR"] = target_stats["IQR"]
+    
+    # Check error gates
+    gates_passed, failed_gates = check_regression_error_gates(metrics, target_stats)
+    
+    if not gates_passed:
+        # Training failed error gates - raise exception with structured info
+        error_msg = "TRAINING REFUSED: Absolute error unacceptable.\n"
+        error_msg += "Failed gates:\n"
+        for gate in failed_gates:
+            error_msg += f"  - {gate}\n"
+        error_msg += f"\nMetrics:\n"
+        error_msg += f"  - RMSE: {metrics['RMSE']:.4f}\n"
+        error_msg += f"  - normalized_RMSE: {metrics['normalized_RMSE']:.4f}\n"
+        error_msg += f"  - MAE: {metrics['MAE']:.4f}\n"
+        error_msg += f"  - normalized_MAE: {metrics['normalized_MAE']:.4f}\n"
+        error_msg += f"  - R²: {metrics['R²']:.4f}\n"
+        
+        # Check for variance-fit illusion
+        is_illusion, illusion_desc = detect_variance_fit_illusion(metrics, target_stats)
+        if is_illusion:
+            error_msg += f"\n⚠️ {illusion_desc}\n"
+        
+        # Store failure info in metrics for diagnosis
+        metrics["_failed_gates"] = failed_gates
+        metrics["_target_stats"] = target_stats
+        metrics["_is_variance_fit_illusion"] = is_illusion
+        
+        raise RuntimeError(error_msg)
+    
     # Get feature importance if available
     feature_importance = None
     try:

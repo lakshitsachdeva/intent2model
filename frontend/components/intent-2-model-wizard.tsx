@@ -271,6 +271,26 @@ export default function Intent2ModelWizard() {
       const data = await response.json();
       
       if (response.ok) {
+        // Check if training was REFUSED (epistemically honest failure)
+        if (data.status === "refused" || data.refused) {
+          if (progressInterval) clearInterval(progressInterval);
+          if (logsInterval) clearInterval(logsInterval);
+          setProgress(100);
+          setTraining(false);
+          setTrainingError(
+            `🛑 Training REFUSED: ${data.refusal_reason || "Model quality unacceptable"}\n\n` +
+            `Failed gates:\n${(data.failed_gates || []).map((g: string) => `  - ${g}`).join("\n")}\n\n` +
+            `This is an epistemically honest refusal - the model would not produce usable predictions.`
+          );
+          // Still show the refusal data so user can see what happened
+          setTrainedModel({
+            ...data,
+            refused: true,
+            status: "refused"
+          });
+          return;
+        }
+        
         // Set run_id for real-time log polling (run_id is created at start of training)
         if (data.run_id) {
           setCurrentRunId(data.run_id);
@@ -407,13 +427,14 @@ export default function Intent2ModelWizard() {
 
   const fetchBackendLogTail = async () => {
     try {
-      const resp = await fetch("http://localhost:8000/logs/backend?limit=200");
+      // Show ALL backend logs (no run_id filtering)
+      const resp = await fetch("http://localhost:8000/logs/backend?limit=500");
       const data = await resp.json();
       const lines = Array.isArray(data.lines) ? data.lines : [];
       setBackendLogTail(lines);
       setBackendOnline(true);
 
-      // If we don't have a run_id yet, try to extract it from backend logs so Live Activity starts immediately.
+      // Still extract run_id for structured run logs (but don't filter backend logs)
       if (!currentRunId && training && lines.length) {
         const joined = lines.slice(-80).join("\n");
         const m = joined.match(/Run ID created:\s*([0-9a-fA-F-]{36})/);
