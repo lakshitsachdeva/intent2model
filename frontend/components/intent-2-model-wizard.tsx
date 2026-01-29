@@ -481,9 +481,12 @@ export default function Intent2ModelWizard() {
         // Handle log events
         if (data.message && data.run_id) {
           // Extract run_id if we don't have it yet
-          if (!currentRunId && data.run_id) {
-            setCurrentRunId(data.run_id);
-          }
+          setCurrentRunId((prevRunId) => {
+            if (!prevRunId && data.run_id) {
+              return data.run_id;
+            }
+            return prevRunId;
+          });
 
           // Add to live logs
           setLiveLogs((prev) => {
@@ -514,8 +517,10 @@ export default function Intent2ModelWizard() {
       console.log("WebSocket closed");
       wsRef.current = null;
       // Try to reconnect after 2 seconds if still training
-      if (training || showDevLogs) {
+      const shouldReconnect = training || showDevLogs;
+      if (shouldReconnect) {
         setTimeout(() => {
+          // Check again if we should reconnect
           if (training || showDevLogs) {
             // Trigger reconnection by updating state
             setBackendOnline(false);
@@ -538,7 +543,7 @@ export default function Intent2ModelWizard() {
       }
       wsRef.current = null;
     };
-  }, [training, showDevLogs, currentRunId]);
+  }, [training, showDevLogs]); // Removed currentRunId from dependencies - it's set inside the effect
 
   // Fallback: Still poll backend logs for initial connection (before WebSocket is ready)
   useEffect(() => {
