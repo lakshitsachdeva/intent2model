@@ -1411,8 +1411,9 @@ export default function Intent2ModelWizard() {
                     <span>LLM API Key Settings</span>
                   </CardTitle>
                   <CardDescription>
-                    Provide your Gemini API key to enable AI-powered features. 
-                    The system will automatically switch models if rate limits are hit.
+                    {selectedLlmProvider === "gemini_cli" 
+                      ? "Configure LLM provider. CLI uses your Google account (no API key needed)."
+                      : "Provide your Gemini API key to enable AI-powered features. The system will automatically switch models if rate limits are hit."}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -1420,17 +1421,39 @@ export default function Intent2ModelWizard() {
                     <div className="p-3 bg-muted rounded-md text-sm">
                       <div className="font-medium mb-1">Current Status:</div>
                       <div>
-                        {llmStatus.llm_available ? (
+                        {selectedLlmProvider === "gemini_cli" ? (
                           <div>
-                            ✅ <strong>Active</strong> - Using: {llmStatus.current_model || "Default"}
-                            {llmStatus.model_reason && (
-                              <div className="text-muted-foreground mt-1">
-                                {llmStatus.model_reason}
+                            {llmStatus.gemini_cli_available ? (
+                              <>
+                                ✅ <strong>CLI Active</strong> - Using: {llmStatus.gemini_cli_cmd || "gemini"} (local)
+                                <div className="text-muted-foreground mt-1">
+                                  Authenticated via Google account (OAuth)
+                                </div>
+                              </>
+                            ) : (
+                              <div>
+                                ⚠️ <strong>CLI Not Found</strong>
+                                <div className="text-muted-foreground mt-1">
+                                  Gemini CLI not detected. Install it or switch to API mode.
+                                </div>
                               </div>
                             )}
                           </div>
                         ) : (
-                          <div>⚠️ Using rule-based fallbacks</div>
+                          <div>
+                            {llmStatus.llm_available ? (
+                              <>
+                                ✅ <strong>API Active</strong> - Using: {llmStatus.current_model || "Default"}
+                                {llmStatus.model_reason && (
+                                  <div className="text-muted-foreground mt-1">
+                                    {llmStatus.model_reason}
+                                  </div>
+                                )}
+                              </>
+                            ) : (
+                              <div>⚠️ Using rule-based fallbacks</div>
+                            )}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -1447,34 +1470,57 @@ export default function Intent2ModelWizard() {
                       <option value="gemini">Gemini API (key-based)</option>
                       <option value="gemini_cli">Gemini CLI (local)</option>
                     </select>
-                    <p className="text-xs text-muted-foreground">
-                      CLI uses Gemini auth via your Google account login (OAuth) by default. If you want, you can also force API-key auth via backend env <code>GEMINI_CLI_AUTH_MODE=api_key</code>.
-                      CLI detected: <strong>{llmStatus?.gemini_cli_available ? "yes" : "no"}</strong>
-                      {llmStatus?.gemini_cli_cmd ? ` (cmd: ${llmStatus.gemini_cli_cmd})` : ""}
-                    </p>
+                    {selectedLlmProvider === "gemini_cli" ? (
+                      <p className="text-xs text-muted-foreground">
+                        CLI uses Gemini auth via your Google account login (OAuth) by default.
+                        {llmStatus?.gemini_cli_available ? (
+                          <> CLI detected: <strong>yes</strong> {llmStatus?.gemini_cli_cmd ? `(cmd: ${llmStatus.gemini_cli_cmd})` : ""}</>
+                        ) : (
+                          <> CLI detected: <strong className="text-red-600">no</strong> - Install Gemini CLI or switch to API mode</>
+                        )}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Uses your Gemini API key for authentication. The system will automatically switch models if rate limits are hit.
+                      </p>
+                    )}
                   </div>
 
-                  <div className="space-y-2">
-                    <Label htmlFor="api-key">
-                      API Key {selectedLlmProvider === "gemini_cli" ? "(also used for CLI if needed)" : "(Gemini API)"}
-                    </Label>
-                    <Input
-                      id="api-key"
-                      type="password"
-                      placeholder="Enter your API key or leave empty for default..."
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") handleSetApiKey();
-                      }}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Your API key is only stored in memory and never saved to disk. 
-                      Leave empty to use the default key from .env file.
-                    </p>
-                  </div>
+                  {selectedLlmProvider === "gemini" && (
+                    <div className="space-y-2">
+                      <Label htmlFor="api-key">API Key (Gemini API)</Label>
+                      <Input
+                        id="api-key"
+                        type="password"
+                        placeholder="Enter your API key or leave empty for default..."
+                        value={apiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleSetApiKey();
+                        }}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Your API key is only stored in memory and never saved to disk. 
+                        Leave empty to use the default key from .env file.
+                      </p>
+                    </div>
+                  )}
 
-                  {apiKeyStatus && (
+                  {selectedLlmProvider === "gemini_cli" && (
+                    <div className="p-3 bg-blue-50 dark:bg-blue-950/20 rounded-md text-sm">
+                      <div className="font-medium mb-1">ℹ️ CLI Mode</div>
+                      <p className="text-xs text-muted-foreground">
+                        No API key needed. CLI uses your Google account authentication.
+                        {llmStatus?.gemini_cli_available ? (
+                          <> CLI is ready to use.</>
+                        ) : (
+                          <> Install Gemini CLI or switch to API mode to use an API key.</>
+                        )}
+                      </p>
+                    </div>
+                  )}
+
+                  {apiKeyStatus && selectedLlmProvider === "gemini" && (
                     <div
                       className={`p-3 rounded-md text-sm ${
                         apiKeyStatus.status === "success"
@@ -1516,6 +1562,7 @@ export default function Intent2ModelWizard() {
                   >
                     Cancel
                   </Button>
+                  {selectedLlmProvider === "gemini" && (
                   <Button
                     onClick={handleSetApiKey}
                     disabled={isSettingApiKey}
