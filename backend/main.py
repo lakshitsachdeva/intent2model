@@ -189,7 +189,7 @@ else:
 # In-memory storage for uploaded datasets (in production, use proper storage)
 dataset_cache = {}
 trained_models_cache = {}  # Store trained models for prediction
-run_logs_cache: Dict[str, Any] = {}  # run_id -> {"events": [...], "progress": float, "stage": str}
+run_logs_cache: Dict[str, Any] = {}  # run_id -> {"events": [...], "progress": float, "stage": str, "status": str, "attempt_count": int}
 
 # WebSocket connections for real-time log streaming
 websocket_connections: Set[WebSocket] = set()
@@ -237,8 +237,39 @@ def _broadcast_log_sync(entry: Dict[str, Any]):
         pass  # Ignore errors
 
 
-def _log_run_event_sync(run_id: str, message: str, stage: Optional[str] = None, progress: Optional[float] = None):
-    """Synchronous version that queues async broadcast."""
+def _stage_to_run_status(stage: Optional[str]) -> str:
+    """Map log stage to run state status for GET /runs/{run_id}."""
+    if not stage:
+        return "init"
+    s = (stage or "").lower()
+    if s in ("plan", "planning"):
+        return "planning"
+    if s in ("train", "executor", "config", "models", "profile"):
+        return "training"
+    if s in ("diagnose",):
+        return "diagnosing"
+    if s in ("repair", "retry"):
+        return "retrying"
+    if s in ("error", "fallback"):
+        return "failed"
+    if s in ("refuse",):
+        return "refused"
+    if s in ("done", "success", "eval"):
+        return "success"
+    return "training"
+
+
+def _log_run_event_sync(
+    run_id: str,
+    message: str,
+    stage: Optional[str] = None,
+    progress: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    attempt_count: Optional[int] = None,
+    step_name: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """Append event to run backlog; optional payload/attempt_count for agent visibility."""
     if not run_id:
         return
     entry = {
@@ -248,33 +279,61 @@ def _log_run_event_sync(run_id: str, message: str, stage: Optional[str] = None, 
     }
     if stage is not None:
         entry["stage"] = str(stage)
+    if step_name is not None:
+        entry["step_name"] = str(step_name)
+    else:
+        entry["step_name"] = str(stage) if stage else "info"
+    if status is not None:
+        entry["status"] = str(status)
+    elif "failed" in message or "❌" in message or "REFUSED" in message:
+        entry["status"] = "failed"
+    else:
+        entry["status"] = "info"
     if progress is not None:
         try:
             entry["progress"] = float(progress)
         except Exception:
             pass
+    if payload is not None:
+        entry["payload"] = payload
 
-    # Write to in-memory cache for structured logs
-    cur = run_logs_cache.get(run_id) or {"events": [], "progress": 0.0, "stage": "init"}
+    # Write to in-memory cache (run state + event backlog)
+    cur = run_logs_cache.get(run_id) or {
+        "events": [], "progress": 0.0, "stage": "init", "status": "init", "attempt_count": 0,
+    }
     cur["events"] = (cur.get("events") or [])[-500:] + [entry]
     if progress is not None:
         cur["progress"] = entry.get("progress", cur.get("progress", 0.0))
     if stage is not None:
         cur["stage"] = entry.get("stage", cur.get("stage", ""))
+        cur["status"] = _stage_to_run_status(stage)
+    if attempt_count is not None:
+        cur["attempt_count"] = int(attempt_count)
+    if status is not None and status in ("failed", "success", "refused"):
+        cur["status"] = status
     run_logs_cache[run_id] = cur
-    
-    # ALSO write to stdout (captured by backend.log) so frontend can see logs immediately
+
+    # ALSO write to stdout (captured by backend.log)
     stage_str = f"[{stage}]" if stage else ""
     progress_str = f"({progress:.0f}%)" if progress is not None else ""
     print(f"[{run_id[:8]}] {stage_str} {progress_str} {message}", flush=True)
-    
+
     # Broadcast to WebSocket clients (non-blocking)
     _broadcast_log_sync(entry)
 
 
-def _log_run_event(run_id: str, message: str, stage: Optional[str] = None, progress: Optional[float] = None):
-    """Append a structured log event for a run (for Developer Logs UI). Also writes to stdout for backend.log."""
-    _log_run_event_sync(run_id, message, stage, progress)
+def _log_run_event(
+    run_id: str,
+    message: str,
+    stage: Optional[str] = None,
+    progress: Optional[float] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    attempt_count: Optional[int] = None,
+    step_name: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """Append a structured log event for a run. Supports payload/attempt_count for agent timeline."""
+    _log_run_event_sync(run_id, message, stage, progress, payload, attempt_count, step_name, status)
 
 # API key management - allow users to provide custom keys
 from utils.api_key_manager import set_custom_api_key, get_api_key
@@ -358,6 +417,33 @@ async def get_run_logs(run_id: str, limit: int = 200):
         "stage": cur.get("stage", "init"),
         "progress": cur.get("progress", 0),
         "events": events[-lim:],
+    }
+
+
+@app.get("/runs/{run_id}")
+async def get_run_state(run_id: str):
+    """
+    Return run state + full event timeline (backlog). Frontend must NEVER infer state.
+    Used for "What happened?" visibility: failures, LLM diagnoses, plan revisions, retries.
+    """
+    if run_id not in run_logs_cache:
+        return {
+            "run_id": run_id,
+            "status": "init",
+            "current_step": "",
+            "attempt_count": 0,
+            "progress": 0.0,
+            "events": [{"ts": "", "step_name": "info", "message": "Run not started yet.", "status": "info"}],
+        }
+    cur = run_logs_cache[run_id]
+    events = cur.get("events") or []
+    return {
+        "run_id": run_id,
+        "status": cur.get("status", "init"),
+        "current_step": cur.get("stage", ""),
+        "attempt_count": cur.get("attempt_count", 0),
+        "progress": float(cur.get("progress", 0)),
+        "events": events[-500:],
     }
 
 
@@ -888,6 +974,17 @@ async def train_model(request: TrainRequest):
         if not model_candidates:
             # last-resort minimal set
             model_candidates = ["random_forest"] if task == "classification" else ["random_forest"]
+            # CRITICAL: The planner may omit model_candidates. We still must persist a schema-valid
+            # plan that the notebook compiler can execute (it requires at least one candidate).
+            try:
+                from schemas.pipeline_schema import ModelCandidate  # local import to avoid cycles at import time
+                plan.model_candidates = [
+                    ModelCandidate(model_name=mn, reason_md="Auto-filled candidate (planner omitted model_candidates).", params={})
+                    for mn in model_candidates
+                ]
+            except Exception:
+                # If anything goes wrong, we'll inject into the dict later before caching.
+                pass
         trace.append(f"Model shortlist (agent): {model_candidates}")
         _log_run_event(run_id, f"Model shortlist: {model_candidates}", stage="models", progress=25)
 
@@ -943,7 +1040,12 @@ async def train_model(request: TrainRequest):
                 })
             
             trace.append(f"Training succeeded after {train_result.get('attempts', 1)} attempt(s)")
-            _log_run_event(run_id, f"Training succeeded (attempt {train_result.get('attempts', 1)})", stage="train", progress=70)
+            _log_run_event(
+                run_id, f"Training succeeded (attempt {train_result.get('attempts', 1)})",
+                stage="success", progress=70,
+                attempt_count=train_result.get("attempts", 1),
+                status="success",
+            )
             
             # Extract plan from result if available
             if "plan" in train_result:
@@ -1063,6 +1165,18 @@ async def train_model(request: TrainRequest):
                 final_plan_dict = plan.model_dump()
         else:
             final_plan_dict = plan.model_dump()
+
+        # CRITICAL: Notebook codegen requires at least one model candidate.
+        # If the stored plan has none (common when we auto-filled candidates for execution),
+        # inject the chosen shortlist into the persisted plan dict.
+        try:
+            if not isinstance(final_plan_dict.get("model_candidates"), list) or len(final_plan_dict.get("model_candidates") or []) == 0:
+                final_plan_dict["model_candidates"] = [
+                    {"model_name": mn, "reason_md": "Auto-filled candidate (planner omitted model_candidates).", "params": {}}
+                    for mn in model_candidates
+                ]
+        except Exception:
+            pass
         
         trained_models_cache[run_id] = {
             "model": train_result["best_model"],

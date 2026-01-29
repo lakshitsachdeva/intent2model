@@ -42,10 +42,23 @@ class AutonomousExecutor:
         self.diagnosis_agent = DiagnosisAgent(llm_provider=llm_provider)
         self.failure_history = []  # Track all failures for diagnosis
     
-    def _log(self, message: str, stage: str = "executor", progress: Optional[float] = None):
-        """Log a message (to callback if available, and print)."""
+    def _log(
+        self,
+        message: str,
+        stage: str = "executor",
+        progress: Optional[float] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        attempt_count: Optional[int] = None,
+    ):
+        """Log a message; optional payload/attempt_count for agent event timeline (GET /runs/{run_id})."""
         if self.log_callback:
-            self.log_callback(self.run_id, message, stage, progress)
+            try:
+                self.log_callback(
+                    self.run_id, message, stage, progress,
+                    payload=payload, attempt_count=attempt_count,
+                )
+            except TypeError:
+                self.log_callback(self.run_id, message, stage, progress)
         print(f"[AutonomousExecutor] {message}")
     
     def execute_with_auto_fix(
@@ -66,7 +79,10 @@ class AutonomousExecutor:
         
         for attempt in range(self.max_attempts):
             try:
-                self._log(f"🔄 Attempt {attempt + 1}/{self.max_attempts}: Starting planning and training...", "executor", 30 + attempt * 10)
+                self._log(
+                    f"🔄 Attempt {attempt + 1}/{self.max_attempts}: Starting planning and training...",
+                    "executor", 30 + attempt * 10, attempt_count=attempt + 1,
+                )
                 
                 # Step 1: Get plan (or repair previous plan)
                 if attempt == 0:
@@ -140,7 +156,11 @@ class AutonomousExecutor:
                     
                     if not evaluation_passed:
                         # Evaluation failed - create failure report and diagnose
-                        self._log("❌ Model failed error gates - creating failure report...", "evaluate", 72)
+                        self._log(
+                            "❌ Model failed error gates - creating failure report...",
+                            "evaluate", 72,
+                            payload={"failed_gates": failure_info.get("failed_gates", []), "stage": "metric_gate_failed"},
+                        )
                         failure_report = self._create_failure_report(
                             failure_stage="evaluation",
                             failed_gates=failure_info["failed_gates"],
@@ -157,7 +177,11 @@ class AutonomousExecutor:
                         # Diagnose with LLM
                         self._log("🧠 Diagnosing failure with LLM...", "diagnose", 75)
                         diagnosis = self.diagnosis_agent.diagnose_failure(failure_report)
-                        self._log(f"✅ Diagnosis received (confidence: {diagnosis.recovery_confidence:.2f})", "diagnose", 78)
+                        self._log(
+                            f"✅ Diagnosis received (confidence: {diagnosis.recovery_confidence:.2f})",
+                            "diagnose", 78,
+                            payload={"recovery_confidence": diagnosis.recovery_confidence, "plan_changes": getattr(diagnosis, "plan_changes", [])},
+                        )
                         
                         # Check if we should stop
                         if diagnosis.suggested_stop or diagnosis.recovery_confidence < 0.3:
@@ -219,7 +243,12 @@ class AutonomousExecutor:
                             model_candidates = ["logistic_regression", "random_forest"]
                         self._log(f"✅ Updated task={task}, metric={metric}, models={model_candidates}", "repair", 48)
                 
-                self._log(f"❌ Attempt {attempt + 1} failed ({failure_stage}): {error_type}: {error_msg[:150]}...", "error", 50)
+                self._log(
+                    f"❌ Attempt {attempt + 1} failed ({failure_stage}): {error_type}: {error_msg[:150]}...",
+                    "error", 50,
+                    payload={"error_type": error_type, "failure_stage": failure_stage, "message_preview": error_msg[:300]},
+                    attempt_count=attempt + 1,
+                )
                 
                 # Store error for learning
                 error_record = {
@@ -290,7 +319,10 @@ class AutonomousExecutor:
                     self._log("🔧 Error is fixable - analyzing and preparing repair...", "repair", 45)
                     continue
                 elif attempt < self.max_attempts - 1:
-                    self._log(f"🔄 Will try different approach on attempt {attempt + 2}...", "retry", 40)
+                    self._log(
+                        f"🔄 Will try different approach on attempt {attempt + 2}...",
+                        "retry", 40, attempt_count=attempt + 2,
+                    )
                     continue
                 else:
                     # Last attempt failed - use ultimate fallback

@@ -134,9 +134,9 @@ class AutoMLPlan(BaseModel):
     model_selection_confidence: float = Field(1.0, ge=0.0, le=1.0, description="Confidence in model selection")
 
     # Planning metadata
-    planning_source: Literal["llm", "fallback"] = Field(
+    planning_source: Literal["llm", "fallback", "auto_repair", "refusal"] = Field(
         default="fallback",
-        description="Whether this plan was produced by the LLM or the rule-based fallback",
+        description="Where this plan came from (LLM, fallback, auto-repair, refusal)",
     )
     planning_error: Optional[str] = Field(
         default=None,
@@ -145,6 +145,13 @@ class AutoMLPlan(BaseModel):
     plan_quality: Literal["high_confidence", "medium_confidence", "fallback_low_confidence"] = Field(
         default="high_confidence",
         description="Overall plan quality indicator"
+    )
+
+    # Optional: target-space transform suggestions (used by diagnosis/recovery)
+    # NOTE: execution may or may not implement this yet, but schema must allow it.
+    target_transformation: Optional[Literal["none", "log", "log1p"]] = Field(
+        default=None,
+        description="Optional target transformation suggestion (e.g., for heavy-tailed regression targets)",
     )
 
     class Config:

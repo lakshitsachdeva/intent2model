@@ -479,8 +479,12 @@ def compare_models(
             else:
                 result = train_regression(df, target, metric, config)
             
-            # Get the primary metric value
-            primary_metric_value = result["metrics"].get(metric, result["cv_mean"])
+            # Primary metric for ranking/table: use CV mean when available (generalization), else in-sample
+            # This keeps table "Primary Metric" and "CV Mean" aligned and avoids table-vs-card discrepancy.
+            cv_mean = result.get("cv_mean")
+            primary_metric_value = (cv_mean if cv_mean is not None else result["metrics"].get(metric))
+            if primary_metric_value is None:
+                primary_metric_value = result["metrics"].get(metric, 0)
             result["model_name"] = model_name
             result["primary_metric"] = primary_metric_value
             results.append(result)

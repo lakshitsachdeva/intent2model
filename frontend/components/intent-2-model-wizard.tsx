@@ -72,6 +72,14 @@ export default function Intent2ModelWizard() {
   const wsRef = React.useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [wsFailed, setWsFailed] = useState(false);
+  const [runState, setRunState] = useState<{
+    run_id: string;
+    status: string;
+    current_step: string;
+    attempt_count: number;
+    progress: number;
+    events: Array<{ ts: string; step_name: string; message: string; status?: string; payload?: Record<string, unknown> }>;
+  } | null>(null);
 
   const fetchLlmStatus = async () => {
     try {
@@ -403,6 +411,17 @@ export default function Intent2ModelWizard() {
       setDevLogsError(e?.message || "Failed to fetch logs");
     }
   };
+
+  const fetchRunState = async (runId: string) => {
+    try {
+      const resp = await fetch(`${BACKEND_HTTP_BASE}/runs/${runId}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      setRunState(data);
+    } catch {
+      // ignore
+    }
+  };
   
   // Poll logs in real-time during training (BOTH backend logs AND run logs)
   useEffect(() => {
@@ -414,12 +433,14 @@ export default function Intent2ModelWizard() {
       fetchBackendLogTail();
     }, 200);
     
-    // If we have run_id, also poll structured run logs
+    // If we have run_id, also poll structured run logs and run state (event backlog)
     let runLogInterval: NodeJS.Timeout | null = null;
     if (currentRunId) {
       fetchRunLogs(currentRunId);
+      fetchRunState(currentRunId);
       runLogInterval = setInterval(() => {
         fetchRunLogs(currentRunId);
+        fetchRunState(currentRunId);
       }, 200);
     }
     
@@ -428,6 +449,12 @@ export default function Intent2ModelWizard() {
       if (runLogInterval) clearInterval(runLogInterval);
     };
   }, [training, currentRunId]);
+
+  // Fetch run state on results step so "What happened?" timeline is available after completion
+  useEffect(() => {
+    const runId = trainedModel?.run_id || currentRunId;
+    if (runId && step === 4) fetchRunState(runId);
+  }, [step, trainedModel?.run_id, currentRunId]);
   
   // Auto-scroll logs to bottom when new logs arrive
   useEffect(() => {
@@ -566,7 +593,7 @@ export default function Intent2ModelWizard() {
     fetchBackendLogTail();
     const t = setInterval(() => fetchBackendLogTail(), wsFailed ? 800 : 5000);
     return () => clearInterval(t);
-  }, [training && (showDevLogs || wsFailed), wsFailed]);
+  }, [training, showDevLogs, wsFailed]);
 
   const selectModel = async (modelName: string) => {
     if (!trainedModel?.run_id) return;
@@ -999,6 +1026,49 @@ export default function Intent2ModelWizard() {
                           </div>
                         )}
                       </div>
+
+                      {/* What happened? — Agent event timeline (failures, diagnoses, retries) */}
+                      {(currentRunId && runState?.events?.length) ? (
+                        <div className="space-y-2 mt-4">
+                          <h4 className="text-sm font-semibold">What happened? (execution timeline)</h4>
+                          <div className="rounded-lg border bg-muted/20 p-3 max-h-[280px] overflow-y-auto space-y-0">
+                            <div className="text-xs text-muted-foreground mb-2">
+                              Status: {runState.status} · Attempt: {runState.attempt_count} · Step: {runState.current_step || "—"}
+                            </div>
+                            <div className="relative border-l-2 border-muted pl-3 space-y-2">
+                              {runState.events.slice(-80).map((ev: any, idx: number) => {
+                                const isFailed = ev.status === "failed" || (ev.message && (ev.message.includes("❌") || ev.message.includes("failed") || ev.message.includes("REFUSED")));
+                                const isDiagnose = (ev.step_name || ev.stage || "").toLowerCase().includes("diagnose");
+                                const isRetry = (ev.step_name || ev.stage || "").toLowerCase().includes("retry");
+                                const isRepair = (ev.step_name || ev.stage || "").toLowerCase().includes("repair");
+                                return (
+                                  <div
+                                    key={idx}
+                                    className={`text-xs pl-2 py-1 rounded-r border-l-2 ${
+                                      isFailed ? "border-red-500 bg-red-50 dark:bg-red-950/20" :
+                                      isDiagnose ? "border-blue-500 bg-blue-50 dark:bg-blue-950/20" :
+                                      isRetry ? "border-purple-500 bg-purple-50 dark:bg-purple-950/20" :
+                                      isRepair ? "border-amber-500 bg-amber-50 dark:bg-amber-950/20" :
+                                      "border-muted bg-background"
+                                    }`}
+                                  >
+                                    <div className="font-medium text-muted-foreground">{ev.step_name || ev.stage || "info"}</div>
+                                    <div className="mt-0.5 wrap-break-word">{ev.message}</div>
+                                    {ev.payload && Object.keys(ev.payload).length > 0 && (
+                                      <details className="mt-1">
+                                        <summary className="cursor-pointer text-muted-foreground hover:underline">Payload</summary>
+                                        <pre className="mt-1 p-2 rounded bg-muted/50 text-[10px] overflow-x-auto whitespace-pre-wrap">
+                                          {JSON.stringify(ev.payload, null, 1)}
+                                        </pre>
+                                      </details>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 )}
@@ -1123,6 +1193,52 @@ export default function Intent2ModelWizard() {
                   return null;
                 })()
               )}
+
+              {/* What happened? — Execution timeline (visible on results step) */}
+              {(step === 4 && (trainedModel?.run_id || currentRunId) && runState?.events?.length) ? (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">What happened?</CardTitle>
+                    <CardDescription>Execution timeline: planning, training, failures, LLM diagnoses, retries.</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-xs text-muted-foreground mb-2">
+                      Status: {runState.status} · Attempts: {runState.attempt_count} · Step: {runState.current_step || "—"}
+                    </div>
+                    <div className="relative border-l-2 border-muted pl-3 space-y-1.5 max-h-[320px] overflow-y-auto">
+                      {runState.events.slice(-100).map((ev: any, idx: number) => {
+                        const isFailed = ev.status === "failed" || (ev.message && (ev.message.includes("❌") || ev.message.includes("failed") || ev.message.includes("REFUSED")));
+                        const isDiagnose = (ev.step_name || ev.stage || "").toLowerCase().includes("diagnose");
+                        const isRetry = (ev.step_name || ev.stage || "").toLowerCase().includes("retry");
+                        const isRepair = (ev.step_name || ev.stage || "").toLowerCase().includes("repair");
+                        return (
+                          <div
+                            key={idx}
+                            className={`text-xs pl-2 py-1 rounded-r border-l-2 ${
+                              isFailed ? "border-red-500 bg-red-50 dark:bg-red-950/20" :
+                              isDiagnose ? "border-blue-500 bg-blue-50 dark:bg-blue-950/20" :
+                              isRetry ? "border-purple-500 bg-purple-50 dark:bg-purple-950/20" :
+                              isRepair ? "border-amber-500 bg-amber-50 dark:bg-amber-950/20" :
+                              "border-muted bg-background"
+                            }`}
+                          >
+                            <span className="font-medium text-muted-foreground">{ev.step_name || ev.stage || "info"}</span>
+                            <span className="ml-1">{ev.message}</span>
+                            {ev.payload && Object.keys(ev.payload).length > 0 && (
+                              <details className="mt-1">
+                                <summary className="cursor-pointer text-muted-foreground hover:underline">Payload</summary>
+                                <pre className="mt-1 p-2 rounded bg-muted/50 text-[10px] overflow-x-auto whitespace-pre-wrap">
+                                  {JSON.stringify(ev.payload, null, 1)}
+                                </pre>
+                              </details>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : null}
               
               {/* Model Comparison Table */}
               {trainedModel?.all_models && Array.isArray(trainedModel.all_models) && trainedModel.all_models.length > 0 ? (
@@ -1250,9 +1366,20 @@ export default function Intent2ModelWizard() {
                         </CardTitle>
                       </CardHeader>
                       <CardContent className="space-y-4">
-                        {/* Metrics */}
+                        {/* Primary metric (CV) - matches table so no discrepancy */}
+                        {model.primary_metric != null && (
+                          <div className="p-2 rounded bg-primary/10 border border-primary/20">
+                            <p className="text-xs text-muted-foreground">Primary metric (CV mean)</p>
+                            <p className="font-bold text-lg">{typeof model.primary_metric === 'number' ? model.primary_metric.toFixed(4) : model.primary_metric}</p>
+                            <p className="text-xs text-muted-foreground">Same as table — cross-validation score</p>
+                          </div>
+                        )}
+                        <p className="text-xs font-medium text-muted-foreground">In-sample metrics</p>
                         <div className="grid grid-cols-2 gap-2">
-                          {Object.entries(model.metrics || {}).slice(0, 4).map(([key, value]: [string, any]) => (
+                          {Object.entries(model.metrics || {})
+                            .filter(([key]) => !String(key).startsWith("_"))
+                            .slice(0, 4)
+                            .map(([key, value]: [string, any]) => (
                             <div key={key} className="p-2 rounded bg-muted/30">
                               <p className="text-xs text-muted-foreground">{key}</p>
                               <p className="font-bold">{typeof value === 'number' ? value.toFixed(3) : value}</p>
