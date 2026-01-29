@@ -69,12 +69,25 @@ AI: probabilities: Setosa 99.8%, Versicolor 0.2%, Virginica 0.0%
 ## 🛠️ Manual Setup (Alternative)
 
 ### Backend
+**Important:** Always run uvicorn from inside the `backend/` folder. Running from project root will fail with "Could not import module main".
+
 ```bash
 cd backend
 pip install -r ../requirements.txt
-export GEMINI_API_KEY=AIzaSyDc6lDoHJmM1_YEP4XPdl17349eKvg0JAE
+# Optional: set API key in .env or export GEMINI_API_KEY=your_key
 python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+Or use the helper script (from project root):
+```bash
+chmod +x backend/run.sh
+./backend/run.sh
+```
+
+**Backend nahi chal raha?**
+- **"Could not import module main"** → You're in the wrong folder. Run `cd backend` first, then `python3 -m uvicorn main:app --host 0.0.0.0 --port 8000`.
+- **"Address already in use" / port 8000** → Free the port: `lsof -ti:8000 | xargs kill -9`, then start again.
+- **Dependencies missing** → From project root: `pip install -r requirements.txt` (or use `./start.sh` — it creates a venv and installs deps).
 
 ### Frontend (New Terminal)
 ```bash

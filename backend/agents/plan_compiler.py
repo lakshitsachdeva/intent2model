@@ -216,45 +216,20 @@ def compile_preprocessing_code(plan: AutoMLPlan, df: pd.DataFrame) -> str:
 
 def compile_model_code(plan: AutoMLPlan, selected_model_name: Optional[str] = None) -> str:
     """
-    Compile model instantiation code from AutoMLPlan.model_candidates.
+    Compile model instantiation code. MUST use the trained run's selected model when provided.
     
-    NEVER hardcodes model names.
-    Uses plan.model_candidates[0] or selected_model_name.
-    Injects hyperparameters from plan.
+    - When selected_model_name is provided (best model from training), use it for code gen
+      even if not in plan.model_candidates — so notebook matches what was actually trained.
+    - Otherwise use plan.model_candidates[0].
     """
     lines = []
     lines.append("# Model compiled from AutoMLPlan.model_candidates\n")
     lines.append("\n")
     
-    # Find the model to use
-    model_candidate = None
-    if selected_model_name:
-        for mc in plan.model_candidates:
-            if mc.model_name == selected_model_name:
-                model_candidate = mc
-                break
-    
-    if not model_candidate and plan.model_candidates:
-        model_candidate = plan.model_candidates[0]
-    
-    if not model_candidate:
-        raise ValueError("No model candidate found in plan")
-    
-    model_name = model_candidate.model_name
-    params = model_candidate.params or {}
-    reason_md = model_candidate.reason_md or "Selected based on plan recommendations."
-    
-    # Generate model instantiation based on task and model name
     task = plan.task_type
     is_classification = "classification" in task
-    
-    lines.append(f"# Selected model: {model_name} (from plan.model_candidates)\n")
-    lines.append(f"# Reason: {reason_md}\n")
-    lines.append("\n")
-    
-    # Map model names to sklearn classes
-    if is_classification:
-        model_map = {
+    model_map = (
+        {
             "logistic_regression": "LogisticRegression",
             "random_forest": "RandomForestClassifier",
             "xgboost": "XGBClassifier",
@@ -262,8 +237,8 @@ def compile_model_code(plan: AutoMLPlan, selected_model_name: Optional[str] = No
             "naive_bayes": "GaussianNB",
             "gradient_boosting": "GradientBoostingClassifier",
         }
-    else:
-        model_map = {
+        if is_classification
+        else {
             "linear_regression": "LinearRegression",
             "random_forest": "RandomForestRegressor",
             "xgboost": "XGBRegressor",
@@ -272,6 +247,43 @@ def compile_model_code(plan: AutoMLPlan, selected_model_name: Optional[str] = No
             "ridge": "Ridge",
             "lasso": "Lasso",
         }
+    )
+    
+    model_candidate = None
+    if selected_model_name:
+        for mc in (plan.model_candidates or []):
+            if (getattr(mc, "model_name", None) or (mc if isinstance(mc, dict) else {}).get("model_name")) == selected_model_name:
+                model_candidate = mc
+                break
+        if not model_candidate and selected_model_name in model_map:
+            model_name = selected_model_name
+            params = {}
+            reason_md = "Selected as best model from training."
+        elif model_candidate:
+            mc = model_candidate
+            model_name = getattr(mc, "model_name", None) or (mc.get("model_name") if isinstance(mc, dict) else None)
+            params = getattr(mc, "params", None) or (mc.get("params") if isinstance(mc, dict) else {}) or {}
+            reason_md = getattr(mc, "reason_md", None) or (mc.get("reason_md") if isinstance(mc, dict) else None) or "Selected based on plan."
+        else:
+            model_name = None
+            params = {}
+            reason_md = ""
+    elif plan.model_candidates:
+        mc = plan.model_candidates[0]
+        model_name = getattr(mc, "model_name", None) or (mc.get("model_name") if isinstance(mc, dict) else None)
+        params = getattr(mc, "params", None) or (mc.get("params") if isinstance(mc, dict) else {}) or {}
+        reason_md = getattr(mc, "reason_md", None) or (mc.get("reason_md") if isinstance(mc, dict) else None) or "From plan."
+    else:
+        model_name = None
+        params = {}
+        reason_md = ""
+    
+    if not model_name or model_name not in model_map:
+        raise ValueError(f"No model candidate found in plan (or selected_model_name='{selected_model_name}' not supported).")
+    
+    lines.append(f"# Selected model: {model_name} (from plan.model_candidates)\n")
+    lines.append(f"# Reason: {reason_md}\n")
+    lines.append("\n")
     
     sklearn_class = model_map.get(model_name)
     if not sklearn_class:
@@ -308,7 +320,7 @@ def compile_model_code(plan: AutoMLPlan, selected_model_name: Optional[str] = No
             param_strs.append(f"{k}={v}")
     
     # Add default random_state if not present
-    if "random_state" not in params and model_name not in ["linear_regression", "naive_bayes"]:
+    if "random_state" not in params and model_name not in ["linear_regression", "ridge", "lasso", "naive_bayes"]:
         param_strs.append("random_state=42")
     
     params_code = ", ".join(param_strs) if param_strs else ""

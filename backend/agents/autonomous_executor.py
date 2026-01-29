@@ -15,6 +15,7 @@ from agents.error_gating import (
     compute_target_stats,
     compute_normalized_metrics,
     check_regression_error_gates,
+    check_model_quality_minimum,
     detect_target_transformation_need,
     analyze_residuals,
     detect_variance_fit_illusion
@@ -23,6 +24,7 @@ from schemas.pipeline_schema import AutoMLPlan
 from schemas.failure_schema import FailureReport
 from ml.profiler import profile_dataset
 from ml.trainer import compare_models, train_classification, train_regression
+from ml.evaluator import prune_features_aggressive, infer_classification_primary_metric
 import traceback
 import numpy as np
 
@@ -34,7 +36,7 @@ class AutonomousExecutor:
     """
     
     def __init__(self, run_id: Optional[str] = None, log_callback=None, llm_provider: str = "gemini"):
-        self.max_attempts = 5
+        self.max_attempts = 10
         self.attempt_history = []
         self.run_id = run_id
         self.log_callback = log_callback  # Function to call for logging
@@ -75,8 +77,22 @@ class AutonomousExecutor:
         Execute training with automatic error detection and fixing.
         Never gives up. Always finds a solution.
         """
+        # Aggressive feature pruning (mandatory): drop bad/weak features before any training
+        df_pruned, dropped_cols = prune_features_aggressive(df, target, task)
+        if dropped_cols:
+            self._log(f"📉 Feature pruning dropped {len(dropped_cols)} features: {dropped_cols[:10]}{'...' if len(dropped_cols) > 10 else ''}", "config", 22)
+            df = df_pruned
         profile = profile_dataset(df)
-        
+
+        # Classification: infer and LOCK primary metric (no raw accuracy default; planner must not change mid-run)
+        locked_metric = metric
+        if task == "classification":
+            inferred = infer_classification_primary_metric(df, target)
+            locked_metric = inferred
+            if metric != inferred:
+                self._log(f"🔒 Classification primary metric locked: {inferred} (was {metric})", "config", 24)
+            metric = locked_metric
+
         for attempt in range(self.max_attempts):
             try:
                 self._log(
@@ -104,26 +120,40 @@ class AutonomousExecutor:
                     )
                     self._log(f"✅ Plan repaired: {len(plan.feature_transforms)} feature transforms", "repair", 40)
                 
-                # Step 2: Validate plan has features
-                if not plan.feature_transforms or all(ft.drop for ft in plan.feature_transforms):
+                # Step 2: Restrict feature_transforms to columns present in (pruned) df
+                feature_cols_set = set(c for c in df.columns if c != target)
+                plan.feature_transforms = [
+                    ft for ft in plan.feature_transforms
+                    if (getattr(ft, "name", None) or (ft.get("name") if isinstance(ft, dict) else None)) in feature_cols_set
+                ]
+                # Step 2b: Validate plan has features
+                if not plan.feature_transforms or all(getattr(ft, "drop", False) for ft in plan.feature_transforms):
                     self._log("⚠️  Plan has no features - auto-generating feature_transforms...", "repair", 42)
                     plan.feature_transforms = _generate_feature_transforms_from_profile(
                         profile=profile,
                         target=plan.inferred_target
                     )
-                    kept_count = len([ft for ft in plan.feature_transforms if not ft.drop])
+                    kept_count = len([ft for ft in plan.feature_transforms if not getattr(ft, "drop", False)])
                     self._log(f"✅ Generated {kept_count} features from dataset", "repair", 45)
                 
                 # Step 3: Build config from plan
                 self._log("⚙️  Step 2: Building pipeline configuration from plan...", "config", 50)
                 config = self._plan_to_config(plan, profile)
                 # CRITICAL: execution-side task is authoritative; don't let plan.task_type drift override it.
-                # plan.task_type is from LLM and may be wrong; config.task controls model family selection.
                 config["task"] = task
+                # LOCK primary metric for classification across retries (planner must not change it)
+                if task == "classification":
+                    config["primary_metric_locked"] = locked_metric
                 self._log(f"✅ Config built: {len(config.get('feature_transforms', []))} feature transforms", "config", 55)
                 
-                # Step 4: Try training
-                self._log(f"🚀 Step 3: Training models: {', '.join(model_candidates)}...", "train", 60)
+                # Step 4: Try training — opinionated order (simple first) is applied inside compare_models
+                MORE_REGRESSION = ["ridge", "lasso", "linear_regression", "gradient_boosting", "random_forest", "svm", "xgboost"]
+                MORE_CLASSIFICATION = ["logistic_regression", "naive_bayes", "gradient_boosting", "random_forest", "svm", "xgboost"]
+                if len(model_candidates) < 4:
+                    extra = MORE_REGRESSION if task == "regression" else MORE_CLASSIFICATION
+                    model_candidates = list(dict.fromkeys(model_candidates + [m for m in extra if m not in model_candidates]))
+                    self._log(f"📊 Expanded to {len(model_candidates)} models for better performance", "train", 59)
+                self._log(f"🚀 Step 3: Training models (simple-first order): {', '.join(model_candidates)}...", "train", 60)
                 if len(model_candidates) > 1:
                     self._log(f"📊 Comparing {len(model_candidates)} models...", "train", 62)
                     result = compare_models(
@@ -155,6 +185,19 @@ class AutonomousExecutor:
                     )
                     
                     if not evaluation_passed:
+                        # Residual analysis → action: if heteroscedastic, try target transformation on next attempt
+                        if failure_info.get("is_heteroscedastic"):
+                            suggested = detect_target_transformation_need(failure_info.get("target_stats", {}))
+                            if suggested and suggested == "log":
+                                try:
+                                    y_min = float(df[target].min())
+                                    if y_min > 0:
+                                        plan_dict = plan.model_dump()
+                                        plan_dict["target_transformation"] = "log1p"
+                                        plan = AutoMLPlan(**plan_dict)
+                                        self._log("🔧 Heteroscedastic residuals → applying log1p target transformation on next attempt", "repair", 73)
+                                except Exception:
+                                    pass
                         # Evaluation failed - create failure report and diagnose
                         self._log(
                             "❌ Model failed error gates - creating failure report...",
@@ -204,6 +247,51 @@ class AutonomousExecutor:
                         continue
                     else:
                         self._log("✅ Model passed error gates!", "evaluate", 75)
+                else:
+                    # Classification: no regression error gates; we run reinforcing quality gate below
+                    pass
+                
+                # Reinforcing quality gate: reject "useless" models even if they passed error gates
+                metrics_for_gate = result.get("metrics", {})
+                cv_mean_val = result.get("cv_mean")
+                quality_passed, quality_failed = check_model_quality_minimum(
+                    metrics_for_gate, task, cv_mean=cv_mean_val
+                )
+                if not quality_passed:
+                    self._log(
+                        "❌ Model failed reinforcing quality gate (model too weak to be useful)",
+                        "evaluate", 72,
+                        payload={"quality_failed": quality_failed, "stage": "reinforcing_gate_failed"},
+                    )
+                    failure_report = self._create_failure_report(
+                        failure_stage="evaluation",
+                        failed_gates=quality_failed,
+                        metrics=metrics_for_gate,
+                        target_stats=result.get("metrics", {}).get("_target_stats", {}),
+                        feature_summary=self._get_feature_summary(df, plan, config),
+                        model_used=result.get("model_name", "unknown"),
+                        model_hyperparameters={},
+                        previous_plan=plan.model_dump(),
+                        error_message="Reinforcing gate: " + "; ".join(quality_failed),
+                        attempt_number=attempt + 1
+                    )
+                    self._log("🧠 Diagnosing (reinforcing gate)...", "diagnose", 75)
+                    diagnosis = self.diagnosis_agent.diagnose_failure(failure_report)
+                    if diagnosis.suggested_stop or diagnosis.recovery_confidence < 0.3:
+                        self._log("🛑 Model quality too low — refusing to deliver", "refuse", 80)
+                        return self._create_refusal_result(
+                            plan=plan,
+                            failure_report=failure_report,
+                            diagnosis=diagnosis,
+                            attempts=attempt + 1
+                        )
+                    plan = self._apply_diagnosis_changes(plan, diagnosis, df, target, profile)
+                    self.failure_history.append({
+                        "attempt": attempt + 1,
+                        "failure_report": failure_report.model_dump(),
+                        "diagnosis": diagnosis.model_dump()
+                    })
+                    continue
                 
                 # Step 6: Success!
                 self._log(f"🎉 Training succeeded on attempt {attempt + 1}!", "success", 80)
@@ -236,7 +324,7 @@ class AutonomousExecutor:
                     if any(sig in error_msg.lower() for sig in mismatch_signals):
                         self._log("🔧 Detected regression/classification mismatch — switching task to classification", "repair", 45)
                         task = "classification"
-                        metric = "accuracy"
+                        metric = infer_classification_primary_metric(df, target)  # Lock metric (no raw accuracy default)
                         # Keep only classification-safe models
                         model_candidates = [m for m in model_candidates if m in ["logistic_regression", "random_forest", "svm", "naive_bayes", "gradient_boosting"]]
                         if not model_candidates:
@@ -676,12 +764,15 @@ class AutonomousExecutor:
     
     def _plan_to_config(self, plan: AutoMLPlan, profile: Dict[str, Any]) -> Dict[str, Any]:
         """Convert AutoMLPlan to training config."""
-        return {
+        cfg = {
             "task": plan.task_type,
             "model": plan.model_candidates[0].model_name if plan.model_candidates else "random_forest",
             "feature_transforms": [ft.model_dump() if hasattr(ft, 'model_dump') else ft for ft in plan.feature_transforms],
             "automl_plan": plan.model_dump()
         }
+        if getattr(plan, "target_transformation", None):
+            cfg["target_transformation"] = plan.target_transformation
+        return cfg
     
     def _ultimate_fallback(
         self,

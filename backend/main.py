@@ -189,10 +189,52 @@ else:
 # In-memory storage for uploaded datasets (in production, use proper storage)
 dataset_cache = {}
 trained_models_cache = {}  # Store trained models for prediction
-run_logs_cache: Dict[str, Any] = {}  # run_id -> {"events": [...], "progress": float, "stage": str, "status": str, "attempt_count": int}
+
+# RunState store: single source of truth for GET /runs/{run_id}. Contract: run_id, status, current_step, attempt_count, progress, events[]
+# Each event: ts, step_name, message, status?, payload?
+run_state_store: Dict[str, Dict[str, Any]] = {}
 
 # WebSocket connections for real-time log streaming
 websocket_connections: Set[WebSocket] = set()
+
+# Backend log: write to BOTH locations every time (so jo bhi file tum kholo, update hogi)
+_BACKEND_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _BACKEND_DIR.parent
+_LOG_PROJECT = _PROJECT_ROOT / "backend.log"   # intent2model/backend.log
+_LOG_BACKEND = _BACKEND_DIR / "backend.log"     # intent2model/backend/backend.log
+
+_latest_run_id: Optional[str] = None
+
+
+def _append_backend_log(line: str) -> None:
+    """Append to BOTH backend.log files — project root + backend folder. Don't return on first success."""
+    line_fmt = line if line.endswith("\n") else line + "\n"
+    for log_path in (_LOG_PROJECT, _LOG_BACKEND):
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(line_fmt)
+                f.flush()
+        except Exception as e:
+            print(f"[log failed {log_path}] {e}", flush=True)
+
+
+def _ensure_backend_log_started() -> None:
+    """Write one line to backend.log on first use so file exists and /logs/backend returns something."""
+    if getattr(_ensure_backend_log_started, "_done", False):
+        return
+    try:
+        from datetime import datetime
+        _append_backend_log(f"Backend process started at {datetime.now().isoformat()}")
+        _ensure_backend_log_started._done = True
+    except Exception:
+        pass
+
+
+@app.on_event("startup")
+def _startup_backend_log():
+    """Write to backend.log as soon as the app starts so the file is created and writable."""
+    _ensure_backend_log_started()
+    _append_backend_log("Uvicorn app ready — backend.log is active.")
 
 
 async def _broadcast_log(entry: Dict[str, Any]):
@@ -259,6 +301,18 @@ def _stage_to_run_status(stage: Optional[str]) -> str:
     return "training"
 
 
+def _run_state_init(run_id: str) -> Dict[str, Any]:
+    """Return initial RunState for a new run. Contract: run_id, status, current_step, attempt_count, progress, events."""
+    return {
+        "run_id": run_id,
+        "status": "init",
+        "current_step": "",
+        "attempt_count": 0,
+        "progress": 0.0,
+        "events": [],
+    }
+
+
 def _log_run_event_sync(
     run_id: str,
     message: str,
@@ -269,57 +323,42 @@ def _log_run_event_sync(
     step_name: Optional[str] = None,
     status: Optional[str] = None,
 ):
-    """Append event to run backlog; optional payload/attempt_count for agent visibility."""
+    """Append one AgentEvent to RunState.events. Event shape: ts, step_name, message, status?, payload?."""
+    _ensure_backend_log_started()
     if not run_id:
         return
-    entry = {
-        "ts": pd.Timestamp.now().isoformat(),
-        "message": str(message),
-        "run_id": run_id,
-    }
-    if stage is not None:
-        entry["stage"] = str(stage)
-    if step_name is not None:
-        entry["step_name"] = str(step_name)
-    else:
-        entry["step_name"] = str(stage) if stage else "info"
-    if status is not None:
-        entry["status"] = str(status)
-    elif "failed" in message or "❌" in message or "REFUSED" in message:
-        entry["status"] = "failed"
-    else:
-        entry["status"] = "info"
-    if progress is not None:
-        try:
-            entry["progress"] = float(progress)
-        except Exception:
-            pass
-    if payload is not None:
-        entry["payload"] = payload
+    step = str(step_name) if step_name is not None else (str(stage) if stage else "info")
+    event_status = str(status) if status is not None else ("failed" if ("failed" in message or "❌" in message or "REFUSED" in message) else "info")
 
-    # Write to in-memory cache (run state + event backlog)
-    cur = run_logs_cache.get(run_id) or {
-        "events": [], "progress": 0.0, "stage": "init", "status": "init", "attempt_count": 0,
+    # AgentEvent: exactly ts, step_name, message, status, payload (payload only if present)
+    event: Dict[str, Any] = {
+        "ts": pd.Timestamp.now().isoformat(),
+        "step_name": step,
+        "message": str(message),
+        "status": event_status,
     }
-    cur["events"] = (cur.get("events") or [])[-500:] + [entry]
+    if payload is not None:
+        event["payload"] = payload
+
+    # Persistent RunState store (single source of truth for GET /runs/{run_id})
+    cur = run_state_store.get(run_id) or _run_state_init(run_id)
+    cur["events"] = (cur.get("events") or [])[-500:] + [event]
     if progress is not None:
-        cur["progress"] = entry.get("progress", cur.get("progress", 0.0))
-    if stage is not None:
-        cur["stage"] = entry.get("stage", cur.get("stage", ""))
-        cur["status"] = _stage_to_run_status(stage)
+        cur["progress"] = float(progress)
+    cur["current_step"] = step
+    cur["status"] = _stage_to_run_status(stage) if stage else cur.get("status", "init")
     if attempt_count is not None:
         cur["attempt_count"] = int(attempt_count)
     if status is not None and status in ("failed", "success", "refused"):
         cur["status"] = status
-    run_logs_cache[run_id] = cur
+    run_state_store[run_id] = cur
 
-    # ALSO write to stdout (captured by backend.log)
     stage_str = f"[{stage}]" if stage else ""
     progress_str = f"({progress:.0f}%)" if progress is not None else ""
-    print(f"[{run_id[:8]}] {stage_str} {progress_str} {message}", flush=True)
-
-    # Broadcast to WebSocket clients (non-blocking)
-    _broadcast_log_sync(entry)
+    line = f"[{run_id[:8]}] {stage_str} {progress_str} {message}"
+    print(line, flush=True)
+    _append_backend_log(line)
+    _broadcast_log_sync(event)
 
 
 def _log_run_event(
@@ -371,7 +410,7 @@ async def websocket_logs(websocket: WebSocket):
         })
         
         # Send recent logs from cache
-        for run_id, cache_data in list(run_logs_cache.items())[-10:]:  # Last 10 runs
+        for run_id, cache_data in list(run_state_store.items())[-10:]:  # Last 10 runs
             events = cache_data.get("events", [])[-50:]  # Last 50 events per run
             for event in events:
                 await websocket.send_json(event)
@@ -395,18 +434,26 @@ async def websocket_logs(websocket: WebSocket):
         websocket_connections.discard(websocket)
 
 
+@app.get("/run/latest-id")
+async def get_latest_run_id():
+    """Return the run_id of the most recently started training run. Frontend polls this when training starts to get run_id without parsing backend.log."""
+    return {"run_id": _latest_run_id}
+
+
 @app.get("/run/{run_id}/logs")
 async def get_run_logs(run_id: str, limit: int = 200):
     """Fetch recent structured log events for a run (for Developer Logs UI)."""
     # If run_id doesn't exist yet, return empty (training might not have started)
-    if run_id not in run_logs_cache:
+    if run_id not in run_state_store:
         return {
             "run_id": run_id,
-            "stage": "init",
+            "status": "init",
+            "current_step": "",
+            "attempt_count": 0,
             "progress": 0,
-            "events": [{"ts": "", "message": "Run not started yet - logs will appear here soon..."}],
+            "events": [{"ts": "", "step_name": "info", "message": "Run not started yet.", "status": "info"}],
         }
-    cur = run_logs_cache[run_id]
+    cur = run_state_store[run_id]
     events = cur.get("events") or []
     try:
         lim = max(1, min(int(limit), 500))
@@ -414,37 +461,42 @@ async def get_run_logs(run_id: str, limit: int = 200):
         lim = 200
     return {
         "run_id": run_id,
-        "stage": cur.get("stage", "init"),
-        "progress": cur.get("progress", 0),
+        "status": cur.get("status", "init"),
+        "current_step": cur.get("current_step", ""),
+        "attempt_count": cur.get("attempt_count", 0),
+        "progress": float(cur.get("progress", 0)),
         "events": events[-lim:],
+    }
+
+
+def _run_state_to_response(cur: Dict[str, Any], run_id: str) -> Dict[str, Any]:
+    """Return RunState for GET /runs/{run_id}. Contract: run_id, status, current_step, attempt_count, progress, events (each: ts, step_name, message, status?, payload?)."""
+    events = cur.get("events") or []
+    # Normalize each event to contract shape only
+    out_events = []
+    for e in events[-500:]:
+        ev = {"ts": e.get("ts", ""), "step_name": e.get("step_name", "info"), "message": e.get("message", ""), "status": e.get("status", "info")}
+        if e.get("payload") is not None:
+            ev["payload"] = e["payload"]
+        out_events.append(ev)
+    return {
+        "run_id": run_id,
+        "status": cur.get("status", "init"),
+        "current_step": cur.get("current_step", ""),
+        "attempt_count": int(cur.get("attempt_count", 0)),
+        "progress": float(cur.get("progress", 0)),
+        "events": out_events,
     }
 
 
 @app.get("/runs/{run_id}")
 async def get_run_state(run_id: str):
     """
-    Return run state + full event timeline (backlog). Frontend must NEVER infer state.
-    Used for "What happened?" visibility: failures, LLM diagnoses, plan revisions, retries.
+    Return RunState verbatim. Frontend contract: run_id, status, current_step, attempt_count, progress, events[] (ts, step_name, message, status?, payload?).
     """
-    if run_id not in run_logs_cache:
-        return {
-            "run_id": run_id,
-            "status": "init",
-            "current_step": "",
-            "attempt_count": 0,
-            "progress": 0.0,
-            "events": [{"ts": "", "step_name": "info", "message": "Run not started yet.", "status": "info"}],
-        }
-    cur = run_logs_cache[run_id]
-    events = cur.get("events") or []
-    return {
-        "run_id": run_id,
-        "status": cur.get("status", "init"),
-        "current_step": cur.get("stage", ""),
-        "attempt_count": cur.get("attempt_count", 0),
-        "progress": float(cur.get("progress", 0)),
-        "events": events[-500:],
-    }
+    if run_id not in run_state_store:
+        return _run_state_to_response(_run_state_init(run_id), run_id)
+    return _run_state_to_response(run_state_store[run_id], run_id)
 
 
 @app.get("/")
@@ -521,24 +573,39 @@ async def health():
     }
 
 
+def _get_backend_log_file_to_read() -> Optional[Path]:
+    """Return backend.log to read from (project root first, then backend/)."""
+    if _LOG_PROJECT.exists():
+        return _LOG_PROJECT
+    if _LOG_BACKEND.exists():
+        return _LOG_BACKEND
+    return None
+
+
+@app.get("/debug/log-path")
+async def debug_log_path():
+    """Where backend.log is written and read from."""
+    return {
+        "writing_to": [str(_LOG_PROJECT), str(_LOG_BACKEND)],
+        "read_path": str(p) if (p := _get_backend_log_file_to_read()) else None,
+    }
+
+
 @app.get("/logs/backend")
 async def backend_logs(limit: int = 200):
-    """Tail backend.log for developer debugging in the UI."""
+    """Tail backend.log for developer debugging in the UI. Always reads fresh from disk (no cache)."""
     try:
         lim = max(10, min(int(limit), 500))
     except Exception:
         lim = 200
-    log_path = Path(__file__).parent.parent / "backend.log"
-    if not log_path.exists():
-        return {"path": str(log_path), "lines": []}
+    log_path = _get_backend_log_file_to_read()
+    if not log_path:
+        return {"path": "backend.log (not found)", "lines": [], "hint": "Start a training run or restart backend; logs will appear here."}
     try:
-        # Use tail for efficiency
-        out = subprocess.check_output(["tail", "-n", str(lim), str(log_path)], text=True, stderr=subprocess.STDOUT)
-        lines = out.splitlines()
-    except Exception:
-        # fallback: read last bytes
-        txt = log_path.read_text(errors="ignore")
+        txt = log_path.read_text(encoding="utf-8", errors="ignore")
         lines = txt.splitlines()[-lim:]
+    except Exception:
+        lines = []
     return {"path": str(log_path), "lines": lines}
 
 class ApiKeyRequest(BaseModel):
@@ -899,11 +966,13 @@ async def train_model(request: TrainRequest):
     run_id = None
     try:
         run_id = create_run_id()
+        global _latest_run_id
+        _latest_run_id = run_id
+        run_state_store[run_id] = _run_state_init(run_id)
+        _ensure_backend_log_started()
+        _append_backend_log(f"📋 Run ID created: {run_id} - frontend can start polling /runs/{run_id}")
         _log_run_event(run_id, "🚀 Run created - training request received", stage="init", progress=1)
-        
-        # CRITICAL: Log run_id immediately so frontend can start polling
-        # Frontend will get run_id from response, but we log it here first
-        print(f"📋 Run ID created: {run_id} - frontend can start polling /run/{run_id}/logs")
+        print(f"📋 Run ID created: {run_id} - frontend can start polling /runs/{run_id}", flush=True)
 
         def _infer_execution_task(df_: pd.DataFrame, target_: str) -> str:
             """Authoritative task inference from actual target values (execution-side)."""
@@ -966,14 +1035,21 @@ async def train_model(request: TrainRequest):
         profile = profile_dataset(df)
         _log_run_event(run_id, "Dataset profiled (execution-side)", stage="profile", progress=20)
         
-        # Metric selection (agent-driven)
-        metric = (request.metric or "").strip() or plan.primary_metric
+        # Metric selection: classification LOCK primary metric (no raw accuracy default)
+        if task == "classification":
+            from ml.evaluator import infer_classification_primary_metric
+            metric = (request.metric or "").strip() or infer_classification_primary_metric(df, request.target)
+        else:
+            metric = (request.metric or "").strip() or plan.primary_metric
 
-        # Model candidates (agent-driven)
-        model_candidates = [m.model_name for m in plan.model_candidates] if plan.model_candidates else []
+        # Model candidates — always try many models so we get the best possible performance
+        FULL_REGRESSION = ["linear_regression", "random_forest", "gradient_boosting", "ridge", "svm", "lasso"]
+        FULL_CLASSIFICATION = ["logistic_regression", "random_forest", "gradient_boosting", "svm", "naive_bayes"]
+        from_plan = [m.model_name for m in plan.model_candidates] if plan.model_candidates else []
+        full_list = FULL_REGRESSION if task == "regression" else FULL_CLASSIFICATION
+        model_candidates = list(dict.fromkeys(from_plan + [m for m in full_list if m not in from_plan]))
         if not model_candidates:
-            # last-resort minimal set
-            model_candidates = ["random_forest"] if task == "classification" else ["random_forest"]
+            model_candidates = full_list[:4]
             # CRITICAL: The planner may omit model_candidates. We still must persist a schema-valid
             # plan that the notebook compiler can execute (it requires at least one candidate).
             try:
@@ -1195,7 +1271,9 @@ async def train_model(request: TrainRequest):
             "feature_importance": train_result.get("feature_importance"),
             "all_models": train_result.get("all_models", []),  # Store JSON-safe summaries
             "trace": trace,  # Store training trace for report
-            "preprocessing_recommendations": preprocessing_recommendations  # Store preprocessing recs for report
+            "preprocessing_recommendations": preprocessing_recommendations,  # Store preprocessing recs for report
+            "holdout_residual_std": train_result.get("holdout_residual_std"),  # For regression prediction uncertainty
+            "target_transformation": train_result.get("target_transformation"),  # log1p etc. for inverse at predict
         }
         trace.append("Cached best fitted pipeline server-side for prediction/downloads.")
         _log_run_event(run_id, "Run cached (model + artifacts metadata)", stage="done", progress=95)
@@ -1610,27 +1688,44 @@ async def predict(request: PredictRequest):
         # Reorder columns to match training
         input_data = input_data[feature_columns]
         
-        # Make prediction
-        prediction = model.predict(input_data)[0]
-        
-        # If classification, decode label
+        # Make prediction (pipeline = preprocessor + model; expects raw feature columns)
+        pred_raw = model.predict(input_data)
+        if pred_raw is None or len(pred_raw) == 0:
+            raise HTTPException(status_code=500, detail="Model returned no prediction")
+        prediction = pred_raw[0]
+
+        # If classification, decode label and always return probabilities; flag low-confidence
         if task == "classification" and label_encoder is not None:
             prediction_label = label_encoder.inverse_transform([prediction])[0]
             prediction_proba = None
             try:
                 proba = model.predict_proba(input_data)[0]
-                prediction_proba = dict(zip(label_encoder.classes_, proba.tolist()))
-            except:
+                prediction_proba = dict(zip(label_encoder.classes_, (float(x) for x in proba.tolist())))
+            except Exception:
                 pass
+            max_prob = float(max(prediction_proba.values())) if prediction_proba else 0.0
+            low_confidence = max_prob < 0.6
             return {
                 "prediction": str(prediction_label),
                 "prediction_encoded": int(prediction),
-                "probabilities": prediction_proba
+                "probabilities": prediction_proba,
+                "low_confidence": low_confidence,
             }
-        else:
-            return {
-                "prediction": float(prediction)
-            }
+        # Regression: inverse transform if trained with log1p; return prediction ± uncertainty
+        pred_float = float(prediction)
+        if model_info.get("target_transformation") == "log1p":
+            import numpy as np
+            pred_float = float(np.expm1(pred_float))
+        uncertainty = None
+        holdout_std = model_info.get("holdout_residual_std")
+        if holdout_std is not None and holdout_std > 0:
+            uncertainty = float(holdout_std)
+        return {
+            "prediction": pred_float,
+            "uncertainty": uncertainty,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
@@ -1708,8 +1803,21 @@ async def download_notebook(run_id: str):
     model_name = (
         model_info.get("selected_model")
         or model_info.get("model_name")
-        or (model_info.get("config", {}) or {}).get("model", "unknown")
+        or (model_info.get("config", {}) or {}).get("model")
     )
+    if not model_name or model_name == "unknown":
+        all_models = model_info.get("all_models") or []
+        if all_models:
+            metric = (model_info.get("config", {}) or {}).get("primary_metric") or ("accuracy" if model_info.get("task") == "classification" else "r2")
+            reverse = metric.lower() not in ("rmse", "mae")
+            def _score(m):
+                raw = m.get("primary_metric") or m.get("cv_mean")
+                if reverse:
+                    return raw if raw is not None else 0
+                return -(raw if raw is not None else float("inf"))
+            best = max(all_models, key=_score)
+            model_name = best.get("model_name") or "unknown"
+    model_name = model_name or "unknown"
     # Get AutoMLPlan from cache (CRITICAL: notebook code is generated from this)
     automl_plan = model_info.get("automl_plan", {})
     if not automl_plan:
@@ -1726,6 +1834,7 @@ async def download_notebook(run_id: str):
             config={
                 **(model_info.get("config", {}) or {}),
                 "model": model_name,
+                "all_models": model_info.get("all_models", []),  # so notebook can derive best if model missing
                 "feature_columns": model_info.get("feature_columns", []),
                 "model_code": _model_code_for_notebook(model_info["task"], model_name),
                 "feature_transforms": (model_info.get("config", {}) or {}).get("feature_transforms", []),

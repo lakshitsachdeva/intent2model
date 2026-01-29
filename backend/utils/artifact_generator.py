@@ -10,8 +10,37 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from io import BytesIO
+from io import BytesIO, StringIO
 import numpy as np
+
+
+def _embed_data_cell(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Return a notebook code cell that defines `df` from embedded base64 CSV
+    so the notebook runs standalone without external data files.
+    """
+    csv_str = df.to_csv(index=False)
+    b64 = base64.b64encode(csv_str.encode("utf-8")).decode("ascii")
+    # Chunk long base64 for readability (optional); single string is fine for execution
+    source = [
+        "# Embedded dataset (base64 CSV) — notebook runs standalone\n",
+        "import base64\n",
+        "from io import StringIO\n",
+        "\n",
+        f"_data_b64 = {repr(b64)}\n",
+        "_csv = base64.b64decode(_data_b64).decode('utf-8')\n",
+        "df = pd.read_csv(StringIO(_csv))\n",
+        "\n",
+        "print(f'Dataset shape: {df.shape}')\n",
+        "print(f'Columns: {list(df.columns)}')\n",
+        "df.head()\n",
+    ]
+    return {
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "source": source,
+    }
 
 
 def generate_notebook(
@@ -58,6 +87,26 @@ def generate_notebook(
             plan = None
     
     automl_plan = automl_plan_dict  # Keep dict for markdown sections
+
+    # Derive best model from all_models if config.model is missing/unknown
+    cfg = config or {}
+    model_name = cfg.get("model") or ""
+    if (not model_name or model_name == "unknown") and cfg.get("all_models"):
+        primary_metric = cfg.get("primary_metric") or ("accuracy" if "classification" in task else "r2")
+        reverse = primary_metric.lower() not in ("rmse", "mae")
+        all_models = cfg["all_models"]
+
+        def _best_score(m):
+            raw = m.get("primary_metric") or m.get("cv_mean")
+            if reverse:
+                return raw if raw is not None else 0
+            return -(raw if raw is not None else float("inf"))
+
+        best = max(all_models, key=_best_score)
+        model_name = best.get("model_name") or "unknown"
+        if model_name and model_name != "unknown":
+            config = {**cfg, "model": model_name}
+
     # Expect markdown sections in automl_plan if present
     md_sections = []
     if isinstance(automl_plan, dict) and automl_plan:
@@ -155,20 +204,7 @@ def generate_notebook(
                 "metadata": {},
                 "source": ["## 2. Load Data"]
             },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "source": [
-                    "# Load your dataset\n",
-                    "# df = pd.read_csv('your_dataset.csv')\n",
-                    "\n",
-                    "# For this example, we'll use the uploaded data\n",
-                    f"print(f'Dataset shape: {{df.shape}}')\n",
-                    f"print(f'Columns: {{list(df.columns)}}')\n",
-                    "df.head()"
-                ]
-            },
+            _embed_data_cell(df),
             {
                 "cell_type": "markdown",
                 "metadata": {},

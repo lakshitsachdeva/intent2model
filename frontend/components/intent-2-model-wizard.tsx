@@ -70,6 +70,7 @@ export default function Intent2ModelWizard() {
   const [trainingError, setTrainingError] = useState<string | null>(null);
   const logsEndRef = React.useRef<HTMLDivElement>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
+  const wsActiveRef = React.useRef(true); // false when effect cleanup ran — don’t use this socket
   const [wsConnected, setWsConnected] = useState(false);
   const [wsFailed, setWsFailed] = useState(false);
   const [runState, setRunState] = useState<{
@@ -80,6 +81,8 @@ export default function Intent2ModelWizard() {
     progress: number;
     events: Array<{ ts: string; step_name: string; message: string; status?: string; payload?: Record<string, unknown> }>;
   } | null>(null);
+  const [logStreamError, setLogStreamError] = useState<string | null>(null);
+  const [logStreamStatus, setLogStreamStatus] = useState<"idle" | "connecting" | "streaming" | "error">("idle");
 
   const fetchLlmStatus = async () => {
     try {
@@ -415,25 +418,50 @@ export default function Intent2ModelWizard() {
   const fetchRunState = async (runId: string) => {
     try {
       const resp = await fetch(`${BACKEND_HTTP_BASE}/runs/${runId}`);
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        setLogStreamError((prev) => prev || `Run logs returned ${resp.status}. Retrying…`);
+        return;
+      }
       const data = await resp.json();
       setRunState(data);
-    } catch {
-      // ignore
+      setLogStreamError(null);
+      if ((data?.events?.length ?? 0) > 0) setLogStreamStatus("streaming");
+    } catch (e) {
+      setLogStreamError((prev) => prev || "Run logs unreachable. Retrying…");
     }
   };
   
-  // Poll logs in real-time during training (BOTH backend logs AND run logs)
+  // Poll logs in real-time during training — fast polling so logs feel real-time
   useEffect(() => {
-    if (!training) return;
-    
-    // ALWAYS poll backend logs immediately (even before run_id is available)
-    fetchBackendLogTail();
-    const backendInterval = setInterval(() => {
-      fetchBackendLogTail();
-    }, 200);
-    
-    // If we have run_id, also poll structured run logs and run state (event backlog)
+    if (!training) {
+      setLogStreamStatus("idle");
+      setLogStreamError(null);
+      return;
+    }
+    setLogStreamStatus("connecting");
+    setLogStreamError(null);
+
+    const POLL_RUN_MS = 150;   // run state every 150ms for real-time feel
+    const POLL_BACKEND_MS = 200;
+    const POLL_LATEST_ID_MS = 200;
+
+    const fetchLatestRunId = async () => {
+      try {
+        const r = await fetch(`${BACKEND_HTTP_BASE}/run/latest-id`);
+        const d = await r.json();
+        if (d?.run_id) {
+          setCurrentRunId((prev) => (prev ? prev : d.run_id));
+          setLogStreamError(null);
+        }
+      } catch (e) {
+        setLogStreamError((prev) => prev || "Could not get run ID. Retrying…");
+      }
+    };
+    fetchLatestRunId();
+    const latestIdInterval = setInterval(fetchLatestRunId, POLL_LATEST_ID_MS);
+
+    const backendInterval = setInterval(() => fetchBackendLogTail(), POLL_BACKEND_MS);
+
     let runLogInterval: NodeJS.Timeout | null = null;
     if (currentRunId) {
       fetchRunLogs(currentRunId);
@@ -441,10 +469,11 @@ export default function Intent2ModelWizard() {
       runLogInterval = setInterval(() => {
         fetchRunLogs(currentRunId);
         fetchRunState(currentRunId);
-      }, 200);
+      }, POLL_RUN_MS);
     }
-    
+
     return () => {
+      clearInterval(latestIdInterval);
       clearInterval(backendInterval);
       if (runLogInterval) clearInterval(runLogInterval);
     };
@@ -461,18 +490,18 @@ export default function Intent2ModelWizard() {
     if (logsEndRef.current) {
       logsEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [liveLogs, backendLogTail]);
+  }, [liveLogs, backendLogTail, runState?.events?.length]);
 
   const fetchBackendLogTail = async () => {
     try {
-      // Show ALL backend logs (no run_id filtering)
       const resp = await fetch(`${BACKEND_HTTP_BASE}/logs/backend?limit=500`);
       const data = await resp.json();
       const lines = Array.isArray(data.lines) ? data.lines : [];
       setBackendLogTail(lines);
       setBackendOnline(true);
+      if (training && lines.length > 0) setLogStreamStatus("streaming");
+      setLogStreamError(null);
 
-      // Still extract run_id for structured run logs (but don't filter backend logs)
       if (!currentRunId && training && lines.length) {
         const joined = lines.slice(-80).join("\n");
         const m = joined.match(/Run ID created:\s*([0-9a-fA-F-]{36})/);
@@ -482,42 +511,45 @@ export default function Intent2ModelWizard() {
         }
       }
     } catch (e) {
-      // Backend might be restarting/offline; mark offline so UI explains why logs are empty
       setBackendOnline(false);
+      setLogStreamError((prev) => prev || "Backend logs unreachable. Retrying…");
     }
   };
 
   // WebSocket connection for real-time logs
   useEffect(() => {
     if (!training && !showDevLogs) {
-      // Close WebSocket when not needed
+      wsActiveRef.current = false;
       if (wsRef.current) {
-        wsRef.current.close();
+        if (wsRef.current.readyState === WebSocket.OPEN) wsRef.current.close();
         wsRef.current = null;
       }
       return;
     }
 
-    // Connect to WebSocket
+    wsActiveRef.current = true;
     const ws = new WebSocket(`${BACKEND_WS_BASE}/ws/logs`);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      if (!wsActiveRef.current) {
+        ws.close();
+        return;
+      }
       setWsConnected(true);
       setWsFailed(false);
       setBackendOnline(true);
     };
 
     ws.onmessage = (event) => {
+      if (!wsActiveRef.current) return;
       try {
         const data = JSON.parse(event.data);
         
-        // Handle connection confirmation
         if (data.type === "connected" || data.type === "pong") {
           return;
         }
 
-        // Handle log events
         if (data.message && data.run_id) {
           // Extract run_id if we don't have it yet
           setCurrentRunId((prevRunId) => {
@@ -578,13 +610,15 @@ export default function Intent2ModelWizard() {
     }, 30000);
 
     return () => {
+      wsActiveRef.current = false;
       clearInterval(pingInterval);
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      // Only close if already open — closing while CONNECTING causes "closed before connection" error
+      if (ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
       wsRef.current = null;
     };
-  }, [training, showDevLogs]); // Removed currentRunId from dependencies - it's set inside the effect
+  }, [training, showDevLogs]);
 
   // Fallback: poll backend logs if WS is failing or dev panel is open (WS is primary).
   useEffect(() => {
@@ -628,7 +662,12 @@ export default function Intent2ModelWizard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ run_id: trainedModel.run_id, features }),
       });
-      const out = await resp.json();
+      const out = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const msg = (out as { detail?: string }).detail ?? (out as { message?: string }).message ?? resp.statusText ?? "Prediction failed";
+        setPredictionResult({ error: typeof msg === "string" ? msg : JSON.stringify(msg) });
+        return;
+      }
       setPredictionResult(out);
     } catch (e: any) {
       setPredictionResult({ error: e?.message || "Prediction failed" });
@@ -939,134 +978,102 @@ export default function Intent2ModelWizard() {
                       ))}
                     </div>
                     
-                    {/* Live Logs - Real-time updates (BOTH old and new!) */}
+                    {/* Live Logs — real-time streaming with error handling */}
                     <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <h4 className="text-sm font-semibold">Live Activity Logs</h4>
-                        <Badge variant="outline" className="text-xs">
-                          {liveLogs.length} events
-                        </Badge>
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <h4 className="text-sm font-semibold">Live Activity — real-time</h4>
+                        <div className="flex items-center gap-2">
+                          {logStreamError && (
+                            <Badge variant="destructive" className="text-xs">
+                              {logStreamError}
+                            </Badge>
+                          )}
+                          <Badge variant="outline" className="text-xs font-mono">
+                            {(runState?.events?.length ?? 0) || liveLogs.length} events
+                          </Badge>
+                        </div>
                       </div>
-                      <div className="rounded-lg border bg-muted/30 p-4 max-h-[300px] overflow-y-auto" ref={logsEndRef}>
-                        {(liveLogs.length > 0 || (training && backendLogTail.length > 0)) ? (
-                          <div className="space-y-2 font-mono text-xs">
-                            {/* Show structured run logs if available (preferred) */}
-                            {liveLogs.length > 0 ? liveLogs.slice(-50).map((log, idx) => {
-                              const isError = log.message.includes("❌") || log.message.includes("ERROR") || log.message.includes("failed");
-                              const isSuccess = log.message.includes("✅") || log.message.includes("succeeded");
-                              const isWarning = log.message.includes("⚠️") || log.message.includes("WARNING");
-                              const isRepair = log.message.includes("🔧") || log.message.includes("repair");
-                              const isRetry = log.message.includes("🔄") || log.message.includes("retry");
-                              
+                      {logStreamError && (
+                        <div className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+                          Log stream had errors. Polling will retry. If backend is down, start it with <code className="text-xs bg-black/20 px-1 rounded">./backend/run.sh</code>
+                        </div>
+                      )}
+                      <div
+                        className="rounded-lg border-2 border-emerald-500/30 bg-slate-900 text-green-400 font-mono text-xs p-3 max-h-[320px] overflow-y-auto overflow-x-auto"
+                        ref={logsEndRef}
+                      >
+                        {(training && (runState?.events?.length ?? 0) > 0) || (training && backendLogTail.length > 0) || liveLogs.length > 0 ? (
+                          <div className="space-y-0.5">
+                            {/* Primary: run state timeline (polled every 150ms for real-time) */}
+                            {runState?.events?.length ? runState.events.slice(-80).map((ev: any, idx: number) => {
+                              const isFailed = ev.status === "failed" || (ev.message && (ev.message.includes("❌") || ev.message.includes("failed") || ev.message.includes("REFUSED")));
+                              const isSuccess = ev.message && (ev.message.includes("✅") || ev.message.includes("succeeded"));
+                              const isWarn = ev.message && (ev.message.includes("⚠️") || ev.message.includes("WARNING"));
+                              const isRepair = (ev.step_name || ev.stage || "").toLowerCase().includes("repair") || (ev.message && ev.message.includes("🔧"));
+                              const isRetry = (ev.step_name || ev.stage || "").toLowerCase().includes("retry") || (ev.message && ev.message.includes("🔄"));
+                              const isDiagnose = (ev.step_name || ev.stage || "").toLowerCase().includes("diagnose");
+                              const lineCl = isFailed ? "text-red-400" : isSuccess ? "text-emerald-300" : isWarn ? "text-amber-400" : isRepair ? "text-cyan-400" : isRetry ? "text-violet-400" : isDiagnose ? "text-blue-300" : "text-green-400";
                               return (
-                                <div
-                                  key={idx}
-                                  className={`p-2 rounded border-l-2 ${
-                                    isError
-                                      ? "bg-red-50 dark:bg-red-950/20 border-red-500 text-red-700 dark:text-red-300"
-                                      : isSuccess
-                                      ? "bg-green-50 dark:bg-green-950/20 border-green-500 text-green-700 dark:text-green-300"
-                                      : isWarning
-                                      ? "bg-yellow-50 dark:bg-yellow-950/20 border-yellow-500 text-yellow-700 dark:text-yellow-300"
-                                      : isRepair
-                                      ? "bg-blue-50 dark:bg-blue-950/20 border-blue-500 text-blue-700 dark:text-blue-300"
-                                      : isRetry
-                                      ? "bg-purple-50 dark:bg-purple-950/20 border-purple-500 text-purple-700 dark:text-purple-300"
-                                      : "bg-background border-gray-300 dark:border-gray-700"
-                                  }`}
-                                >
-                                  <div className="flex items-start justify-between gap-2">
-                                    <span className="flex-1 wrap-break-word">{log.message}</span>
-                                    {log.progress !== undefined && (
-                                      <span className="text-xs text-muted-foreground shrink-0">
-                                        {Math.round(log.progress)}%
-                                      </span>
-                                    )}
-                                  </div>
-                                  {log.stage && (
-                                    <div className="text-xs text-muted-foreground mt-1">
-                                      Stage: {log.stage}
-                                    </div>
-                                  )}
+                                <div key={idx} className={`${lineCl} whitespace-pre-wrap wrap-break-word`}>
+                                  <span className="text-slate-500 select-none">[{ev.ts ? new Date(ev.ts).toLocaleTimeString() : ""}]</span>{" "}
+                                  <span className="text-slate-400">[{ev.step_name || ev.stage || "info"}]</span>{" "}
+                                  {ev.message}
                                 </div>
                               );
                             }) : null}
-                            
-                            {/* ALWAYS show backend logs during training (updates every 200ms) */}
-                            {training && backendLogTail.length > 0 && (
-                              <div className="text-xs text-muted-foreground space-y-1 mt-4 pt-4 border-t">
-                                <div className="mb-2 font-semibold text-foreground">
-                                  Backend Logs (live - updates every 200ms):
+                            {/* Fallback: WebSocket live logs */}
+                            {liveLogs.length > 0 && !runState?.events?.length ? liveLogs.slice(-50).map((log: any, idx: number) => {
+                              const isError = log.message?.includes("❌") || log.message?.includes("failed");
+                              const isSuccess = log.message?.includes("✅") || log.message?.includes("succeeded");
+                              const lineCl = isError ? "text-red-400" : isSuccess ? "text-emerald-300" : "text-green-400";
+                              return (
+                                <div key={idx} className={`${lineCl} whitespace-pre-wrap wrap-break-word`}>
+                                  {log.stage ? `[${log.stage}] ` : ""}{log.message}
                                 </div>
-                                {backendLogTail.slice(-25).map((line, idx) => {
-                                  // Highlight important lines
-                                  const isImportant = line.includes("Run ID") || line.includes("🚀") || line.includes("✅") || line.includes("❌") || line.includes("⚠️") || line.includes("🔧") || line.includes("🔄") || line.includes("[init]") || line.includes("[train]") || line.includes("[plan]");
-                                  return (
-                                    <div 
-                                      key={idx} 
-                                      className={`p-1 rounded whitespace-pre-wrap wrap-break-word ${
-                                        isImportant ? "text-foreground font-medium bg-muted/50" : ""
-                                      }`}
-                                    >
-                                      {line}
-                                    </div>
-                                  );
-                                })}
+                              );
+                            }) : null}
+                            {/* Always show backend raw tail when training (real-time file read) */}
+                            {training && backendLogTail.length > 0 && (
+                              <>
+                                <div className="text-slate-500 mt-2 pt-2 border-t border-slate-700"># backend.log (live)</div>
+                                {backendLogTail.slice(-40).map((line: string, idx: number) => (
+                                  <div key={`raw-${idx}`} className="text-slate-400 whitespace-pre-wrap wrap-break-word">
+                                    {line}
+                                  </div>
+                                ))}
+                              </>
+                            )}
+                            {training && (
+                              <div className="text-amber-400 mt-1 flex items-center gap-1">
+                                <span className="inline-block w-2 h-3 bg-amber-400 animate-pulse" />
+                                {logStreamStatus === "streaming" ? "Live" : "Connecting…"}
                               </div>
                             )}
                             <div ref={logsEndRef} />
                           </div>
                         ) : (
-                          <div className="text-center text-muted-foreground py-8">
-                            <div className="w-8 h-8 rounded-full border-2 border-primary/30 border-t-primary animate-spin mx-auto mb-2" />
-                            <p>Waiting for activity logs...</p>
-                            {training && (
-                              <p className="text-xs mt-2">Training in progress... logs will appear here</p>
+                          <div className="text-slate-500 py-6 text-center">
+                            {training ? (
+                              <>
+                                <div className="inline-block w-3 h-4 bg-green-500 animate-pulse mb-2" />
+                                <p>{logStreamStatus === "connecting" ? "Connecting to run…" : "Waiting for stream…"} Logs will appear here in real time.</p>
+                                {!backendOnline && (
+                                  <p className="text-amber-400 mt-2 text-xs">Backend may be offline. Check that it is running on port 8000.</p>
+                                )}
+                              </>
+                            ) : (
+                              <p>Start training to see live logs.</p>
                             )}
                           </div>
                         )}
                       </div>
 
-                      {/* What happened? — Agent event timeline (failures, diagnoses, retries) */}
+                      {/* What happened? — compact summary (same events, shown below terminal) */}
                       {(currentRunId && runState?.events?.length) ? (
-                        <div className="space-y-2 mt-4">
-                          <h4 className="text-sm font-semibold">What happened? (execution timeline)</h4>
-                          <div className="rounded-lg border bg-muted/20 p-3 max-h-[280px] overflow-y-auto space-y-0">
-                            <div className="text-xs text-muted-foreground mb-2">
-                              Status: {runState.status} · Attempt: {runState.attempt_count} · Step: {runState.current_step || "—"}
-                            </div>
-                            <div className="relative border-l-2 border-muted pl-3 space-y-2">
-                              {runState.events.slice(-80).map((ev: any, idx: number) => {
-                                const isFailed = ev.status === "failed" || (ev.message && (ev.message.includes("❌") || ev.message.includes("failed") || ev.message.includes("REFUSED")));
-                                const isDiagnose = (ev.step_name || ev.stage || "").toLowerCase().includes("diagnose");
-                                const isRetry = (ev.step_name || ev.stage || "").toLowerCase().includes("retry");
-                                const isRepair = (ev.step_name || ev.stage || "").toLowerCase().includes("repair");
-                                return (
-                                  <div
-                                    key={idx}
-                                    className={`text-xs pl-2 py-1 rounded-r border-l-2 ${
-                                      isFailed ? "border-red-500 bg-red-50 dark:bg-red-950/20" :
-                                      isDiagnose ? "border-blue-500 bg-blue-50 dark:bg-blue-950/20" :
-                                      isRetry ? "border-purple-500 bg-purple-50 dark:bg-purple-950/20" :
-                                      isRepair ? "border-amber-500 bg-amber-50 dark:bg-amber-950/20" :
-                                      "border-muted bg-background"
-                                    }`}
-                                  >
-                                    <div className="font-medium text-muted-foreground">{ev.step_name || ev.stage || "info"}</div>
-                                    <div className="mt-0.5 wrap-break-word">{ev.message}</div>
-                                    {ev.payload && Object.keys(ev.payload).length > 0 && (
-                                      <details className="mt-1">
-                                        <summary className="cursor-pointer text-muted-foreground hover:underline">Payload</summary>
-                                        <pre className="mt-1 p-2 rounded bg-muted/50 text-[10px] overflow-x-auto whitespace-pre-wrap">
-                                          {JSON.stringify(ev.payload, null, 1)}
-                                        </pre>
-                                      </details>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
+                        <div className="space-y-1 mt-2">
+                          <p className="text-xs text-muted-foreground">
+                            Status: <strong>{runState.status}</strong> · Attempts: <strong>{runState.attempt_count}</strong> · Step: {runState.current_step || "—"}
+                          </p>
                         </div>
                       ) : null}
                     </div>
@@ -1374,6 +1381,26 @@ export default function Intent2ModelWizard() {
                             <p className="text-xs text-muted-foreground">Same as table — cross-validation score</p>
                           </div>
                         )}
+                        {/* Overfitting / performance note when CV << in-sample */}
+                        {(() => {
+                          const cvScore = model.primary_metric != null ? Number(model.primary_metric) : null;
+                          const inSampleR2 = model.metrics?.r2 != null ? Number(model.metrics.r2) : null;
+                          const inSampleAcc = model.metrics?.accuracy != null ? Number(model.metrics.accuracy) : null;
+                          const gap = inSampleR2 != null && cvScore != null ? inSampleR2 - cvScore : (inSampleAcc != null && cvScore != null ? inSampleAcc - cvScore : null);
+                          if (gap != null && gap > 0.15 && cvScore != null) {
+                            return (
+                              <div className="rounded-md border border-amber-500/50 bg-amber-50 dark:bg-amber-950/30 p-2 text-xs">
+                                <p className="font-medium text-amber-800 dark:text-amber-200">⚠️ Why does performance look bad?</p>
+                                <p className="text-amber-700 dark:text-amber-300 mt-0.5">
+                                  CV score ({cvScore.toFixed(2)}) is much lower than in-sample ({inSampleR2 != null ? inSampleR2.toFixed(2) : inSampleAcc?.toFixed(2)}). 
+                                  That usually means <strong>overfitting</strong> — the model fits the training data well but won’t generalize as well. 
+                                  Real-world performance is better estimated by the <strong>CV (table)</strong> number.
+                                </p>
+                              </div>
+                            );
+                          }
+                          return null;
+                        })()}
                         <p className="text-xs font-medium text-muted-foreground">In-sample metrics</p>
                         <div className="grid grid-cols-2 gap-2">
                           {Object.entries(model.metrics || {})
@@ -1574,7 +1601,11 @@ export default function Intent2ModelWizard() {
                         ) : (
                           <div className="space-y-2">
                             <p className="text-sm font-semibold">Prediction:</p>
-                            <p className="text-lg font-bold">{String(predictionResult.prediction)}</p>
+                            <p className="text-lg font-bold">
+                              {predictionResult.prediction !== undefined && predictionResult.prediction !== null
+                                ? String(predictionResult.prediction)
+                                : "—"}
+                            </p>
                             {predictionResult.probabilities && (
                               <div className="mt-2">
                                 <p className="text-xs text-muted-foreground mb-1">Probabilities</p>

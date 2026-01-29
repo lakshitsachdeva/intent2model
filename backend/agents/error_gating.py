@@ -250,3 +250,64 @@ def detect_variance_fit_illusion(
         return True, f"Variance-fit illusion: R² = {r2:.3f} but normalized_RMSE = {normalized_rmse:.3f}, normalized_MAE = {normalized_mae:.3f}"
     
     return False, "No variance-fit illusion detected"
+
+
+def check_holdout_baseline_sanity(
+    holdout_mae: float,
+    baseline_mae: float,
+    *,
+    max_ratio: float = 0.75,
+) -> Tuple[bool, str]:
+    """
+    Hard sanity rule after CV: if model MAE > max_ratio * baseline MAE → FAIL.
+    Baseline is naive predictor (mean or median). Prevents over-trusting CV.
+
+    Returns:
+        (passed: bool, message: str)
+    """
+    if baseline_mae <= 0:
+        return True, "Baseline MAE is zero or negative; skipping sanity check"
+    ratio = holdout_mae / baseline_mae
+    if ratio > max_ratio:
+        return False, (
+            f"Holdout sanity failed: model MAE ({holdout_mae:.4f}) > {max_ratio} * baseline MAE ({baseline_mae:.4f}) "
+            f"(ratio={ratio:.3f}). Model does not beat naive predictor on held-out data."
+        )
+    return True, "Holdout sanity passed"
+
+
+def check_model_quality_minimum(
+    metrics: Dict[str, float],
+    task: str,
+    *,
+    cv_mean: Optional[float] = None,
+) -> Tuple[bool, List[str]]:
+    """
+    Reinforcing gate: reject models that are effectively useless even if they pass error gates.
+    Use CV mean when available for generalization; otherwise in-sample metrics.
+    
+    Returns:
+        (passed: bool, failed_reasons: List[str])
+    """
+    failed = []
+    
+    if task == "regression":
+        # Prefer CV R² if provided (generalization)
+        r2 = cv_mean if cv_mean is not None else metrics.get("R²", metrics.get("r2", -float("inf")))
+        normalized_rmse = metrics.get("normalized_RMSE", float("inf"))
+        # Reject: explains almost no variance and high error
+        if r2 < 0.05 and normalized_rmse > 0.85:
+            failed.append(f"Reinforcing gate: model explains almost no variance (R²={r2:.3f}) and error is high (normalized_RMSE={normalized_rmse:.3f})")
+        if r2 < -0.5:
+            failed.append(f"Reinforcing gate: R² = {r2:.3f} — worse than predicting mean")
+    else:
+        # Classification: prefer CV accuracy if provided
+        acc = cv_mean if cv_mean is not None else metrics.get("accuracy", metrics.get("Accuracy", -float("inf")))
+        if acc < 0.4:
+            failed.append(f"Reinforcing gate: accuracy = {acc:.3f} — below 40% (worse than random for many problems)")
+        # Macro F1 if available
+        f1 = metrics.get("f1_macro", metrics.get("f1", None))
+        if f1 is not None and f1 < 0.25:
+            failed.append(f"Reinforcing gate: macro F1 = {f1:.3f} — model is not discriminative")
+    
+    return (len(failed) == 0, failed)

@@ -14,6 +14,32 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 import pandas as pd
 from typing import Dict, List, Any, Optional
 
+# Model complexity for anti-overfitting penalty (effective_score = cv_score - 0.05 * complexity)
+# Linear = 0, Ridge/Lasso = 1, GB = 2, RF = 3, XGB/SVM/NN = 4
+MODEL_COMPLEXITY: Dict[str, int] = {
+    # Regression
+    "linear_regression": 0,
+    "ridge": 1,
+    "lasso": 1,
+    "elastic_net": 1,
+    "svm": 4,
+    "gradient_boosting": 2,
+    "random_forest": 3,
+    "xgboost": 4,
+    # Classification
+    "logistic_regression": 0,
+    "naive_bayes": 0,
+    "svm": 4,
+    "gradient_boosting": 2,
+    "random_forest": 3,
+    "xgboost": 4,
+}
+
+
+def get_model_complexity(model_name: str) -> int:
+    """Return complexity tier (0=simplest, 4=most complex) for penalty."""
+    return MODEL_COMPLEXITY.get(model_name, 3)
+
 
 class FrequencyEncoder(BaseEstimator, TransformerMixin):
     """
@@ -264,7 +290,7 @@ def _get_classification_model(model_name: str):
     """Get classification model by name."""
     models = {
         "logistic_regression": LogisticRegression(max_iter=1000, random_state=42),
-        "random_forest": RandomForestClassifier(n_estimators=100, random_state=42),
+        "random_forest": RandomForestClassifier(n_estimators=100, random_state=42, max_depth=10),
         "xgboost": None,  # Will be handled separately if available
         "svm": None,  # Will be handled separately
         "naive_bayes": None,  # Will be handled separately
@@ -295,7 +321,8 @@ def _get_classification_model(model_name: str):
     if model_name == "gradient_boosting":
         try:
             from sklearn.ensemble import GradientBoostingClassifier
-            return GradientBoostingClassifier(random_state=42)
+            # Shallow by default (anti-overfitting)
+            return GradientBoostingClassifier(random_state=42, max_depth=3, n_estimators=100)
         except ImportError:
             raise ImportError("Gradient Boosting requires sklearn")
     
@@ -309,7 +336,7 @@ def _get_regression_model(model_name: str):
     """Get regression model by name."""
     models = {
         "linear_regression": LinearRegression(),
-        "random_forest": RandomForestRegressor(n_estimators=100, random_state=42),
+        "random_forest": RandomForestRegressor(n_estimators=100, random_state=42, max_depth=10),
         "xgboost": None,  # Will be handled separately if available
         "svm": None,  # Will be handled separately
         "gradient_boosting": None,  # Will be handled separately
@@ -334,7 +361,8 @@ def _get_regression_model(model_name: str):
     if model_name == "gradient_boosting":
         try:
             from sklearn.ensemble import GradientBoostingRegressor
-            return GradientBoostingRegressor(random_state=42)
+            # Shallow by default (anti-overfitting)
+            return GradientBoostingRegressor(random_state=42, max_depth=3, n_estimators=100)
         except ImportError:
             raise ImportError("Gradient Boosting requires sklearn")
     

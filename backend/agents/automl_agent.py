@@ -416,7 +416,7 @@ def _rule_based_plan(profile: Dict[str, Any], requested_target: Optional[str]) -
         missing = float(profile.get("missing_percent", {}).get(c, 0.0))
         impute = "median" if c in profile.get("numeric_cols", []) and missing > 0 else ("most_frequent" if missing > 0 else "none")
         encode = "none" if c in profile.get("numeric_cols", []) else ("one_hot" if int(nunique.get(c, 0)) <= 30 else "frequency")
-        scale = "none"
+        scale = "standard" if (kind == "continuous" and task_type == "regression") else "none"
 
         feature_transforms.append(
             {
@@ -431,10 +431,11 @@ def _rule_based_plan(profile: Dict[str, Any], requested_target: Optional[str]) -
             }
         )
 
-    # Model candidates: include baselines + 1-2 robust models
+    # Model candidates: include baselines + ridge/lasso (good for correlated features like iris)
     if task_type == "regression":
         models = [
             {"model_name": "linear_regression", "reason_md": "Baseline linear model for calibration.", "params": {}},
+            {"model_name": "ridge", "reason_md": "L2 regularized; good when features are correlated (e.g. iris).", "params": {}},
             {"model_name": "random_forest", "reason_md": "Nonlinear baseline; robust to mixed feature effects.", "params": {"n_estimators": 300}},
             {"model_name": "gradient_boosting", "reason_md": "Strong tabular booster; can improve over RF on structured data.", "params": {}},
         ]

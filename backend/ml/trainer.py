@@ -6,16 +6,32 @@ Handles cross-validation, model training, and metric calculation.
 
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import cross_val_score, cross_validate, StratifiedKFold, KFold
+from sklearn.model_selection import cross_val_score, cross_validate, StratifiedKFold, KFold, train_test_split
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
     mean_squared_error, mean_absolute_error, r2_score
 )
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import warnings
 
-from .pipeline_builder import build_pipeline
+from .pipeline_builder import build_pipeline, get_model_complexity
 from .profiler import profile_dataset
+
+# Opinionated model search order: simple first, complex last (anti-overfitting)
+REGRESSION_MODEL_ORDER = [
+    "ridge", "lasso", "linear_regression",  # Linear first
+    "gradient_boosting", "random_forest",   # Then GB (shallow), RF (depth-limited)
+    "svm", "xgboost",                       # Complex last
+]
+CLASSIFICATION_MODEL_ORDER = [
+    "logistic_regression", "naive_bayes",   # Linear/simple first
+    "gradient_boosting", "random_forest",
+    "svm", "xgboost",
+]
+
+COMPLEXITY_PENALTY = 0.05  # effective_score = cv_score - COMPLEXITY_PENALTY * model_complexity
+HOLDOUT_FRACTION = 0.08    # 5-10% never-touched holdout
+HOLDOUT_BASELINE_MAX_RATIO = 0.75  # Fail if model_MAE > 0.75 * baseline_MAE
 
 
 def _safe_n_splits_classification(y: np.ndarray, desired: int = 5) -> int:
@@ -243,12 +259,31 @@ def train_regression(
             "model": "random_forest"
         }
     
-    # Prepare data
-    X = df.drop(columns=[target])
-    y = df[target]
-    
+    # Holdout: never-touched 5-10% for sanity check after CV
+    n_holdout = max(5, int(len(df) * HOLDOUT_FRACTION))
+    n_holdout = min(n_holdout, len(df) - 10)  # keep enough for train
+    if n_holdout >= 5 and len(df) - n_holdout >= 10:
+        df_train_val, df_holdout = train_test_split(
+            df, test_size=n_holdout, random_state=42, shuffle=True
+        )
+    else:
+        df_train_val = df
+        df_holdout = None
+
+    # Prepare data (train_val only for CV and fit)
+    X = df_train_val.drop(columns=[target])
+    y = df_train_val[target].copy()
+    target_transformation = (config or {}).get("target_transformation")
+    if target_transformation == "log1p":
+        try:
+            y_min = float(y.min())
+            if y_min > -0.99:
+                y = np.log1p(y)
+        except Exception:
+            target_transformation = None
+
     # Get column types
-    profile = profile_dataset(df)
+    profile = profile_dataset(df_train_val)
     numeric_cols = profile["numeric_cols"]
     categorical_cols = profile["categorical_cols"]
     
@@ -317,7 +352,7 @@ def train_regression(
     if metric in ["rmse", "mae"]:
         cv_scores = [-s for s in cv_scores]
     
-    # Train final model on full data
+    # Train final model on full train_val data
     pipeline.fit(X, y)
     
     # Calculate all metrics on full training set
@@ -336,7 +371,8 @@ def train_regression(
         compute_target_stats,
         compute_normalized_metrics,
         check_regression_error_gates,
-        detect_variance_fit_illusion
+        detect_variance_fit_illusion,
+        check_holdout_baseline_sanity,
     )
     
     target_stats = compute_target_stats(y)
@@ -347,6 +383,37 @@ def train_regression(
     metrics["target_mean"] = target_stats["mean"]
     metrics["target_std"] = target_stats["std"]
     metrics["target_IQR"] = target_stats["IQR"]
+    
+    # Holdout sanity: model must beat naive baseline (median predictor)
+    holdout_residual_std = None
+    if df_holdout is not None and len(df_holdout) >= 5:
+        X_holdout = df_holdout.drop(columns=[target])
+        y_holdout_orig = df_holdout[target].values
+        try:
+            pred_holdout = pipeline.predict(X_holdout)
+            if target_transformation == "log1p":
+                pred_holdout_orig = np.expm1(pred_holdout)
+            else:
+                pred_holdout_orig = pred_holdout
+            holdout_mae = float(np.mean(np.abs(y_holdout_orig - pred_holdout_orig)))
+            baseline_pred = float(np.median(df_train_val[target].values))
+            baseline_mae = float(np.mean(np.abs(y_holdout_orig - baseline_pred)))
+            sanity_passed, sanity_msg = check_holdout_baseline_sanity(
+                holdout_mae, baseline_mae, max_ratio=HOLDOUT_BASELINE_MAX_RATIO
+            )
+            if not sanity_passed:
+                raise RuntimeError(
+                    f"HOLDOUT SANITY FAILED: {sanity_msg} "
+                    f"(holdout_mae={holdout_mae:.4f}, baseline_mae={baseline_mae:.4f})"
+                )
+            holdout_residual_std = float(np.std(y_holdout_orig - pred_holdout_orig))
+            if np.isnan(holdout_residual_std) or holdout_residual_std <= 0:
+                holdout_residual_std = target_stats.get("std") or 1.0
+        except RuntimeError:
+            raise
+        except Exception as e:
+            # If holdout predict fails (e.g. column mismatch), do not fail training but skip uncertainty
+            pass
     
     # Check error gates
     gates_passed, failed_gates = check_regression_error_gates(metrics, target_stats)
@@ -409,15 +476,20 @@ def train_regression(
     except:
         pass
     
-    return {
+    out = {
         "best_model": pipeline,
         "metrics": metrics,
         "cv_scores": cv_scores,
         "cv_mean": float(np.mean(cv_scores)) if cv_scores else None,
         "cv_std": float(np.std(cv_scores)) if cv_scores else None,
         "feature_importance": feature_importance,
-        "label_encoder": None  # Regression doesn't need label encoder
+        "label_encoder": None,  # Regression doesn't need label encoder
     }
+    if holdout_residual_std is not None:
+        out["holdout_residual_std"] = holdout_residual_std
+    if target_transformation:
+        out["target_transformation"] = target_transformation
+    return out
 
 
 def compare_models(
@@ -456,6 +528,13 @@ def compare_models(
     if target in categorical_cols:
         categorical_cols.remove(target)
     
+    # Opinionated model search order: simple first, complex must earn place
+    order_list = REGRESSION_MODEL_ORDER if task == "regression" else CLASSIFICATION_MODEL_ORDER
+    order_rank = {m: i for i, m in enumerate(order_list)}
+    def _model_sort_key(name: str) -> int:
+        return order_rank.get(name, 999)
+    model_candidates = sorted(model_candidates, key=_model_sort_key)
+    
     # Prepare X for validation
     X = df.drop(columns=[target])
     y = df[target]
@@ -480,13 +559,24 @@ def compare_models(
                 result = train_regression(df, target, metric, config)
             
             # Primary metric for ranking/table: use CV mean when available (generalization), else in-sample
-            # This keeps table "Primary Metric" and "CV Mean" aligned and avoids table-vs-card discrepancy.
             cv_mean = result.get("cv_mean")
             primary_metric_value = (cv_mean if cv_mean is not None else result["metrics"].get(metric))
             if primary_metric_value is None:
                 primary_metric_value = result["metrics"].get(metric, 0)
+            # Complexity penalty: effective_score = cv_score - 0.05 * complexity (complex must earn place)
+            complexity = get_model_complexity(model_name)
+            penalty = COMPLEXITY_PENALTY * complexity
+            # For "higher is better" metrics (r2, accuracy, f1), subtract penalty
+            # For "lower is better" (rmse, mae), add penalty so effective "score" is worse
+            reverse = metric not in ["rmse", "mae"]
+            if reverse:
+                effective = (primary_metric_value - penalty) if primary_metric_value is not None else -float("inf")
+            else:
+                effective = (primary_metric_value + penalty) if primary_metric_value is not None else float("inf")
             result["model_name"] = model_name
             result["primary_metric"] = primary_metric_value
+            result["effective_score"] = effective
+            result["complexity"] = complexity
             results.append(result)
         except Exception as e:
             print(f"Model {model_name} failed: {e}")
@@ -538,9 +628,9 @@ def compare_models(
             )
         raise ValueError(error_msg)
     
-    # Sort by primary metric (higher is better for most metrics, except rmse/mae)
+    # Sort by effective score (CV score minus complexity penalty; simple models favored)
     reverse = metric not in ["rmse", "mae"]
-    results.sort(key=lambda x: x["primary_metric"], reverse=reverse)
+    results.sort(key=lambda x: x.get("effective_score", x["primary_metric"]), reverse=reverse)
     
     best_result = results[0].copy()
 
