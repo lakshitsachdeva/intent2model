@@ -1563,12 +1563,13 @@ export default function Intent2ModelWizard() {
                     Cancel
                   </Button>
                   {selectedLlmProvider === "gemini" && (
-                  <Button
-                    onClick={handleSetApiKey}
-                    disabled={isSettingApiKey}
-                  >
-                    {isSettingApiKey ? "Setting..." : apiKey.trim() ? "Set Custom Key" : "Use Default Key"}
-                  </Button>
+                    <Button
+                      onClick={handleSetApiKey}
+                      disabled={isSettingApiKey}
+                    >
+                      {isSettingApiKey ? "Setting..." : apiKey.trim() ? "Set Custom Key" : "Use Default Key"}
+                    </Button>
+                  )}
                 </CardFooter>
               </Card>
             </motion.div>
