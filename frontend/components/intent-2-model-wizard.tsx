@@ -561,12 +561,12 @@ export default function Intent2ModelWizard() {
 
   // Fallback: poll backend logs if WS is failing or dev panel is open (WS is primary).
   useEffect(() => {
-    if (!training) return;
-    if (!showDevLogs && !wsFailed) return;
+    const shouldPoll = training && (showDevLogs || wsFailed);
+    if (!shouldPoll) return;
     fetchBackendLogTail();
     const t = setInterval(() => fetchBackendLogTail(), wsFailed ? 800 : 5000);
     return () => clearInterval(t);
-  }, [showDevLogs, training, wsFailed]);
+  }, [training && (showDevLogs || wsFailed), wsFailed]);
 
   const selectModel = async (modelName: string) => {
     if (!trainedModel?.run_id) return;
