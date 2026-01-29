@@ -245,20 +245,7 @@ def _log_run_event_sync(run_id: str, message: str, stage: Optional[str] = None, 
     print(f"[{run_id[:8]}] {stage_str} {progress_str} {message}", flush=True)
     
     # Broadcast to WebSocket clients (non-blocking)
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.create_task(_broadcast_log(entry))
-        else:
-            loop.run_until_complete(_broadcast_log(entry))
-    except RuntimeError:
-        # No event loop, create one
-        try:
-            asyncio.run(_broadcast_log(entry))
-        except Exception:
-            pass
-    except Exception:
-        pass  # Ignore WebSocket errors
+    _broadcast_log_sync(entry)
 
 
 def _log_run_event(run_id: str, message: str, stage: Optional[str] = None, progress: Optional[float] = None):
