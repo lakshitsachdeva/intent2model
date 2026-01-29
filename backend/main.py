@@ -213,6 +213,30 @@ async def _broadcast_log(entry: Dict[str, Any]):
     websocket_connections.difference_update(disconnected)
 
 
+def _broadcast_log_sync(entry: Dict[str, Any]):
+    """Synchronous wrapper for async broadcast (for use in sync contexts)."""
+    if not websocket_connections:
+        return
+    
+    # Use asyncio to run the async function
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If loop is running, schedule the task
+            asyncio.create_task(_broadcast_log(entry))
+        else:
+            # If no loop is running, run it
+            loop.run_until_complete(_broadcast_log(entry))
+    except RuntimeError:
+        # No event loop exists, create one
+        try:
+            asyncio.run(_broadcast_log(entry))
+        except Exception:
+            pass  # Ignore errors
+    except Exception:
+        pass  # Ignore errors
+
+
 def _log_run_event_sync(run_id: str, message: str, stage: Optional[str] = None, progress: Optional[float] = None):
     """Synchronous version that queues async broadcast."""
     if not run_id:
