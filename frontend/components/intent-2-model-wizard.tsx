@@ -29,6 +29,14 @@ import { Separator } from "@/components/ui/separator";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
 
 export default function Intent2ModelWizard() {
+  // Backend base URLs
+  // - Default: `http://localhost:8000`
+  // - If you open the frontend via LAN / different hostname, this keeps working.
+  const BACKEND_HOST =
+    typeof window !== "undefined" ? window.location.hostname : "localhost";
+  const BACKEND_HTTP_BASE = `http://${BACKEND_HOST}:8000`;
+  const BACKEND_WS_BASE = `ws://${BACKEND_HOST}:8000`;
+
   const [step, setStep] = useState(1);
   const [files, setFiles] = useState<File[]>([]);
   const [training, setTraining] = useState(false);
@@ -62,10 +70,12 @@ export default function Intent2ModelWizard() {
   const [trainingError, setTrainingError] = useState<string | null>(null);
   const logsEndRef = React.useRef<HTMLDivElement>(null);
   const wsRef = React.useRef<WebSocket | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [wsFailed, setWsFailed] = useState(false);
 
   const fetchLlmStatus = async () => {
     try {
-      const resp = await fetch("http://localhost:8000/health");
+      const resp = await fetch(`${BACKEND_HTTP_BASE}/health`);
       const data = await resp.json();
       setLlmStatus(data);
       setBackendOnline(true);
@@ -107,7 +117,7 @@ export default function Intent2ModelWizard() {
     setApiKeyStatus(null);
 
     try {
-      const resp = await fetch("http://localhost:8000/api/set-api-key", {
+      const resp = await fetch(`${BACKEND_HTTP_BASE}/api/set-api-key`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ api_key: apiKey, provider: selectedLlmProvider }),
@@ -158,7 +168,7 @@ export default function Intent2ModelWizard() {
       setDatasetSummary(null);
       // Fetch visualization summary
       try {
-        const s = await fetch(`http://localhost:8000/dataset/${uploadResult.dataset_id}/summary`);
+        const s = await fetch(`${BACKEND_HTTP_BASE}/dataset/${uploadResult.dataset_id}/summary`);
         const sj = await s.json();
         setDatasetSummary(sj);
       } catch (e) {
@@ -170,7 +180,7 @@ export default function Intent2ModelWizard() {
       
       // Check if it's a network error
       if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
-        alert('⚠️ Cannot connect to backend. Make sure backend is running on http://localhost:8000\n\nRun: cd backend && python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload');
+        alert(`⚠️ Cannot connect to backend. Make sure backend is running on ${BACKEND_HTTP_BASE}\n\nRun: cd backend && python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload`);
       }
       
       // Don't proceed; training needs a dataset_id
@@ -183,7 +193,7 @@ export default function Intent2ModelWizard() {
   const uploadDataset = async (file: File): Promise<any> => {
     const formData = new FormData();
     formData.append("file", file);
-    const response = await fetch("http://localhost:8000/upload", {
+    const response = await fetch(`${BACKEND_HTTP_BASE}/upload`, {
       method: "POST",
       body: formData,
       // Don't set Content-Type header - browser will set it with boundary for FormData
@@ -258,7 +268,7 @@ export default function Intent2ModelWizard() {
         fetchBackendLogTail();
       }, 200);
 
-      const response = await fetch('http://localhost:8000/train', {
+      const response = await fetch(`${BACKEND_HTTP_BASE}/train`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -323,7 +333,7 @@ export default function Intent2ModelWizard() {
       } else {
         // Try with first available column if specified column fails
         if (availableColumns.length > 0 && targetColumn !== availableColumns[0]) {
-          const fallbackResponse = await fetch('http://localhost:8000/train', {
+          const fallbackResponse = await fetch(`${BACKEND_HTTP_BASE}/train`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -365,7 +375,7 @@ export default function Intent2ModelWizard() {
 
   const fetchRunLogs = async (runId: string) => {
     try {
-      const resp = await fetch(`http://localhost:8000/run/${runId}/logs?limit=200`);
+      const resp = await fetch(`${BACKEND_HTTP_BASE}/run/${runId}/logs?limit=200`);
       if (!resp.ok) {
         const err = await resp.text();
         setDevLogsError(err || "Failed to fetch logs");
@@ -429,7 +439,7 @@ export default function Intent2ModelWizard() {
   const fetchBackendLogTail = async () => {
     try {
       // Show ALL backend logs (no run_id filtering)
-      const resp = await fetch("http://localhost:8000/logs/backend?limit=500");
+      const resp = await fetch(`${BACKEND_HTTP_BASE}/logs/backend?limit=500`);
       const data = await resp.json();
       const lines = Array.isArray(data.lines) ? data.lines : [];
       setBackendLogTail(lines);
@@ -462,11 +472,13 @@ export default function Intent2ModelWizard() {
     }
 
     // Connect to WebSocket
-    const ws = new WebSocket("ws://localhost:8000/ws/logs");
+    const ws = new WebSocket(`${BACKEND_WS_BASE}/ws/logs`);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log("✅ WebSocket connected for real-time logs");
+      setWsConnected(true);
+      setWsFailed(false);
+      setBackendOnline(true);
     };
 
     ws.onmessage = (event) => {
@@ -509,21 +521,23 @@ export default function Intent2ModelWizard() {
     };
 
     ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-      setBackendOnline(false);
+      // Browser WS errors are intentionally opaque ("{}"). Don't spam console and don't mark backend offline
+      // because HTTP may still work. We fall back to HTTP polling in that case.
+      setWsConnected(false);
+      setWsFailed(true);
     };
 
     ws.onclose = () => {
-      console.log("WebSocket closed");
       wsRef.current = null;
+      setWsConnected(false);
       // Try to reconnect after 2 seconds if still training
       const shouldReconnect = training || showDevLogs;
       if (shouldReconnect) {
         setTimeout(() => {
           // Check again if we should reconnect
           if (training || showDevLogs) {
-            // Trigger reconnection by updating state
-            setBackendOnline(false);
+            // Reconnect handled by effect re-run (training/showDevLogs still true)
+            setWsFailed(true);
           }
         }, 2000);
       }
@@ -545,13 +559,14 @@ export default function Intent2ModelWizard() {
     };
   }, [training, showDevLogs]); // Removed currentRunId from dependencies - it's set inside the effect
 
-  // Fallback: Still poll backend logs for initial connection (before WebSocket is ready)
+  // Fallback: poll backend logs if WS is failing or dev panel is open (WS is primary).
   useEffect(() => {
-    if (!showDevLogs || !training) return;
+    if (!training) return;
+    if (!showDevLogs && !wsFailed) return;
     fetchBackendLogTail();
-    const t = setInterval(() => fetchBackendLogTail(), 5000); // Less frequent now (WebSocket is primary)
+    const t = setInterval(() => fetchBackendLogTail(), wsFailed ? 800 : 5000);
     return () => clearInterval(t);
-  }, [showDevLogs, training]);
+  }, [showDevLogs, training, wsFailed]);
 
   const selectModel = async (modelName: string) => {
     if (!trainedModel?.run_id) return;
@@ -559,7 +574,7 @@ export default function Intent2ModelWizard() {
       // Optimistic UI
       setSelectedModelName(modelName);
       setTrainedModel((prev: any) => ({ ...(prev || {}), selected_model: modelName }));
-      await fetch("http://localhost:8000/run/select-model", {
+      await fetch(`${BACKEND_HTTP_BASE}/run/select-model`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ run_id: trainedModel.run_id, model_name: modelName }),
@@ -581,7 +596,7 @@ export default function Intent2ModelWizard() {
         const num = Number(raw);
         features[col] = raw !== "" && !Number.isNaN(num) ? num : raw;
       }
-      const resp = await fetch("http://localhost:8000/predict", {
+      const resp = await fetch(`${BACKEND_HTTP_BASE}/predict`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ run_id: trainedModel.run_id, features }),
@@ -1362,35 +1377,35 @@ export default function Intent2ModelWizard() {
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                       <Button 
                         className="w-full" 
-                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/notebook`, '_blank')}
+                        onClick={() => window.open(`${BACKEND_HTTP_BASE}/download/${trainedModel.run_id}/notebook`, '_blank')}
                       >
                         📓 Notebook
                       </Button>
                       <Button 
                         variant="outline" 
                         className="w-full"
-                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/model`, '_blank')}
+                        onClick={() => window.open(`${BACKEND_HTTP_BASE}/download/${trainedModel.run_id}/model`, '_blank')}
                       >
                         💾 Model (.pkl)
                       </Button>
                       <Button 
                         variant="default" 
                         className="w-full bg-blue-600 hover:bg-blue-700"
-                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/report`, '_blank')}
+                        onClick={() => window.open(`${BACKEND_HTTP_BASE}/download/${trainedModel.run_id}/report`, '_blank')}
                       >
                         📊 Full Report
                       </Button>
                       <Button 
                         variant="outline" 
                         className="w-full"
-                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/readme`, '_blank')}
+                        onClick={() => window.open(`${BACKEND_HTTP_BASE}/download/${trainedModel.run_id}/readme`, '_blank')}
                       >
                         📄 README
                       </Button>
                       <Button 
                         variant="secondary" 
                         className="w-full col-span-2 sm:col-span-1"
-                        onClick={() => window.open(`http://localhost:8000/download/${trainedModel.run_id}/all`, '_blank')}
+                        onClick={() => window.open(`${BACKEND_HTTP_BASE}/download/${trainedModel.run_id}/all`, '_blank')}
                       >
                         📦 All (ZIP)
                       </Button>
