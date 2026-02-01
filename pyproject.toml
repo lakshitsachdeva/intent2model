@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "drift"
+name = "drift-ml"
 version = "0.1.1"
 description = "Terminal-first AutoML CLI - chat-based ML engineer"
 requires-python = ">=3.10"
