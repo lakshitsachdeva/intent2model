@@ -45,6 +45,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build engine binary
+        shell: bash
         run: |
           cd "$GITHUB_WORKSPACE"
           ls -la engine_build/ || true
