@@ -66,7 +66,7 @@ export default function Home() {
           </div>
 
           <p className="text-xl text-white/70 mb-12">
-            drift web coming soon
+            drift web — coming soon
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
