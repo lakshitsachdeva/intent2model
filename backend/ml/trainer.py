@@ -9,7 +9,7 @@ import numpy as np
 from sklearn.model_selection import cross_val_score, cross_validate, StratifiedKFold, KFold, train_test_split
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
-    mean_squared_error, mean_absolute_error, r2_score
+    mean_squared_error, mean_absolute_error, r2_score, confusion_matrix
 )
 from typing import Dict, List, Any, Optional, Tuple
 import warnings
@@ -175,6 +175,11 @@ def train_classification(
         "recall": recall_score(y_encoded, y_pred, average="macro", zero_division=0),
         "f1": f1_score(y_encoded, y_pred, average="macro", zero_division=0),
     }
+    # Confusion matrix for error analysis (labels = class indices; classes from le.classes_ for display)
+    cm = confusion_matrix(y_encoded, y_pred)
+    metrics["confusion_matrix"] = cm.tolist()
+    if le is not None and hasattr(le, "classes_"):
+        metrics["class_labels"] = le.classes_.tolist()
     
     # Add ROC AUC if binary or multiclass with probabilities
     if y_pred_proba is not None:
@@ -226,7 +231,9 @@ def train_classification(
         "cv_mean": float(np.mean(cv_scores)) if cv_scores else None,
         "cv_std": float(np.std(cv_scores)) if cv_scores else None,
         "feature_importance": feature_importance,
-        "label_encoder": le  # Return encoder for prediction
+        "label_encoder": le,
+        "confusion_matrix": metrics.get("confusion_matrix"),
+        "class_labels": metrics.get("class_labels"),
     }
 
 
@@ -580,6 +587,14 @@ def compare_models(
             results.append(result)
         except Exception as e:
             print(f"Model {model_name} failed: {e}")
+            reverse = metric not in ["rmse", "mae"]
+            results.append({
+                "model_name": model_name,
+                "primary_metric": None,
+                "failed": True,
+                "error": str(e)[:200],
+                "effective_score": -float("inf") if reverse else float("inf"),
+            })
             continue
     
     if not results:
@@ -628,11 +643,23 @@ def compare_models(
             )
         raise ValueError(error_msg)
     
-    # Sort by effective score (CV score minus complexity penalty; simple models favored)
+    # Best model = highest raw primary_metric (so e.g. SVM 0.81 beats Ridge 0.78), not effective_score
     reverse = metric not in ["rmse", "mae"]
-    results.sort(key=lambda x: x.get("effective_score", x["primary_metric"]), reverse=reverse)
-    
-    best_result = results[0].copy()
+    valid_results = [r for r in results if not r.get("failed") and r.get("primary_metric") is not None]
+    if not valid_results:
+        valid_results = [r for r in results if not r.get("failed")]
+    if not valid_results:
+        failed_names = [r.get("model_name") for r in results if r.get("failed")]
+        raise ValueError(
+            f"All models failed to train. Failed: {', '.join(failed_names or ['all'])}. "
+            "Check logs (e.g. XGBoost: pip install xgboost)."
+        )
+    def _best_key(r: Dict[str, Any]) -> float:
+        v = r.get("primary_metric")
+        if v is None:
+            return -float("inf") if reverse else float("inf")
+        return float(v)
+    best_result = max(valid_results, key=_best_key).copy()
 
     def _to_float(x):
         try:
@@ -645,8 +672,15 @@ def compare_models(
     def _json_safe_model_result(r: Dict[str, Any]) -> Dict[str, Any]:
         """
         Strip non-JSON-serializable objects (sklearn pipelines, label encoders, numpy types).
-        Keep only what the UI needs.
+        Keep only what the UI needs. Handles failed results (no metrics, failed=True).
         """
+        if r.get("failed"):
+            return {
+                "model_name": r.get("model_name"),
+                "primary_metric": None,
+                "failed": True,
+                "error": r.get("error", "Unknown error"),
+            }
         metrics = {k: _to_float(v) for k, v in (r.get("metrics") or {}).items()}
         cv_scores = [float(s) for s in (r.get("cv_scores") or [])]
         feature_importance = r.get("feature_importance")

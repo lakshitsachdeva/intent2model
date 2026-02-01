@@ -35,6 +35,11 @@ class FailureReport(BaseModel):
         description="Target statistics: mean, std, IQR, MAD, skew, min, max"
     )
     
+    residual_diagnostics: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Residual analysis: is_heteroscedastic, variance_ratio, description (for regression)"
+    )
+    
     feature_summary: Dict[str, Any] = Field(
         default_factory=dict,
         description="Feature preprocessing summary: feature_count_before, feature_count_after, dropped_features, encoded_features"
@@ -52,7 +57,12 @@ class FailureReport(BaseModel):
     
     previous_plan: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Snapshot of the AutoMLPlan that led to this failure"
+        description="Snapshot of the AutoMLPlan that led to this failure (legacy)"
+    )
+    
+    last_execution_plan: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Snapshot of the ExecutionPlan that led to this failure (agentic)"
     )
     
     error_message: str = Field(
@@ -82,8 +92,13 @@ class DiagnosisResponse(BaseModel):
     )
     
     plan_changes: Dict[str, Any] = Field(
-        ...,
-        description="Structured changes to apply to the AutoMLPlan. Keys: target_transformation, feature_transforms, model_selection, evaluation_metrics"
+        default_factory=dict,
+        description="Legacy: structured changes to apply. Prefer repair_plan for agentic flow."
+    )
+    
+    repair_plan: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Structured diff (RepairPlan) to apply to last ExecutionPlan for next attempt"
     )
     
     recovery_confidence: float = Field(

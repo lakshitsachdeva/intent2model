@@ -300,7 +300,8 @@ def _get_classification_model(model_name: str):
     if model_name == "xgboost":
         try:
             from xgboost import XGBClassifier
-            return XGBClassifier(random_state=42, eval_metric="logloss")
+            # mlogloss works for both binary and multi-class; logloss can fail on multi-class (e.g. Iris)
+            return XGBClassifier(random_state=42, eval_metric="mlogloss")
         except ImportError:
             raise ImportError("XGBoost not installed. Install with: pip install xgboost")
     

@@ -1,17 +1,244 @@
 """
-Generate artifacts: Jupyter notebook, pickle file, charts, README
+Generate artifacts: Jupyter notebook, pickle file, charts, README.
+
+Notebook is a LIVE REASONING SURFACE: attempt-based, repair diffs visible, refusal = no final model.
 """
 
 import json
 import pickle
 import base64
-from typing import Dict, Any, Optional, List, List
+from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from io import BytesIO, StringIO
 import numpy as np
+
+
+def _md_cell(source: str) -> Dict[str, Any]:
+    return {"cell_type": "markdown", "metadata": {}, "source": [source]}
+
+
+def _code_cell(source: List[str]) -> Dict[str, Any]:
+    return {"cell_type": "code", "execution_count": None, "metadata": {}, "source": source}
+
+
+def _repair_diff_summary(entry: Dict[str, Any]) -> str:
+    """One-line summary of what changed (RepairPlan diff)."""
+    diag = entry.get("diagnosis") or {}
+    plan_changes = diag.get("plan_changes") or diag.get("repair_plan") or {}
+    parts = []
+    if plan_changes.get("target_transformation"):
+        parts.append(f"target_transform → {plan_changes['target_transformation']}")
+    if plan_changes.get("drop_features"):
+        parts.append(f"drop_features → {plan_changes['drop_features']}")
+    if plan_changes.get("add_features"):
+        parts.append(f"add_features → {plan_changes['add_features']}")
+    if plan_changes.get("replace_model"):
+        parts.append(f"replace_model → {plan_changes['replace_model']}")
+    if plan_changes.get("reorder_models"):
+        parts.append(f"reorder_models → {plan_changes['reorder_models']}")
+    if plan_changes.get("change_encoding"):
+        parts.append(f"change_encoding → {plan_changes['change_encoding']}")
+    return "; ".join(parts) if parts else "(no structured diff)"
+
+
+def _build_attempt_based_cells(
+    df: pd.DataFrame,
+    target: str,
+    task: str,
+    config: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """
+    Build attempt-based notebook cells: Attempt 1 → Repair Proposal → Attempt 2 → ...
+    Returns (cells, is_refused_or_low_confidence).
+    """
+    from schemas.pipeline_schema import ExecutionPlan
+    from agents.plan_compiler import (
+        compile_preprocessing_code_from_execution_plan,
+        compile_model_code_from_execution_plan,
+        compile_metrics_code_from_execution_plan,
+        compile_pipeline_code_from_execution_plan,
+        IncompleteExecutionPlan,
+        RefuseCodeGeneration,
+    )
+    cells: List[Dict[str, Any]] = []
+    structural_plan = (config or {}).get("structural_plan") or {}
+    execution_plans = (config or {}).get("execution_plans") or []
+    failure_history = (config or {}).get("failure_history") or []
+    refused = (config or {}).get("refused", False)
+
+    # Structural Plan (once) — LLM writes code (Cursor-style); code below is LLM output
+    if structural_plan and isinstance(structural_plan, dict):
+        sp = structural_plan
+        body = (
+            "The **code** in this notebook was **written by an LLM** (Cursor-style), not compiled from a plan.\n\n"
+            f"**Target:** {sp.get('inferred_target', '—')} (confidence: {sp.get('target_confidence', 0):.2f})\n"
+            f"**Task:** {sp.get('task_type', '—')}\n"
+            f"**Feature semantics:** {len(sp.get('feature_semantics', {}))} features\n"
+        )
+        if sp.get("leakage_candidates"):
+            body += f"\n**Leakage candidates:** {', '.join(sp['leakage_candidates'][:10])}\n"
+        cells.append(_md_cell(f"## Structural Plan (What is this dataset?)\n\n{body}\n"))
+
+    if not execution_plans:
+        return cells, refused
+
+    is_low_confidence = False
+    for i, ep_dict in enumerate(execution_plans):
+        if not isinstance(ep_dict, dict):
+            continue
+        attempt_num = i + 1
+        plan_quality = ep_dict.get("plan_quality", "high_confidence")
+        if plan_quality == "fallback_low_confidence":
+            is_low_confidence = True
+
+        # ## Attempt N
+        models_str = ", ".join(
+            m.get("model_name", "?") if isinstance(m, dict) else getattr(m, "model_name", "?")
+            for m in (ep_dict.get("model_candidates") or [])[:6]
+        )
+        ep_md = (
+            f"## Attempt {attempt_num}\n\n"
+            f"**ExecutionPlan v{attempt_num}**\n"
+            f"- target_transformation: {ep_dict.get('target_transformation', 'none')}\n"
+            f"- model_candidates: {models_str}\n"
+            f"- plan_quality: {plan_quality}\n"
+            f"- primary_metric: {ep_dict.get('primary_metric', '—')}\n"
+        )
+        if ep_dict.get("reasoning_md"):
+            ep_md += f"\n**Reasoning:** {ep_dict['reasoning_md'][:300]}...\n" if len(ep_dict.get("reasoning_md", "")) > 300 else f"\n**Reasoning:** {ep_dict['reasoning_md']}\n"
+        cells.append(_md_cell(ep_md))
+
+        # Code: LLM output (Cursor-style) first; fallback to plan_compiler
+        ep = None
+        try:
+            ep = ExecutionPlan(**ep_dict)
+        except Exception:
+            pass
+
+        model_name = "random_forest"
+        if ep and ep.model_candidates:
+            m0 = (ep.model_candidates or [{}])[0]
+            model_name = m0.get("model_name", "random_forest") if isinstance(m0, dict) else getattr(m0, "model_name", "random_forest")
+
+        llm_cells: List[List[str]] = []
+        try:
+            from agents.notebook_code_agent import generate_notebook_code_llm
+            import os
+            provider = os.getenv("LLM_PROVIDER", "gemini_cli")
+            llm_cells = generate_notebook_code_llm(
+                ep_dict,
+                list(df.columns),
+                target,
+                task,
+                model_name,
+                llm_provider=provider,
+            ) or []
+        except Exception as _:
+            pass
+
+        if len(llm_cells) >= 1:
+            # Use LLM output directly (Cursor-style) — 1 block = all-in-one cell; 3–4 = separate cells
+            cells.append(_md_cell(f"### Code written by LLM (Attempt {attempt_num})"))
+            for block in llm_cells:
+                cells.append(_code_cell(block))
+        else:
+            # Fallback: compiler-generated code
+            if ep is None:
+                cells.append(_md_cell("*ExecutionPlan could not be parsed — code generation skipped.*"))
+                if i < len(failure_history):
+                    _append_repair_proposal_cells(cells, failure_history[i], attempt_num)
+                continue
+
+            preproc_src = None
+            model_src = None
+            pipeline_src = None
+            metrics_src = None
+            try:
+                preproc_src = compile_preprocessing_code_from_execution_plan(ep)
+            except (IncompleteExecutionPlan, RefuseCodeGeneration, Exception) as e:
+                preproc_src = ["# Code generation refused or incomplete\n", f"# {str(e)[:200]}\n", "\n"] + _SAFE_FALLBACK_PREPROC_LINES
+            try:
+                model_src = compile_model_code_from_execution_plan(ep, task, model_name)
+            except (IncompleteExecutionPlan, RefuseCodeGeneration, Exception) as e:
+                model_src = ["# Model code refused or incomplete\n", f"# {str(e)[:200]}\n"]
+            try:
+                pipeline_src = compile_pipeline_code_from_execution_plan(ep)
+            except (IncompleteExecutionPlan, RefuseCodeGeneration, Exception) as e:
+                pipeline_src = ["# Pipeline code refused or incomplete\n", f"# {str(e)[:200]}\n"]
+            try:
+                metrics_src = compile_metrics_code_from_execution_plan(ep, task)
+            except (IncompleteExecutionPlan, RefuseCodeGeneration, Exception):
+                metrics_src = None
+
+            cells.append(_md_cell(f"### Code (compiler fallback) v{attempt_num}"))
+            _preproc_lines = preproc_src if isinstance(preproc_src, list) else [preproc_src] if preproc_src else _SAFE_FALLBACK_PREPROC_LINES
+            cells.append(_code_cell(_preproc_lines))
+            cells.append(_code_cell(model_src if isinstance(model_src, list) else [model_src]))
+            cells.append(_code_cell(pipeline_src if isinstance(pipeline_src, list) else [pipeline_src]))
+            train_eval_lines = [
+                "pipeline.fit(X_train, y_train)\n",
+                "y_pred = pipeline.predict(X_test)\n",
+                "\n",
+                "# Evaluate\n",
+            ]
+            if metrics_src:
+                train_eval_lines.extend(
+                    line if line.endswith("\n") else line + "\n"
+                    for line in (metrics_src.split("\n") if isinstance(metrics_src, str) else metrics_src)
+                )
+            else:
+                train_eval_lines.append("# Metrics code not generated\n")
+            cells.append(_code_cell(train_eval_lines))
+
+        # Metrics / Failure gates (if this attempt failed)
+        if i < len(failure_history):
+            fail_entry = failure_history[i]
+            fr = (fail_entry.get("failure_report") or {})
+            failed_gates = fr.get("failed_gates") or []
+            met = fr.get("metrics") or {}
+            cells.append(_md_cell(
+                f"### Failure gates triggered (Attempt {attempt_num})\n\n"
+                f"**Failed gates:**\n" + "\n".join(f"- {g}" for g in failed_gates[:15]) + "\n\n"
+                f"**Metrics:** " + ", ".join(f"{k}={v:.4f}" for k, v in list(met.items())[:8] if isinstance(v, (int, float)))
+            ))
+            _append_repair_proposal_cells(cells, fail_entry, attempt_num)
+
+    return cells, (refused or is_low_confidence)
+
+
+# Safe fallback preprocessing cell: always defines transformers and preprocessor (no NameError).
+# Used when compiler refuses in attempt-based notebook so downstream cells (pipeline, etc.) have valid names.
+_SAFE_FALLBACK_PREPROC_LINES = [
+    "# ⚠️ Plan refused/incomplete — minimal safe preprocessing so pipeline and later cells run.\n",
+    "from sklearn.pipeline import Pipeline\n",
+    "from sklearn.compose import ColumnTransformer\n",
+    "from sklearn.preprocessing import StandardScaler, OneHotEncoder\n",
+    "from sklearn.impute import SimpleImputer\n",
+    "\n",
+    "numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()\n",
+    "categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()\n",
+    "transformers = []\n",
+    "if numeric_cols:\n",
+    "    transformers.append(('num', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), numeric_cols))\n",
+    "if categorical_cols:\n",
+    "    transformers.append(('cat', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))]), categorical_cols))\n",
+    "preprocessor = ColumnTransformer(transformers, remainder='drop')\n",
+]
+
+
+def _append_repair_proposal_cells(cells: List[Dict[str, Any]], fail_entry: Dict[str, Any], attempt_num: int) -> None:
+    """Append ## Repair Proposal (diff + why)."""
+    diag = fail_entry.get("diagnosis") or {}
+    diagnosis_md = diag.get("diagnosis_md", "No diagnosis text.")
+    diff_summary = _repair_diff_summary(fail_entry)
+    cells.append(_md_cell(
+        f"## Repair Proposal (after Attempt {attempt_num})\n\n"
+        f"**What will change and why:**\n\n{diagnosis_md[:1500]}{'...' if len(diagnosis_md) > 1500 else ''}\n\n"
+        f"**Structured diff:** {diff_summary}\n"
+    ))
 
 
 def _embed_data_cell(df: pd.DataFrame) -> Dict[str, Any]:
@@ -63,7 +290,9 @@ def generate_notebook(
         compile_model_code,
         compile_metrics_code,
         compile_pipeline_code,
-        validate_plan_for_execution
+        validate_plan_for_execution,
+        IncompleteExecutionPlan,
+        RefuseCodeGeneration,
     )
     
     automl_plan_dict = (config or {}).get("automl_plan") or {}
@@ -87,6 +316,144 @@ def generate_notebook(
             plan = None
     
     automl_plan = automl_plan_dict  # Keep dict for markdown sections
+    structural_plan = (config or {}).get("structural_plan")
+    execution_plans = (config or {}).get("execution_plans") or []
+    failure_history = (config or {}).get("failure_history") or []
+    refused = (config or {}).get("refused", False)
+
+    # Agentic: attempt-based notebook (live reasoning surface) when we have execution_plans
+    use_attempt_based = bool(execution_plans)
+    attempt_based_cells: List[Dict[str, Any]] = []
+    is_refused_or_low = refused
+    full_llm_notebook_cells: Optional[List[Dict[str, Any]]] = None
+    if use_attempt_based and execution_plans:
+        # Try full-notebook LLM first (whole notebook by LLM — crazy good, reasoning, descriptive)
+        try:
+            import os
+            from agents.notebook_code_agent import generate_full_notebook_llm
+            last_ep = execution_plans[-1] if isinstance(execution_plans[-1], dict) else {}
+            cfg = config or {}
+            model_name = cfg.get("model") or "random_forest"
+            if (cfg.get("all_models") or []) and not model_name:
+                pm = (cfg.get("primary_metric") or "r2").lower()
+                lower_is_better = pm in ("rmse", "mae")
+                def _score(m):
+                    v = m.get("primary_metric") or m.get("cv_mean")
+                    if v is None:
+                        return float("inf") if lower_is_better else 0
+                    return -v if lower_is_better else v
+                best = max(
+                    (m for m in cfg["all_models"] if isinstance(m, dict)),
+                    key=_score,
+                    default={},
+                )
+                model_name = best.get("model_name") or "random_forest"
+            full_llm_notebook_cells = generate_full_notebook_llm(
+                execution_plan=last_ep,
+                structural_plan=structural_plan,
+                columns=list(df.columns),
+                target=target,
+                task=task,
+                model_name=model_name,
+                metrics=metrics,
+                llm_provider=os.getenv("LLM_PROVIDER", "gemini_cli"),
+            )
+        except Exception as _:
+            full_llm_notebook_cells = None
+    if use_attempt_based and not (full_llm_notebook_cells and len(full_llm_notebook_cells) >= 4):
+        attempt_based_cells, is_refused_or_low = _build_attempt_based_cells(df, target, task, config)
+
+    # Legacy: single-plan sections (only when NOT using attempt-based)
+    agentic_cells: List[Dict[str, Any]] = []
+    if not use_attempt_based and structural_plan and isinstance(structural_plan, dict):
+        sp = structural_plan
+        body = (
+            f"**Target:** {sp.get('inferred_target', '—')} (confidence: {sp.get('target_confidence', 0):.2f})\n"
+            f"**Task:** {sp.get('task_type', '—')}\n"
+            f"**Feature semantics:** {len(sp.get('feature_semantics', {}))} features classified\n"
+        )
+        if sp.get("leakage_candidates"):
+            body += f"\n**Leakage candidates:** {', '.join(sp['leakage_candidates'][:10])}\n"
+        if sp.get("dataset_warnings"):
+            body += f"\n**Warnings:** {'; '.join(sp['dataset_warnings'][:5])}\n"
+        agentic_cells.append({"cell_type": "markdown", "metadata": {}, "source": [f"## Structural Plan (What is this dataset?)\n\n{body}\n"]})
+    if not use_attempt_based and execution_plans:
+        parts = []
+        for i, ep in enumerate(execution_plans[:5], 1):
+            if not isinstance(ep, dict):
+                continue
+            parts.append(
+                f"**Attempt {i}:** target_transform={ep.get('target_transformation', 'none')}, "
+                f"models={[m.get('model_name') if isinstance(m, dict) else getattr(m, 'model_name', '?') for m in (ep.get('model_candidates') or [])][:5]}, "
+                f"quality={ep.get('plan_quality', '—')}"
+            )
+        agentic_cells.append({"cell_type": "markdown", "metadata": {}, "source": [f"## Execution Plans (per attempt)\n\n" + "\n\n".join(parts) + "\n"]})
+    if not use_attempt_based and failure_history:
+        parts = []
+        for entry in failure_history[:5]:
+            attempt = entry.get("attempt", "?")
+            diag = entry.get("diagnosis", {}) or {}
+            parts.append(f"**Attempt {attempt}:** {diag.get('diagnosis_md', '')[:200]}...")
+        agentic_cells.append({"cell_type": "markdown", "metadata": {}, "source": [f"## Failures & Repairs\n\n" + "\n\n".join(parts) + "\n"]})
+
+    # Preprocessing / model / pipeline / metrics code: from plan with fallback on compiler error
+    _preproc_source = None
+    _model_source = None
+    _pipeline_source = None
+    _metrics_source = None
+    if plan:
+        try:
+            _preproc_source = compile_preprocessing_code(plan, df)
+        except (IncompleteExecutionPlan, RefuseCodeGeneration, Exception) as _e:
+            print(f"⚠️  Compiler could not build preprocessing from plan: {_e}. Using fallback.")
+            _preproc_source = None
+        try:
+            _model_source = compile_model_code(plan, config.get("model"), task)
+        except (IncompleteExecutionPlan, RefuseCodeGeneration, ValueError, Exception) as _e:
+            print(f"⚠️  Compiler could not build model from plan: {_e}. Using fallback.")
+            _model_source = None
+        try:
+            _pipeline_source = compile_pipeline_code(plan)
+        except (IncompleteExecutionPlan, RefuseCodeGeneration, Exception) as _e:
+            print(f"⚠️  Compiler could not build pipeline from plan: {_e}. Using fallback.")
+            _pipeline_source = None
+        try:
+            _metrics_source = compile_metrics_code(plan, task)
+        except (IncompleteExecutionPlan, RefuseCodeGeneration, Exception) as _e:
+            print(f"⚠️  Compiler could not build metrics from plan: {_e}. Using fallback.")
+            _metrics_source = None
+    _fallback_preproc = [
+        "# ⚠️ Plan not available or compiler could not build transformers - using fallback preprocessing\n",
+        "from sklearn.pipeline import Pipeline\n",
+        "from sklearn.compose import ColumnTransformer\n",
+        "from sklearn.preprocessing import StandardScaler, OneHotEncoder\n",
+        "from sklearn.impute import SimpleImputer\n",
+        "\n",
+        "numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()\n",
+        "categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()\n",
+        "transformers = []\n",
+        "if numeric_cols:\n",
+        "    transformers.append(('num', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), numeric_cols))\n",
+        "if categorical_cols:\n",
+        "    transformers.append(('cat', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))]), categorical_cols))\n",
+        "preprocessor = ColumnTransformer(transformers, remainder='drop')\n",
+    ]
+    _fallback_model = [
+        "# ⚠️ Plan not available - using fallback model\n",
+        f"from sklearn.ensemble import {'RandomForestClassifier' if task == 'classification' else 'RandomForestRegressor'}\n",
+        f"model = {'RandomForestClassifier' if task == 'classification' else 'RandomForestRegressor'}(n_estimators=200, random_state=42)\n",
+    ]
+    _fallback_pipeline = [
+        "from sklearn.pipeline import Pipeline\n",
+        "pipeline = Pipeline([\n",
+        "    ('preprocessor', preprocessor),\n",
+        "    ('model', model)\n",
+        "])\n",
+    ]
+    _fallback_metrics = [
+        "# ⚠️ Plan not available - using fallback metrics\n",
+        "from sklearn.metrics import accuracy_score, classification_report, r2_score, mean_squared_error\n",
+    ]
 
     # Derive best model from all_models if config.model is missing/unknown
     cfg = config or {}
@@ -146,35 +513,13 @@ def generate_notebook(
                 f"**Task Confidence:** {automl_plan.get('task_confidence', 1.0):.2f}\n"
                 f"**Plan Quality:** {plan_quality.replace('_', ' ').title()}\n"))
 
-    notebook = {
-        "cells": [
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    f"# ML Model Training: Predicting {target}\n",
-                    f"\n",
-                    f"This notebook was auto-generated by Intent2Model.\n",
-                    f"\n",
-                    f"**Task:** {task}\n",
-                    f"**Target Column:** {target}\n",
-                    f"**Model:** {config.get('model', 'unknown')}\n"
-                ]
-            },
-            *([
-                {
-                    "cell_type": "markdown",
-                    "metadata": {},
-                    "source": [f"## {title}\n\n{body}\n"]
-                }
-                for title, body in md_sections
-                if body and str(body).strip()
-            ]),
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": ["## 1. Import Libraries"]
-            },
+    # When full-LLM notebook succeeded: minimal base (imports + load data only); rest = LLM cells
+    use_full_llm_notebook = use_attempt_based and full_llm_notebook_cells and len(full_llm_notebook_cells) >= 4
+
+    if use_full_llm_notebook:
+        base_cells = [
+            {"cell_type": "markdown", "metadata": {}, "source": ["## Setup\n\nImports and data load. The rest of this notebook was **generated by an LLM** with step-by-step reasoning and descriptive explanations.\n"]},
+            {"cell_type": "markdown", "metadata": {}, "source": ["### Import Libraries"]},
             {
                 "cell_type": "code",
                 "execution_count": None,
@@ -194,22 +539,76 @@ def generate_notebook(
                     "import matplotlib.pyplot as plt\n",
                     "import seaborn as sns\n",
                     "\n",
-                    "# Set style\n",
                     "sns.set_style('whitegrid')\n",
-                    "plt.rcParams['figure.figsize'] = (12, 6)"
+                    "plt.rcParams['figure.figsize'] = (12, 6)\n",
                 ]
             },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": ["## 2. Load Data"]
-            },
+            {"cell_type": "markdown", "metadata": {}, "source": ["### Load Data\n\nThe dataframe `df` is loaded below (embedded). All following cells were generated by the LLM.\n"]},
             _embed_data_cell(df),
+        ]
+        base_cells.extend(full_llm_notebook_cells)
+        if not is_refused_or_low:
+            base_cells.append(_md_cell("---\n\n## Save & Use Model\n\nSave the trained pipeline and run a quick prediction example."))
+            base_cells.append(_code_cell([
+                "with open('model.pkl', 'wb') as f:\n",
+                "    pickle.dump(pipeline, f)\n",
+            ] + (["\n", "with open('label_encoder.pkl', 'wb') as f:\n", "    pickle.dump(le, f)\n"] if task == "classification" else []) + ["\n", "print('Model saved to model.pkl')\n"]))
+            base_cells.append(_code_cell([
+                "# Runnable example: predict on first test row\n",
+                "sample = X_test.iloc[[0]]\n",
+                "pred = pipeline.predict(sample)\n",
+                "print(f'Prediction (first test row): {pred[0]}')\n",
+                "\n",
+                "# Your own data: same columns as X, e.g. new_row = pd.DataFrame({...}); pipeline.predict(new_row)\n",
+            ]))
+    else:
+        # Standard base cells: title, optional legacy md_sections, imports, load data, prepare
+        base_cells = [
             {
                 "cell_type": "markdown",
                 "metadata": {},
-                "source": ["## 3. Prepare Data"]
+                "source": [
+                    f"# ML Model Training: Predicting {target}\n",
+                    f"\n",
+                    f"**Live reasoning surface** — attempt-based execution log.\n",
+                    f"\n",
+                    f"The **code** below was **written by an LLM** (Cursor-style), not compiled.\n",
+                    f"\n",
+                    f"**Task:** {task} | **Target:** {target}\n"
+                ]
             },
+            *([
+                {"cell_type": "markdown", "metadata": {}, "source": [f"## {title}\n\n{body}\n"]}
+                for title, body in md_sections
+                if body and str(body).strip() and not use_attempt_based
+            ]),
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 1. Import Libraries"]},
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "source": [
+                    "import pandas as pd\n",
+                    "import numpy as np\n",
+                    "from sklearn.model_selection import train_test_split, cross_val_score\n",
+                    "from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder\n",
+                    "from sklearn.impute import SimpleImputer\n",
+                    "from sklearn.pipeline import Pipeline\n",
+                    "from sklearn.compose import ColumnTransformer\n",
+                    "from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor\n",
+                    "from sklearn.linear_model import LogisticRegression, LinearRegression\n",
+                    "from sklearn.metrics import accuracy_score, classification_report, mean_squared_error, r2_score\n",
+                    "import pickle\n",
+                    "import matplotlib.pyplot as plt\n",
+                    "import seaborn as sns\n",
+                    "\n",
+                    "sns.set_style('whitegrid')\n",
+                    "plt.rcParams['figure.figsize'] = (12, 6)\n",
+                ]
+            },
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 2. Load Data"]},
+            _embed_data_cell(df),
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 3. Prepare Data"]},
             {
                 "cell_type": "code",
                 "execution_count": None,
@@ -220,130 +619,83 @@ def generate_notebook(
                         f"X = df.drop(columns=['{target}'])\n",
                         f"y = df['{target}']\n",
                         "\n",
-                        "# Handle categorical target if needed\n",
-                    ] + 
-                    (["le = LabelEncoder()\n", "y = le.fit_transform(y.astype(str))\n"] if task == 'classification' else []) +
-                    [
+                    ]
+                    + (["le = LabelEncoder()\n", "y = le.fit_transform(y.astype(str))\n"] if task == "classification" else [])
+                    + [
                         "\n",
-                        "# Split data\n",
                         "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)\n",
-                        "\n",
                         "print(f'Training set: {X_train.shape}')\n",
-                        "print(f'Test set: {X_test.shape}')"
+                        "print(f'Test set: {X_test.shape}')\n",
                     ]
                 )
             },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": ["## 4. Build Preprocessing Pipeline (from AutoMLPlan)"]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "source": (
-                    [compile_preprocessing_code(plan, df)] if plan else [
-                        "# ⚠️ AutoMLPlan not available - using fallback preprocessing\n",
-                        "# This should not happen if LLM planning succeeded\n",
-                        "from sklearn.pipeline import Pipeline\n",
-                        "from sklearn.compose import ColumnTransformer\n",
-                        "from sklearn.preprocessing import StandardScaler, OneHotEncoder\n",
-                        "from sklearn.impute import SimpleImputer\n",
-                        "\n",
-                        "# Fallback: basic preprocessing\n",
-                        "numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()\n",
-                        "categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()\n",
-                        "\n",
-                        "transformers = []\n",
-                        "if numeric_cols:\n",
-                        "    transformers.append(('num', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), numeric_cols))\n",
-                        "if categorical_cols:\n",
-                        "    transformers.append(('cat', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))]), categorical_cols))\n",
-                        "preprocessor = ColumnTransformer(transformers, remainder='drop')\n"
-                    ]
-                )
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": ["## 5. Build Model (from AutoMLPlan)"]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "source": (
-                    [compile_model_code(plan, config.get('model'))] if plan else [
-                        "# ⚠️ AutoMLPlan not available - using fallback model\n",
-                        f"from sklearn.ensemble import {'RandomForestClassifier' if task == 'classification' else 'RandomForestRegressor'}\n",
-                        f"model = {'RandomForestClassifier' if task == 'classification' else 'RandomForestRegressor'}(n_estimators=200, random_state=42)\n"
-                    ]
-                )
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": ["## 6. Assemble Pipeline (from AutoMLPlan)"]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "source": (
-                    [compile_pipeline_code(plan)] if plan else [
-                        "from sklearn.pipeline import Pipeline\n",
-                        "pipeline = Pipeline([\n",
-                        "    ('preprocessor', preprocessor),\n",
-                        "    ('model', model)\n",
-                        "])\n"
-                    ]
-                )
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": ["## 7. Train Model"]
-            },
+        ]
+
+    # Attempt-based (when not using full-LLM): append attempt log then Outcome
+    if use_attempt_based and not use_full_llm_notebook:
+        base_cells.extend(attempt_based_cells)
+        refusal_reason = (config or {}).get("refusal_reason") or ""
+        if is_refused_or_low:
+            base_cells.append(_md_cell(
+                "## Outcome: Refusal / Incomplete\n\n"
+                "Training was **refused** or plan confidence was low. No final model is presented.\n\n"
+                f"**Reason:** {refusal_reason or 'Error gates failed or plan_quality was fallback_low_confidence.'}\n\n"
+                "No Save Model or Make Predictions cells — this is not a successful run."
+            ))
+        else:
+            base_cells.append(_md_cell("## Outcome: Success\n\nFinal model was trained and passed error gates."))
+            base_cells.append(_md_cell("### Save Model"))
+            base_cells.append(_code_cell([
+                "with open('model.pkl', 'wb') as f:\n",
+                "    pickle.dump(pipeline, f)\n",
+            ] + (["\n", "with open('label_encoder.pkl', 'wb') as f:\n", "    pickle.dump(le, f)\n"] if task == "classification" else []) + ["\n", "print('Model saved.')\n"]))
+            base_cells.append(_md_cell("### Make Predictions"))
+            base_cells.append(_code_cell([
+                "# Runnable example: first test row\n",
+                "sample = X_test.iloc[[0]]\n",
+                "pred = pipeline.predict(sample)\n",
+                "print(f'Prediction: {pred[0]}')\n",
+                "\n",
+                "# Your data: new_data = pd.DataFrame({...}); pipeline.predict(new_data)\n",
+            ]))
+        notebook = {
+            "cells": base_cells,
+            "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}, "language_info": {"name": "python", "version": "3.10.0"}},
+            "nbformat": 4,
+            "nbformat_minor": 4,
+        }
+        return json.dumps(notebook, indent=1)
+
+    # Legacy: linear report (single plan)
+    notebook = {
+        "cells": [
+            *base_cells,
+            *agentic_cells,
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 4. Build Preprocessing Pipeline (from AutoMLPlan)"]},
+            {"cell_type": "code", "execution_count": None, "metadata": {}, "source": [_preproc_source] if _preproc_source else _fallback_preproc},
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 5. Build Model (from AutoMLPlan)"]},
+            {"cell_type": "code", "execution_count": None, "metadata": {}, "source": [_model_source] if _model_source else _fallback_model},
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 6. Assemble Pipeline (from AutoMLPlan)"]},
+            {"cell_type": "code", "execution_count": None, "metadata": {}, "source": [_pipeline_source] if _pipeline_source else _fallback_pipeline},
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 7. Train Model"]},
             {
                 "cell_type": "code",
                 "execution_count": None,
                 "metadata": {},
                 "source": [
-                    "# Train the model\n",
                     "pipeline.fit(X_train, y_train)\n",
-                    "\n",
-                    "# Make predictions\n",
                     "y_pred = pipeline.predict(X_test)\n",
                     "\n",
-                    "# Evaluate using metrics from AutoMLPlan\n"
-                ] + (
-                    [compile_metrics_code(plan)] if plan else [
-                        "# ⚠️ AutoMLPlan not available - using fallback metrics\n",
-                        "from sklearn.metrics import accuracy_score, classification_report, r2_score, mean_squared_error\n"
-                    ]
-                ) + [
+                    "# Evaluate using metrics from AutoMLPlan\n",
+                ]
+                + ([_metrics_source] if _metrics_source else _fallback_metrics)
+                + [
                     "\n",
-                    "# Calculate metrics\n"
-                ] + (
-                    _generate_metrics_evaluation_code(plan, task) if plan else (
-                        [
-                            "score = accuracy_score(y_test, y_pred)\n",
-                            "print(f'Accuracy: {score:.4f}')\n",
-                            "print(classification_report(y_test, y_pred))\n"
-                        ] if task == 'classification' else [
-                            "score = r2_score(y_test, y_pred)\n",
-                            "print(f'R2 Score: {score:.4f}')\n",
-                            "print(f'RMSE: {mean_squared_error(y_test, y_pred, squared=False):.4f}')\n"
-                        ]
-                    )
-                )
+                    "# Calculate metrics\n",
+                ]
+                + (_generate_metrics_evaluation_code(plan, task) if plan else (["score = accuracy_score(y_test, y_pred)\n", "print(f'Accuracy: {score:.4f}')\n"] if task == "classification" else ["score = r2_score(y_test, y_pred)\n", "print(f'R2 Score: {score:.4f}')\n"])),
             },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": ["## 8. Feature Importance (from plan.explainability_md)"]
-            },
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 8. Feature Importance (from plan.explainability_md)"]},
             {
                 "cell_type": "code",
                 "execution_count": None,
@@ -424,21 +776,21 @@ def generate_notebook(
             {
                 "cell_type": "markdown",
                 "metadata": {},
-                "source": ["## 10. Make Predictions"]
+                "source": ["## 10. Make Predictions\n\nUse the trained pipeline to predict. Below: one runnable example (first test row) and a template for your own data."]
             },
             {
                 "cell_type": "code",
                 "execution_count": None,
                 "metadata": {},
                 "source": [
-                    "# Load model for predictions\n",
-                    "# with open('model.pkl', 'rb') as f:\n",
-                    "#     loaded_model = pickle.load(f)\n",
+                    "# Example: predict on first row of test set (runnable as-is)\n",
+                    "sample = X_test.iloc[[0]]\n",
+                    "pred = pipeline.predict(sample)\n",
+                    "print(f'Sample prediction (first test row): {pred[0]}')\n",
                     "\n",
-                    "# Example prediction\n",
-                    "# new_data = pd.DataFrame({...})\n",
-                    "# prediction = loaded_model.predict(new_data)\n",
-                    "# print(f'Prediction: {prediction}')"
+                    "# For your own data: build a DataFrame with same columns as X, then:\n",
+                    "# new_data = pd.DataFrame({col: [value], ... for col in X.columns})\n",
+                    "# print(pipeline.predict(new_data))"
                 ]
             }
         ],

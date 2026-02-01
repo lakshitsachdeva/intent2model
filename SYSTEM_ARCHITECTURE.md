@@ -4,6 +4,67 @@ This document explains how the Intent2Model AutoML platform works end-to-end: fr
 
 ---
 
+## 0. Cursor-for-ML (Non-Negotiable)
+
+This system is **Cursor, but for ML on a dataset**: same mental model as Cursor (Context → Proposal → Diff → Apply → Observe → Iterate). It is **not** one-shot AutoML, pipeline generation, or a "best model finder." It **is** an interactive ML reasoning engine that proposes small, explicit changes, applies them deterministically, evaluates honestly, and adapts or refuses.
+
+### Core rule
+
+- **LLM never writes raw training code.** LLM only: reasons, proposes structured decisions, outputs diffs.
+- **Python only:** executes, validates, trains, evaluates. If the LLM outputs sklearn/pandas/pipeline code, that is a **bug**.
+
+### Three layers
+
+1. **Structural understanding (stable)** — What is this dataset? (StructuralPlan, once per dataset, cached.)
+2. **Execution decisions (mutable)** — How should we train this attempt? (ExecutionPlan, per attempt.)
+3. **Deterministic execution (code)** — Compiler turns ExecutionPlan into code; compiler does not think.
+
+### Plan types (mandatory)
+
+| Plan | Purpose | Contains | Must NOT contain |
+|------|---------|----------|-------------------|
+| **StructuralPlan** | "What is this dataset?" | inferred_target, task_type, feature_semantics, leakage_candidates, dataset_warnings, schema_version | scaling, encoding, imputation, models, metrics, thresholds |
+| **ExecutionPlan** | "How should we train THIS attempt?" | target_transformation, feature_transforms, model_candidates, primary_metric, execution_confidence, plan_quality, reasoning_md | — |
+| **RepairPlan** | "What should change NEXT?" | **Diffs only**: change_target_transformation, drop_features, add_features, replace_model, reorder_models, change_encoding | No full plans, no free text |
+
+### Agent loop (heart of the system)
+
+1. **StructuralPlan** → **ExecutionPlan v1**
+2. **Compile** (deterministic) → **Train** → **Evaluate**
+3. **PASS** → DONE
+4. **FAIL** → Build **FailureReport** → LLM **Diagnosis** → **RepairPlan (diff)** → Apply RepairPlan → **ExecutionPlan v2** → re-compile → re-train → re-evaluate
+5. Max attempts: 2–3. If no meaningful diff is proposed → **REFUSE**. If confidence below threshold → **REFUSE**. Refusal is a **successful** outcome.
+
+### FailureReport (required input to LLM)
+
+When training/evaluation fails: failure_stage, failed_gates, metrics (raw + normalized), target_stats, **residual_diagnostics**, feature_summary, model_used, hyperparameters, **last ExecutionPlan**. This is the only context the LLM reasons from.
+
+### LLM diagnosis contract
+
+Prompt: explain why it failed, which assumptions were wrong, what **one or two** things should change, whether the task is realistically learnable. LLM must return: diagnosis_md, repair_plan (structured diff), recovery_confidence. LLM is **not** allowed to: disable gates, relax metrics, force success, or write code.
+
+### Absolute error honesty
+
+High R² is **not** success. For regression, **FAIL** if any: RMSE > 0.5×target_std, MAE > 0.5×target_IQR, RMSE/mean(target) > 0.25. If failed: training status = FAILED, model download = DISABLED, notebook must explain refusal.
+
+### Compiler contract (no exceptions)
+
+Compiler accepts **only** ExecutionPlan. It never inspects the DataFrame, never infers transforms, never applies heuristics, never guesses fallbacks. ExecutionPlan incomplete → **HARD FAIL**. plan_quality == fallback_low_confidence → **REFUSE** code generation. Compiler **translates**; it does **not** think.
+
+### Cursor-like behavior
+
+Every retry must show "here's what changed and why." Every attempt has a visible diff. No silent retries. No identical retries. State preserved across attempts. If nothing meaningful changes → **STOP** and **REFUSE**.
+
+### Notebook rules
+
+Notebook must show: StructuralPlan, ExecutionPlan v1, v2, …; FailureReports; RepairPlans (diffs); final outcome **or** refusal. A failed model is not hidden. A refusal is not an error; it is a correct outcome.
+
+### Final truth
+
+We are not building AutoML. We are building **an ML engineer that can reason, try, fail, adapt, and stop.** Anything that hides failure, smooths over uncertainty, or pretends confidence is a **bug**.
+
+---
+
 ## 1. Overview
 
 **Intent2Model** is an LLM-guided, epistemically honest AutoML platform that:
@@ -17,6 +78,12 @@ Design principles:
 - **Frontend**: Next.js (React) — wizard steps Upload → Define Intent → Train → Deploy & Stats. HTTP (REST) + optional WebSocket for live run logs.
 - **Backend**: FastAPI — uploads, train, predict, downloads, health, run state. Training is delegated to an **autonomous executor** that uses **agents** (planner, compiler, diagnosis, repair) and **ML** (profiler, pipeline builder, trainer, evaluator).
 - **System bias & evaluation**: Holdout validation, aggressive feature pruning, opinionated model order with complexity penalty, target transformation (regression), residual-based retry, locked classification metric, and prediction uncertainty are built in to reduce real-world error and over-trust in CV.
+
+### 1.1 Plan vs code (important)
+
+- **LLM produces only the PLAN**, not raw code. The plan is a structured schema: target, task type, **feature_transforms** (per-column: kind, encode, scale, impute, drop), model_candidates, primary_metric, etc.
+- **The compiler** (deterministic Python in `plan_compiler.py`) **translates the plan into dataset-specific code**: preprocessing pipelines, model instantiation, and metrics. It does **not** inspect the DataFrame or guess; it only uses the plan.
+- So the **notebook/training code is dataset-specific** because the **plan** is dataset-specific (different columns, kinds, encodings). We are **not** asking the LLM to write Python/sklearn snippets; we ask it to output a plan, and the compiler turns that plan into code. If the plan is missing or invalid, the compiler can **refuse** or we use a **fallback** (e.g. `select_dtypes` + StandardScaler + OneHotEncoder) so the notebook still generates.
 
 ---
 
@@ -39,12 +106,13 @@ intent2model/
 ├── backend/
 │   ├── main.py                         # FastAPI app: all HTTP endpoints, caches, run state, predict (uncertainty)
 │   ├── agents/
-│   │   ├── automl_agent.py             # plan_automl() — LLM or rule-based fallback → AutoMLPlan
-│   │   ├── autonomous_executor.py     # execute_with_auto_fix: prune → plan → config → train → gates → retry
-│   │   ├── plan_compiler.py            # compile_preprocessing_code, compile_model_code, compile_pipeline_code
+│   │   ├── automl_agent.py             # plan_automl() — LLM or rule-based fallback → AutoMLPlan (once per dataset)
+│   │   ├── execution_planner.py       # automl_plan_to_structural_and_execution, apply_repair_plan, merged_plan_dict
+│   │   ├── autonomous_executor.py     # execute_with_auto_fix: agentic loop (StructuralPlan + ExecutionPlan per attempt) or legacy
+│   │   ├── plan_compiler.py            # ExecutionPlan-only compile; no inference; RefuseCodeGeneration if fallback_low_confidence
 │   │   ├── plan_normalizer.py         # normalize_plan_dict, _generate_feature_transforms_from_profile
 │   │   ├── planner_agent.py           # LLM planner (steps 0–6)
-│   │   ├── diagnosis_agent.py         # Diagnose failures → plan_changes (target_transformation, feature_transforms)
+│   │   ├── diagnosis_agent.py         # Diagnose failures → plan_changes / repair_plan (structured diff)
 │   │   ├── recovery_agent.py          # Suggest column alternatives
 │   │   ├── error_gating.py            # check_regression_error_gates, check_holdout_baseline_sanity, check_model_quality_minimum
 │   │   ├── pipeline_validator.py      # validate_feature_transforms, validate_pipeline_before_training
@@ -56,8 +124,8 @@ intent2model/
 │   │   ├── trainer.py                 # train_classification, train_regression (holdout, baseline sanity), compare_models (order, complexity penalty)
 │   │   └── evaluator.py               # evaluate_dataset, prune_features_aggressive, infer_classification_primary_metric
 │   ├── schemas/
-│   │   ├── pipeline_schema.py         # AutoMLPlan, FeatureTransform, ModelCandidate, target_transformation
-│   │   ├── failure_schema.py          # FailureReport
+│   │   ├── pipeline_schema.py         # StructuralPlan, ExecutionPlan, RepairPlan, AutoMLPlan, FeatureTransform, ModelCandidate
+│   │   ├── failure_schema.py          # FailureReport (last_execution_plan), DiagnosisResponse (repair_plan)
 │   │   └── run_state_schema.py        # RunState, AgentEvent
 │   └── utils/
 │       └── artifact_generator.py      # generate_notebook (_embed_data_cell), generate_readme, generate_model_report
@@ -146,22 +214,59 @@ intent2model/
    - **Classification**: set metric via `infer_classification_primary_metric(df, target)` (no raw accuracy default).
    - **Regression**: metric from request or plan (e.g. r2, rmse, mae).
    - Create `run_id`, init `run_state_store[run_id]`, log “Run created”.
-   - Call **AutonomousExecutor.execute_with_auto_fix(df, target, task, metric, model_candidates, ...)**.
+   - **Planning ONCE**: `plan_automl(df, ...)` → AutoMLPlan; then **automl_plan_to_structural_and_execution(plan)** → **StructuralPlan** + **first ExecutionPlan**.
+   - Call **AutonomousExecutor.execute_with_auto_fix(..., structural_plan=..., first_execution_plan=...)** to run the **true agentic loop** (see below).
 
-2. **AutonomousExecutor** (agents/autonomous_executor.py)
-   - **Prune**: `prune_features_aggressive(df, target, task)` → replace `df` with pruned DataFrame; restrict `plan.feature_transforms` to remaining columns.
-   - **Classification**: set `locked_metric = infer_classification_primary_metric(...)`; do not let planner change metric mid-run.
-   - **Loop** (up to `max_attempts`):
-     - **Plan**: `plan_automl(df, ...)` (LLM or fallback) → AutoMLPlan.
-     - **Config**: `_plan_to_config(plan, profile)` → config (task, feature_transforms, target_transformation if set).
-     - **Train**: `compare_models(df, target, task, metric, model_candidates, config)` — models tried in **opinionated order** (simple first); ranking uses **effective_score = cv_score - 0.05 * model_complexity**.
-     - **Regression**: After CV, **holdout** (5–10%) is evaluated; **holdout_mae** vs **baseline_mae** (median predictor). If model MAE > 0.75 × baseline MAE → **fail** (check_holdout_baseline_sanity). Store `holdout_residual_std` for prediction uncertainty.
-     - **Gates**: Regression — check_regression_error_gates, detect_variance_fit_illusion, analyze_residuals. If heteroscedastic → set `plan.target_transformation = "log1p"` for next attempt (residual-based retry). Classification — check_model_quality_minimum (reinforcing gate).
-     - On failure: create FailureReport, diagnose, apply plan changes, retry. On success: return result (plan, best_model, metrics, holdout_residual_std, target_transformation, etc.).
+2. **AutonomousExecutor** (agents/autonomous_executor.py) — **Agentic loop** (when structural_plan and first_execution_plan are provided)
+   - **Prune**: `prune_features_aggressive(df, target, task)`; restrict current ExecutionPlan’s feature_transforms to remaining columns.
+   - **Classification**: set `locked_metric = infer_classification_primary_metric(...)`; metric locked across retries.
+   - **Loop** (up to **AGENTIC_MAX_ATTEMPTS = 3**):
+     - **ExecutionPlan** for this attempt (no LLM this round). Config from **execution_plan_to_config(execution_plan, task)**.
+     - **Compile**: Compiler accepts **only ExecutionPlan**; no df inspection, no inference, no fallbacks. If plan_quality == fallback_low_confidence → **REFUSE** code generation.
+     - **Train**: `compare_models(...)` with plan’s model_candidates; opinionated order; effective_score = cv_score - 0.05 * model_complexity.
+     - **Regression**: Holdout (5–10%); check_holdout_baseline_sanity; store holdout_residual_std.
+     - **Gates**: Regression — check_regression_error_gates, analyze_residuals. Classification — check_model_quality_minimum.
+     - **On failure**: Build **FailureReport** (includes **last_execution_plan**). LLM **diagnose_failure** → **DiagnosisResponse** (plan_changes / repair_plan). **plan_changes_to_repair_plan** → **RepairPlan**; **apply_repair_plan(execution_plan, repair)** → next ExecutionPlan; retry. Optionally merge heteroscedastic suggestion (log1p) into repair.
+     - **On success**: Return result with **plan** = merged_plan_dict(structural_plan, execution_plan), **structural_plan**, **execution_plans** (all used), **failure_history**.
+   - **Legacy path** (no structural_plan/first_execution_plan): plan_automl per attempt, _plan_to_config, _apply_diagnosis_changes on AutoMLPlan; same gates and retry logic.
 
 3. **main.py** (after executor returns)
-   - Store in **trained_models_cache[run_id]**: pipeline, feature_columns, target, task, label_encoder, df, config, metrics, all_models, **holdout_residual_std**, **target_transformation**, trace, preprocessing_recommendations.
+   - Store in **trained_models_cache[run_id]**: pipeline, feature_columns, target, task, label_encoder, df, config, metrics, all_models, **structural_plan**, **execution_plans**, **failure_history**, holdout_residual_std, target_transformation, trace, preprocessing_recommendations.
    - Return response with run_id, metrics, feature_columns, all_models, etc.
+   - **Notebook**: Generated notebook shows Structural Plan, Execution Plan(s), and Failures & Repairs (when present); no export/pretend success if training failed or refused.
+
+---
+
+## 5a. Agentic Architecture (Core Correction)
+
+The system is an **ML Engineer Agent**, not classic AutoML. Planning is split so that **structural reasoning happens once**, and **execution reasoning happens per attempt** with failure-driven repair.
+
+### Plan types
+
+| Type | When | Mutated? | Answers |
+|------|------|----------|---------|
+| **StructuralPlan** | Once per dataset (from AutoMLPlan) | Never | “What is this dataset?” — target, task_type, feature_semantics, leakage_candidates, dataset_warnings. No scaling/encoding/models/metrics. |
+| **ExecutionPlan** | Per attempt; only input for compilation | Yes, via repair | “How should we train THIS attempt?” — target_transformation, feature_transforms, model_candidates, primary_metric, plan_quality, planning_source, reasoning_md. |
+| **RepairPlan** | Only after failure | N/A | Structured diff: change_target_transform, drop_features, replace_model, add_models, remove_models. Applied to last ExecutionPlan → next ExecutionPlan. |
+
+### Compiler contract (critical)
+
+- **Accepts only ExecutionPlan.** No df.dtypes, no inferring transforms, no fallbacks, no reacting to metrics.
+- If ExecutionPlan is incomplete (e.g. empty feature_transforms or model_candidates) → **HARD FAIL** (IncompleteExecutionPlan).
+- If plan_quality == **fallback_low_confidence** → **REFUSE** code generation (RefuseCodeGeneration).
+- Compiler **translates**; it does **not** think.
+
+### Failure-driven agent loop (mandatory)
+
+1. **StructuralPlan** (cached) + **ExecutionPlan v1** (from automl_plan_to_structural_and_execution).
+2. Compile → Train → Evaluate.
+3. **On failure**: **FailureReport** (failure_stage, failed_gates, metrics, target_stats, feature_summary, model_used, **last_execution_plan**) → LLM **diagnose_failure** → **RepairPlan** (from plan_changes / repair_plan) → **apply_repair_plan** → **ExecutionPlan v2** → goto 2.
+4. Max retries: 2–3 (AGENTIC_MAX_ATTEMPTS). Stop early on success; on suggested_stop or low recovery_confidence → **refuse** (epistemically honest failure).
+
+### Notebook rules
+
+- Notebook **must** show Structural Plan, Execution Plan(s), and Failures & Repairs when present.
+- If training failed or was refused: **do not** export trained model; **do not** pretend success.
 
 ---
 
@@ -274,7 +379,7 @@ These rules are applied **deterministically** (no LLM) to reduce over-trust in C
 | Holdout sanity failed | Model MAE > 0.75 × baseline MAE on holdout. | Improve features/model or accept refusal; check metrics. |
 | No trained model / Run not found | Backend restarted (cache cleared) or wrong run_id. | Re-train or use correct run_id. |
 | Notebook NameError: df | Load Data cell didn’t define df. | Fixed: _embed_data_cell(df) embeds base64 CSV; re-download notebook. |
-| Backend won’t start | Syntax/import error. | Run `python -c "import main"` from backend/ and fix errors. |
+| Backend won’t start | Port 8000 in use, or wrong cwd, or import error. | **From project root**: `./start.sh` (starts backend + frontend). **Backend only**: `cd backend && ./run.sh`. If port in use: `lsof -ti:8000 | xargs kill -9`. Verify: `curl http://localhost:8000/health`. From backend dir: `python -c "from main import app"` to test imports. |
 | LLM unavailable | Rate limits or API key. | Health shows status; training works with rule-based fallback. |
 
 ---
@@ -291,6 +396,14 @@ These rules are applied **deterministically** (no LLM) to reduce over-trust in C
 
 *Keep this section updated when making notable changes to the system.*
 
+### 2025-01-29 — Agentic architecture correction (core)
+
+- **Plan split**: StructuralPlan (once per dataset, cached, never mutated); ExecutionPlan (per attempt, only input for compilation); RepairPlan (structured diff after failure). See `schemas/pipeline_schema.py`, `agents/execution_planner.py`.
+- **Compiler contract**: Compiler accepts only ExecutionPlan; no df inspection, no inference, no fallbacks. Incomplete plan → IncompleteExecutionPlan; plan_quality == fallback_low_confidence → RefuseCodeGeneration. See `agents/plan_compiler.py`.
+- **Agentic loop**: main.py calls plan_automl once → automl_plan_to_structural_and_execution → structural_plan + first_execution_plan passed to execute_with_auto_fix. Executor runs up to AGENTIC_MAX_ATTEMPTS (3); on evaluation failure builds FailureReport (with last_execution_plan), diagnoses, plan_changes_to_repair_plan → apply_repair_plan → next ExecutionPlan, retry. Success returns merged_plan_dict, structural_plan, execution_plans, failure_history. See `agents/autonomous_executor.py`, `backend/main.py`.
+- **FailureReport**: failure_schema includes last_execution_plan; DiagnosisResponse includes repair_plan (structured). See `schemas/failure_schema.py`.
+- **Notebook**: generate_notebook accepts config.structural_plan, config.execution_plans, config.failure_history and adds markdown sections “Structural Plan”, “Execution Plans (per attempt)”, “Failures & Repairs”. See `utils/artifact_generator.py`. Cache stores structural_plan, execution_plans, failure_history for download.
+
 ### 2025-01-29 — System bias & evaluation refactor (permanent)
 
 - **Holdout validation**: After CV, a never-touched holdout (5–10%) is evaluated; if model MAE > 0.75 × baseline MAE, training fails (`check_holdout_baseline_sanity`). `holdout_residual_std` stored for prediction uncertainty.
@@ -305,6 +418,20 @@ These rules are applied **deterministically** (no LLM) to reduce over-trust in C
 - **Prediction undefined fix**: Frontend checks `resp.ok` on `/predict`; on error sets `predictionResult = { error: detail }`; shows “—” when prediction is missing.
 - **Notebook standalone**: `_embed_data_cell(df)` embeds base64 CSV in “Load Data” cell so notebook runs without external files. Best model derived from all_models when config.model missing.
 - **Backend syntax**: Fixed unclosed parenthesis in main.py and artifact_generator.py (best-model lambda); replaced with helper functions.
+
+### 2025-01-29 — Notebook compiler fallback and plan-vs-code
+
+- **Plan vs code**: LLM produces only the **plan** (AutoMLPlan / StructuralPlan + ExecutionPlan). Dataset-specific **code** (preprocessing, model, pipeline, metrics) is generated by the **compiler** from that plan. We do not use the LLM to generate raw Python/sklearn code. See §1.1.
+- **Notebook download fix**: If the compiler raises `IncompleteExecutionPlan` or `RefuseCodeGeneration` (e.g. “No transformers could be built from ExecutionPlan.feature_transforms”), notebook generation now catches the error and uses **fallback** preprocessing/model/pipeline/metrics (e.g. `select_dtypes` + StandardScaler + OneHotEncoder) so the notebook always downloads. See `utils/artifact_generator.py`.
+- **Compiler**: When `kind` is unknown or missing, the compiler now infers numeric vs categorical from `encode`/`scale`/`impute` so valid plans still produce transformers. See `agents/plan_compiler.py`.
+
+### 2025-01-29 — Cursor-for-ML: FailureReport, RepairPlan, no-identical-retry, doc
+
+- **Cursor-for-ML (§0)**: New top-level section in SYSTEM_ARCHITECTURE.md: mental model (Context → Proposal → Diff → Apply → Observe → Iterate), core rule (LLM never writes code), three layers, plan types, agent loop, FailureReport/LLM contract, absolute error honesty, compiler contract, cursor-like behavior, notebook rules, final truth.
+- **FailureReport + residual_diagnostics**: `_evaluate_regression_model` now builds `residual_diagnostics` (is_heteroscedastic, description, is_variance_fit_illusion, illusion_description) and includes it in `failure_info`. `_create_failure_report` accepts and passes `residual_diagnostics` to FailureReport. All evaluation-failure call sites pass it. See `agents/autonomous_executor.py`, `schemas/failure_schema.py`.
+- **Diagnosis prompt**: Prompt includes Residual Diagnostics and Last ExecutionPlan; plan_changes described as structured diff only (drop_features, add_features, reorder_models, change_encoding, etc.). System prompt already forbids code, disabling gates, forcing success. See `agents/diagnosis_agent.py`.
+- **RepairPlan extension**: Added `add_features`, `reorder_models`, `change_encoding` to RepairPlan in `schemas/pipeline_schema.py`. `apply_repair_plan` in `agents/execution_planner.py` applies add_features (new FeatureTransform with kind=unknown), change_encoding (per-feature encode), reorder_models (reorder model_candidates). `plan_changes_to_repair_plan` maps diagnosis dict to new fields.
+- **No-identical-retry**: After applying RepairPlan, executor checks `_execution_plan_meaningfully_different(prev, next)`. If no meaningful change (target_transformation, feature set/encodes, model list/order), logs refusal and returns `_create_refusal_result` instead of retrying. Applied in all three agentic paths: evaluation gate failure, reinforcing gate failure, exception-path diagnosis. See `agents/autonomous_executor.py`.
 
 ### (Template for future entries)
 

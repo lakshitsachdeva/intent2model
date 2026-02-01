@@ -94,6 +94,78 @@ class ModelCandidate(BaseModel):
         extra = "forbid"
 
 
+# ---------------------------------------------------------------------------
+# Agentic architecture: StructuralPlan (once), ExecutionPlan (per attempt), RepairPlan (diff-only)
+# ---------------------------------------------------------------------------
+
+class StructuralPlan(BaseModel):
+    """
+    Generated ONCE per dataset. Cached. NEVER mutated.
+    Answers: "What is this dataset?"
+    MUST NOT contain: scaling, encoding, imputation, models, hyperparameters, metrics.
+    """
+
+    plan_schema_version: str = Field("v1", description="Schema version")
+    inferred_target: str = Field(..., description="Target column inferred or validated")
+    target_confidence: float = Field(1.0, ge=0.0, le=1.0)
+    alternative_targets: List[str] = Field(default_factory=list)
+    task_type: Literal["regression", "binary_classification", "multiclass_classification"] = Field(...)
+    task_confidence: float = Field(1.0, ge=0.0, le=1.0)
+    feature_semantics: Dict[str, FeatureKind] = Field(
+        default_factory=dict,
+        description="Feature name -> kind (continuous | ordinal | count | binary | nominal | etc.)",
+    )
+    feature_confidence: Dict[str, float] = Field(default_factory=dict, description="Feature name -> confidence 0-1")
+    leakage_candidates: List[str] = Field(default_factory=list)
+    dataset_warnings: List[str] = Field(default_factory=list)
+
+    class Config:
+        extra = "forbid"
+
+
+class ExecutionPlan(BaseModel):
+    """
+    Generated per attempt. May change across retries.
+    ONLY input allowed for compilation.
+    Answers: "How should we train THIS attempt?"
+    """
+
+    target_transformation: Literal["none", "log", "log1p", "quantile", "robust"] = Field("none")
+    feature_transforms: List[FeatureTransform] = Field(default_factory=list)
+    model_candidates: List[ModelCandidate] = Field(default_factory=list)
+    primary_metric: str = Field(...)
+    additional_metrics: List[str] = Field(default_factory=list)
+    execution_confidence: float = Field(1.0, ge=0.0, le=1.0)
+    plan_quality: Literal["high_confidence", "medium_confidence", "fallback_low_confidence"] = Field(
+        "high_confidence",
+        description="If fallback_low_confidence, compiler MUST refuse code generation.",
+    )
+    planning_source: Literal["llm", "fallback"] = Field("llm")
+    reasoning_md: str = Field("", description="Short reasoning for this execution plan")
+
+    class Config:
+        extra = "forbid"
+
+
+class RepairPlan(BaseModel):
+    """
+    Created ONLY after failure. Structured diffs, not free text.
+    Applied to previous ExecutionPlan to produce next ExecutionPlan.
+    """
+
+    change_target_transform: Optional[Literal["log", "log1p", "quantile", "robust"]] = None
+    drop_features: Optional[List[str]] = None
+    add_features: Optional[List[str]] = None
+    replace_model: Optional[str] = None
+    add_models: Optional[List[str]] = None
+    remove_models: Optional[List[str]] = None
+    reorder_models: Optional[List[str]] = None
+    change_encoding: Optional[Dict[str, str]] = None  # feature_name -> one_hot | ordinal | frequency
+
+    class Config:
+        extra = "forbid"
+
+
 class AutoMLPlan(BaseModel):
     """
     Dataset-agnostic AutoML engineer plan with confidence scores.

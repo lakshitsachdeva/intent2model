@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Fragment } from "react";
 import React from "react";
 import { useDropzone } from "react-dropzone";
 import { motion, AnimatePresence } from "framer-motion";
@@ -16,7 +16,10 @@ import {
   Zap,
   FileJson,
   FileSpreadsheet,
-  AlertCircle
+  AlertCircle,
+  MessageCircle,
+  Send,
+  Target
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -57,7 +60,7 @@ export default function Intent2ModelWizard() {
   const [llmStatus, setLlmStatus] = useState<any>(null);
   const [backendOnline, setBackendOnline] = useState<boolean>(true);
   const [isSettingApiKey, setIsSettingApiKey] = useState(false);
-  const [selectedLlmProvider, setSelectedLlmProvider] = useState<string>("gemini");
+  const [selectedLlmProvider, setSelectedLlmProvider] = useState<string>("gemini_cli");
   const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
   const [selectedTaskType, setSelectedTaskType] = useState<"classification" | "regression" | null>(null);
   const [showDevLogs, setShowDevLogs] = useState(false);
@@ -83,6 +86,38 @@ export default function Intent2ModelWizard() {
   } | null>(null);
   const [logStreamError, setLogStreamError] = useState<string | null>(null);
   const [logStreamStatus, setLogStreamStatus] = useState<"idle" | "connecting" | "streaming" | "error">("idle");
+  // User constraints (chat-first: affect next ExecutionPlan)
+  const [userConstraints, setUserConstraints] = useState<{
+    exclude_models: string[];
+    keep_features: string;
+    primary_metric: string;
+  }>({ exclude_models: [], keep_features: "", primary_metric: "" });
+  // Session & chat (chat-first UI)
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [chatHistory, setChatHistory] = useState<Array<{ role: string; content: string; payload?: Record<string, unknown> }>>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatSending, setChatSending] = useState(false);
+  const chatEndRef = React.useRef<HTMLDivElement>(null);
+  // Cursor-for-ML: ModelState + live notebook (source of truth for UI)
+  const [modelState, setModelState] = useState<{
+    dataset_summary?: Record<string, unknown>;
+    current_features?: string[];
+    preprocessing_steps?: string[];
+    current_model?: string;
+    previous_model?: string;
+    metrics?: Record<string, unknown>;
+    error_analysis?: { confusion_matrix?: number[][]; class_labels?: string[]; feature_importance?: Record<string, number> };
+    attempt_number?: number;
+    last_diff?: Record<string, unknown>;
+    status?: string;
+    status_message?: string;
+  } | null>(null);
+  const [notebookCells, setNotebookCells] = useState<Array<{ attempt?: number; model?: string; diff?: Record<string, unknown>; preprocessing?: string[]; primary_metric?: string }>>([]);
+  const [sessionExpiredMessage, setSessionExpiredMessage] = useState<string | null>(null);
+  // Typing animation for last agent message (dhire dhire)
+  const [streamingContent, setStreamingContent] = useState("");
+  const [streamingLength, setStreamingLength] = useState(0);
+  const streamingDoneRef = React.useRef(true);
 
   const fetchLlmStatus = async () => {
     try {
@@ -98,13 +133,13 @@ export default function Intent2ModelWizard() {
     }
   };
 
-  // Load persisted provider selection on mount (so it doesn't flip on refresh / polling)
+  // Load persisted provider selection on mount; default to CLI if nothing saved
   useEffect(() => {
     try {
       const saved = window.localStorage.getItem("intent2model_llm_provider");
-      if (saved) setSelectedLlmProvider(saved);
+      setSelectedLlmProvider(saved && (saved === "gemini" || saved === "gemini_cli") ? saved : "gemini_cli");
     } catch {
-      // ignore
+      setSelectedLlmProvider("gemini_cli");
     }
   }, []);
 
@@ -171,8 +206,17 @@ export default function Intent2ModelWizard() {
     setFiles([file]);
 
     try {
+      setSessionExpiredMessage(null);
       const uploadResult = await uploadDataset(file);
       setDatasetId(uploadResult.dataset_id);
+      setSessionId(uploadResult.session_id || null);
+      setChatHistory(
+        Array.isArray(uploadResult.chat_history)
+          ? uploadResult.chat_history
+          : uploadResult.initial_message
+            ? [uploadResult.initial_message]
+            : []
+      );
       const numeric = uploadResult.profile?.numeric_cols || [];
       const categorical = uploadResult.profile?.categorical_cols || [];
       setAvailableColumns([...numeric, ...categorical]);
@@ -217,6 +261,175 @@ export default function Intent2ModelWizard() {
       throw new Error("Upload succeeded but backend did not return dataset_id");
     }
     return data;
+  };
+
+  const clearSessionExpired = () => {
+    setSessionId(null);
+    setChatHistory([]);
+    setModelState(null);
+    setNotebookCells([]);
+    setSessionExpiredMessage("Session expired (e.g. backend restarted). Please upload your dataset again.");
+  };
+
+  const sendChatMessage = async () => {
+    const msg = (chatInput || "").trim();
+    if (!msg || !sessionId || chatSending) return;
+    setChatInput("");
+    setSessionExpiredMessage(null);
+    // Optimistic: show user message and "Thinking..." immediately
+    setChatHistory((prev) => [
+      ...prev,
+      { role: "user", content: msg },
+      { role: "agent", content: "Thinking…", isPlaceholder: true },
+    ]);
+    setChatSending(true);
+    try {
+      const resp = await fetch(`${BACKEND_HTTP_BASE}/session/${sessionId}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: msg }),
+      });
+      if (resp.status === 404) {
+        clearSessionExpired();
+        setChatSending(false);
+        return;
+      }
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error((err as { detail?: string }).detail || "Chat failed");
+      }
+      const data = await resp.json();
+      if (Array.isArray(data.chat_history)) {
+        setChatHistory(data.chat_history);
+      }
+      // Agent mediates: backend can signal "trigger_training" so we start training (never silent retry)
+      const lower = msg.toLowerCase().trim();
+      const trainPhrases = [
+        "yes", "train", "start training", "go", "run", "start",
+        "lets do it", "let's do it", "lets go", "let's go", "do it", "go ahead", "run it", "execute", "run the plan",
+        "sure", "ok", "okay", "alright", "chalo", "jao", "karo", "chalo karo",
+      ];
+      const isTrainCommand =
+        trainPhrases.includes(lower) ||
+        (lower.startsWith("train") && lower.length <= 35);
+      const triggerFromBackend = (data as { trigger_training?: boolean }).trigger_training === true;
+      const lastReply = Array.isArray(data.chat_history) && data.chat_history.length > 0
+        ? data.chat_history[data.chat_history.length - 1]
+        : null;
+      const agentSaidStartTraining =
+        lastReply?.role === "agent" &&
+        typeof lastReply?.content === "string" &&
+        lastReply.content.trim() === "Starting training.";
+      if (isTrainCommand || triggerFromBackend || agentSaidStartTraining) {
+        startSessionTraining();
+      }
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e.message : "Chat failed";
+      setChatHistory((prev) => {
+        const withoutPlaceholder = prev.filter((m) => !(m as { isPlaceholder?: boolean }).isPlaceholder);
+        return [
+          ...withoutPlaceholder,
+          { role: "agent", content: `Error: ${err}` },
+        ];
+      });
+    } finally {
+      setChatSending(false);
+    }
+  };
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatHistory]);
+
+  // When last message is agent, start typing animation
+  useEffect(() => {
+    const last = chatHistory[chatHistory.length - 1];
+    if (last?.role === "agent" && typeof last.content === "string") {
+      setStreamingContent(last.content);
+      setStreamingLength(0);
+      streamingDoneRef.current = false;
+    } else {
+      streamingDoneRef.current = true;
+    }
+  }, [chatHistory]);
+
+  // Animate streaming length (dhire dhire)
+  useEffect(() => {
+    if (streamingContent.length === 0 || streamingLength >= streamingContent.length) {
+      streamingDoneRef.current = true;
+      return;
+    }
+    const t = setTimeout(() => {
+      setStreamingLength((prev) => {
+        if (prev >= streamingContent.length) return prev;
+        return prev + 1;
+      });
+    }, 18);
+    return () => clearTimeout(t);
+  }, [streamingContent, streamingLength]);
+
+  const refreshSession = async () => {
+    if (!sessionId) return;
+    try {
+      const resp = await fetch(`${BACKEND_HTTP_BASE}/session/${sessionId}`);
+      if (resp.status === 404) {
+        clearSessionExpired();
+        return;
+      }
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (Array.isArray(data.chat_history)) setChatHistory(data.chat_history);
+      if (data.model_state) setModelState(data.model_state);
+      if (Array.isArray(data.notebook_cells)) setNotebookCells(data.notebook_cells);
+      if (data.current_run_id) setCurrentRunId(data.current_run_id);
+    } catch (e) {
+      console.error("Failed to refresh session:", e);
+    }
+  };
+
+  const startSessionTraining = async () => {
+    if (!sessionId || training) return;
+    setTraining(true);
+    setTrainingError(null);
+    setProgress(0);
+    setLiveLogs([]);
+    setCurrentRunId(null);
+    setSessionExpiredMessage(null);
+    try {
+      const resp = await fetch(`${BACKEND_HTTP_BASE}/session/${sessionId}/train`, { method: "POST" });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.status === 404) {
+        clearSessionExpired();
+        return;
+      }
+      if (data.run_id) {
+        setCurrentRunId(data.run_id);
+        await fetchRunState(data.run_id);
+      }
+      await refreshSession();
+      if (data.refused) {
+        setTrainingError(data.refusal_reason || "Training refused.");
+      } else {
+        setTrainedModel({ ...data, run_id: data.run_id });
+        setSelectedModelName(data.metrics?.model_name || data.model_state?.current_model);
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Training failed";
+      setTrainingError(msg);
+    } finally {
+      setTraining(false);
+      setProgress(100);
+    }
+  };
+
+  const cancelSessionTraining = async () => {
+    if (!sessionId) return;
+    try {
+      await fetch(`${BACKEND_HTTP_BASE}/session/${sessionId}/cancel`, { method: "POST" });
+      await refreshSession();
+    } catch (e) {
+      console.error("Cancel failed:", e);
+    }
   };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ 
@@ -279,15 +492,23 @@ export default function Intent2ModelWizard() {
         fetchBackendLogTail();
       }, 200);
 
+      const body: Record<string, unknown> = {
+        dataset_id: ensuredDatasetId,
+        target: targetColumn,
+        task: selectedTaskType || undefined,
+        llm_provider: selectedLlmProvider,
+      };
+      if (userConstraints.exclude_models.length > 0 || userConstraints.keep_features.trim() || userConstraints.primary_metric.trim()) {
+        body.user_constraints = {
+          ...(userConstraints.exclude_models.length ? { exclude_models: userConstraints.exclude_models } : {}),
+          ...(userConstraints.keep_features.trim() ? { keep_features: userConstraints.keep_features.split(",").map((s) => s.trim()).filter(Boolean) } : {}),
+          ...(userConstraints.primary_metric.trim() ? { primary_metric: userConstraints.primary_metric.trim() } : {}),
+        };
+      }
       const response = await fetch(`${BACKEND_HTTP_BASE}/train`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          dataset_id: ensuredDatasetId,
-          target: targetColumn,
-          task: selectedTaskType || undefined,
-          llm_provider: selectedLlmProvider,
-        }),
+        body: JSON.stringify(body),
       });
 
       const data = await response.json();
@@ -699,7 +920,7 @@ export default function Intent2ModelWizard() {
           </Button>
         </div>
         <p className="text-muted-foreground text-lg">
-          Transform raw datasets into high-performance ML models autonomously.
+          Pair-program with an ML engineer on your dataset. Chat, steer, and see the model evolve live.
         </p>
         {llmStatus && (
           <div className="text-sm text-muted-foreground">
@@ -715,28 +936,422 @@ export default function Intent2ModelWizard() {
         )}
       </div>
 
-      {/* Stepper */}
-      <div className="grid grid-cols-4 gap-4">
-        {[
-          { icon: Database, label: "Upload Data" },
-          { icon: Settings2, label: "Define Intent" },
-          { icon: Zap, label: "Train Model" },
-          { icon: BarChart3, label: "Deploy & Stats" }
-        ].map((s, i) => (
-          <div 
-            key={i} 
-            className={`flex flex-col items-center space-y-2 pb-4 border-b-2 transition-colors ${
-              step > i ? "border-primary text-primary" : "border-muted text-muted-foreground"
-            }`}
-          >
-            <s.icon className="w-5 h-5" />
-            <span className="text-xs font-medium hidden sm:inline">{s.label}</span>
+      {/* Cursor-for-ML: no wizard stepper — Upload OR Chat + Live panels */}
+      {!sessionId && (
+        <div className="space-y-4 pb-4 border-b-2 border-muted">
+          {sessionExpiredMessage && (
+            <div className="rounded-lg border border-amber-500/50 bg-amber-50 dark:bg-amber-950/30 px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
+              {sessionExpiredMessage}
+            </div>
+          )}
+          <div className="grid grid-cols-1 gap-4">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Database className="w-5 h-5" />
+              <span className="text-sm font-medium">Upload a dataset to start</span>
+            </div>
           </div>
-        ))}
-      </div>
+        </div>
+      )}
+
+      {/* Live ML Chat + Live panels — ALWAYS visible after upload (single view) */}
+      {sessionId && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left: Chat — persistent, always visible */}
+          <div className="lg:col-span-2 space-y-4">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <MessageCircle className="w-4 h-4" />
+                  Chat — pair-program with the ML engineer
+                </CardTitle>
+                <CardDescription>
+                  Say &quot;drop id&quot;, &quot;use species as target&quot;, &quot;yes&quot; or &quot;try something stronger&quot;. I never retry silently.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="rounded-lg border bg-muted/30 max-h-[320px] overflow-y-auto p-3 space-y-3">
+                  {chatHistory.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No messages yet. Say &quot;use X as target&quot; or &quot;yes&quot; to train.</p>
+                  ) : (
+                chatHistory.map((m, idx) => {
+                  const isPlaceholder = (m as { isPlaceholder?: boolean }).isPlaceholder;
+                  const isLastAgent = idx === chatHistory.length - 1 && m.role === "agent";
+                  const showStreaming = !isPlaceholder && isLastAgent && streamingContent === m.content && streamingLength < (m.content?.length ?? 0);
+                  const displayContent = showStreaming
+                    ? (m.content as string).slice(0, streamingLength) + "▌"
+                    : (m.content as string);
+                  // Render **bold** as actual bold (Markdown-style)
+                  const boldSegments = (displayContent as string).split(/\*\*/);
+                  return (
+                    <div
+                      key={idx}
+                      className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                    >
+                      <div
+                        className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
+                          m.role === "user"
+                            ? "bg-primary text-primary-foreground"
+                            : "bg-muted border"
+                        } ${isPlaceholder ? "animate-pulse" : ""}`}
+                      >
+                        <p className="whitespace-pre-wrap">
+                          {boldSegments.map((seg, i) =>
+                            i % 2 === 1 ? <strong key={i}>{seg}</strong> : <Fragment key={i}>{seg}</Fragment>
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Input
+                    placeholder="e.g. use species as target, or say 'train' / 'yes' to start training"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendChatMessage()}
+                    className="flex-1 min-w-[200px]"
+                    disabled={chatSending || training}
+                  />
+                  <Button onClick={sendChatMessage} disabled={chatSending || !chatInput.trim() || training} size="sm">
+                    <Send className="w-4 h-4 mr-1" /> Send
+                  </Button>
+                  <Button onClick={cancelSessionTraining} disabled={!training} size="sm" variant="outline">
+                    Cancel
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">Say &quot;train&quot; or &quot;yes&quot; to start training — no separate button.</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Right: Live panels — Model state, Notebook, Visuals */}
+          <div className="space-y-4">
+            {/* Live Activity — backend.log style during training */}
+            {(training || (runState?.events?.length ?? 0) > 0) && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <Zap className="w-4 h-4" /> Live Activity
+                  </CardTitle>
+                  <CardDescription className="text-xs">Training log (like backend.log) — updates in real time</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="rounded-lg border-2 border-emerald-500/30 bg-slate-900 text-green-400 font-mono text-xs p-3 max-h-[240px] overflow-y-auto">
+                    {runState?.events?.length ? (
+                      runState.events.slice(-60).map((ev: { ts?: string; step_name?: string; message?: string; status?: string }, idx: number) => {
+                        const runShort = (currentRunId || runState?.run_id || "").slice(0, 8);
+                        const isFailed = ev.status === "failed" || (ev.message && (ev.message.includes("❌") || ev.message.includes("failed")));
+                        const isSuccess = ev.message && (ev.message.includes("✅") || ev.message.includes("succeeded"));
+                        const lineCl = isFailed ? "text-red-400" : isSuccess ? "text-emerald-300" : "text-green-400";
+                        return (
+                          <div key={idx} className={`${lineCl} whitespace-pre-wrap`}>
+                            <span className="text-slate-500 select-none">[{runShort}]</span>{" "}
+                            <span className="text-slate-400">[{ev.step_name || "info"}]</span>{" "}
+                            {ev.message}
+                          </div>
+                        );
+                      })
+                    ) : training ? (
+                      <div className="text-slate-500">Connecting… logs will appear here.</div>
+                    ) : null}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Model state (source of truth) */}
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4" /> Model state
+                </CardTitle>
+                <CardDescription className="text-xs">Dataset, features, preprocessing, model, metrics — live</CardDescription>
+              </CardHeader>
+              <CardContent className="text-xs space-y-2">
+                {modelState ? (
+                  <>
+                    {modelState.dataset_summary && (
+                      <p>Rows: {String((modelState.dataset_summary as Record<string, unknown>).n_rows ?? "—")} × Cols: {String((modelState.dataset_summary as Record<string, unknown>).n_cols ?? "—")}</p>
+                    )}
+                    {modelState.current_model && <p><strong>Model:</strong> {modelState.current_model}</p>}
+                    {modelState.preprocessing_steps?.length ? <p><strong>Preprocessing:</strong> {modelState.preprocessing_steps.slice(0, 5).join(", ")}</p> : null}
+                    {modelState.current_features?.length ? <p><strong>Features:</strong> {modelState.current_features.length} used</p> : null}
+                    {modelState.attempt_number ? <p><strong>Attempt:</strong> {modelState.attempt_number}</p> : null}
+                    {Object.keys(modelState.last_diff || {}).length > 0 && (
+                      <p className="text-primary"><strong>Last diff:</strong> {JSON.stringify(modelState.last_diff)}</p>
+                    )}
+                    {modelState.metrics && Object.keys(modelState.metrics).length > 0 && (
+                      <p><strong>Metrics:</strong> {Object.entries(modelState.metrics).filter(([k]) => !k.startsWith("_")).slice(0, 5).map(([k, v]) => `${k}=${typeof v === "number" ? v.toFixed(3) : v}`).join(", ")}</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-muted-foreground">Run training to see state.</p>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Live notebook / code view (diff-based) */}
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <FileJson className="w-4 h-4" /> Live notebook
+                </CardTitle>
+                <CardDescription className="text-xs">Each attempt = one cell (model, diff, preprocessing)</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="max-h-[200px] overflow-y-auto space-y-2 text-xs">
+                  {notebookCells.length === 0 ? (
+                    <p className="text-muted-foreground">No attempts yet. Say &quot;train&quot; to run.</p>
+                  ) : (
+                    notebookCells.slice(-10).map((cell, idx) => (
+                      <div key={idx} className="rounded border p-2 bg-muted/30">
+                        <span className="font-medium">Attempt {cell.attempt ?? idx + 1}</span>: {cell.model ?? "—"} → {cell.primary_metric ?? "—"}
+                        {cell.diff && Object.keys(cell.diff).length > 0 && <div className="text-primary mt-1">Diff: {JSON.stringify(cell.diff)}</div>}
+                      </div>
+                    ))
+                  )}
+                </div>
+                {(currentRunId || sessionId) && (
+                  <div className="flex flex-wrap gap-2 pt-2 border-t">
+                    {currentRunId && (
+                      <a
+                        href={`${BACKEND_HTTP_BASE}/download/${currentRunId}/notebook`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                      >
+                        <FileJson className="w-3 h-3" /> Download .ipynb
+                      </a>
+                    )}
+                    {sessionId && (
+                      <a
+                        href={`${BACKEND_HTTP_BASE}/session/${sessionId}/notebook`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                      >
+                        View notebook (session)
+                      </a>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Artifacts & downloads — notebook, report, model, charts (all) */}
+            {currentRunId && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <FileSpreadsheet className="w-4 h-4" /> Artifacts &amp; downloads
+                  </CardTitle>
+                  <CardDescription className="text-xs">Notebook, report, model, and charts for this run</CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-wrap gap-2">
+                  <a
+                    href={`${BACKEND_HTTP_BASE}/download/${currentRunId}/notebook`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                  >
+                    <FileJson className="w-3 h-3" /> Notebook (.ipynb)
+                  </a>
+                  <a
+                    href={`${BACKEND_HTTP_BASE}/download/${currentRunId}/report`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                  >
+                    Report
+                  </a>
+                  <a
+                    href={`${BACKEND_HTTP_BASE}/download/${currentRunId}/model`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                  >
+                    Model
+                  </a>
+                  <a
+                    href={`${BACKEND_HTTP_BASE}/download/${currentRunId}/readme`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                  >
+                    Readme
+                  </a>
+                  <a
+                    href={`${BACKEND_HTTP_BASE}/download/${currentRunId}/all`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                  >
+                    All (zip: notebook + report + charts)
+                  </a>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Charts — metrics & feature importance from modelState */}
+            {(modelState?.metrics && Object.keys(modelState.metrics).length > 0) || (modelState?.error_analysis?.feature_importance && Object.keys(modelState.error_analysis.feature_importance).length > 0) ? (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <BarChart3 className="w-4 h-4" /> Charts
+                  </CardTitle>
+                  <CardDescription className="text-xs">Metrics and feature importance</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {modelState?.metrics && Object.keys(modelState.metrics).length > 0 && (() => {
+                    const m = modelState.metrics as Record<string, unknown>;
+                    const skip = (k: string) => k.startsWith("_") || typeof m[k] !== "number";
+                    const chartData = Object.entries(m)
+                      .filter(([k]) => !skip(k))
+                      .slice(0, 10)
+                      .map(([name, value]) => ({ name, value: Number(value) }));
+                    if (chartData.length === 0) return null;
+                    return (
+                      <div className="h-44">
+                        <p className="font-medium mb-1 text-xs">Metrics</p>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 25 }}>
+                            <CartesianGrid strokeDasharray="3 3" />
+                            <XAxis dataKey="name" angle={-25} textAnchor="end" height={50} tick={{ fontSize: 10 }} />
+                            <YAxis tick={{ fontSize: 10 }} />
+                            <Tooltip />
+                            <Bar dataKey="value" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    );
+                  })()}
+                  {modelState?.error_analysis?.feature_importance && Object.keys(modelState.error_analysis.feature_importance).length > 0 && (
+                    <div className="h-44">
+                      <p className="font-medium mb-1 text-xs">Feature importance</p>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart
+                          data={Object.entries(modelState.error_analysis.feature_importance as Record<string, number>)
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 8)
+                            .map(([name, value]) => ({ name: name.length > 12 ? name.slice(0, 12) + "…" : name, value }))}
+                          layout="vertical"
+                          margin={{ top: 5, right: 5, left: 60, bottom: 5 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis type="number" tick={{ fontSize: 10 }} />
+                          <YAxis type="category" dataKey="name" width={58} tick={{ fontSize: 9 }} />
+                          <Tooltip />
+                          <Bar dataKey="value" fill="hsl(var(--chart-2))" radius={[0, 4, 4, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            ) : null}
+
+            {/* Predict — enter feature values and get a prediction (visible place to predict) */}
+            {currentRunId && featureColumns.length > 0 && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <Target className="w-4 h-4" /> Predict
+                  </CardTitle>
+                  <CardDescription className="text-xs">Enter feature values and get a prediction from the trained model</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-1 gap-2">
+                    {featureColumns.map((col) => (
+                      <div key={col} className="space-y-1">
+                        <Label className="text-xs">{col}</Label>
+                        <Input
+                          className="h-8 text-xs"
+                          value={predictInputs[col] ?? ""}
+                          onChange={(e) => setPredictInputs((prev) => ({ ...prev, [col]: e.target.value }))}
+                          placeholder="value..."
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <Button size="sm" onClick={runPrediction} disabled={isPredicting} className="w-full">
+                    {isPredicting ? "Predicting…" : "Predict"}
+                  </Button>
+                  {predictionResult && (
+                    <div className="p-2 rounded border bg-muted/30 text-xs">
+                      {"error" in predictionResult ? (
+                        <p className="text-red-500">{predictionResult.error}</p>
+                      ) : (
+                        <div className="space-y-1">
+                          <p className="font-semibold">Result: {predictionResult.prediction !== undefined && predictionResult.prediction !== null ? String(predictionResult.prediction) : "—"}</p>
+                          {predictionResult.probabilities && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {Object.entries(predictionResult.probabilities).map(([k, v]: [string, unknown]) => (
+                                <span key={k} className="bg-background px-1 rounded">{k}: {(Number(v) * 100).toFixed(0)}%</span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Real-time visuals: confusion matrix, feature importance */}
+            {(modelState?.error_analysis?.confusion_matrix?.length || (modelState?.error_analysis?.feature_importance && Object.keys(modelState.error_analysis.feature_importance).length)) ? (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">Error analysis</CardTitle>
+                  <CardDescription className="text-xs">Confusion matrix & feature importance</CardDescription>
+                </CardHeader>
+                <CardContent className="text-xs space-y-3">
+                  {modelState?.error_analysis?.confusion_matrix?.length ? (
+                    <div>
+                      <p className="font-medium mb-1">Confusion matrix</p>
+                      <div className="overflow-x-auto">
+                        <table className="border border-collapse">
+                          <tbody>
+                            {(modelState.error_analysis.confusion_matrix as number[][]).slice(0, 8).map((row, i) => (
+                              <tr key={i}>
+                                {row.slice(0, 8).map((v, j) => (
+                                  <td key={j} className="border px-1 text-right">{v}</td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {modelState.error_analysis.class_labels?.length ? (
+                          <p className="mt-1 text-muted-foreground">Classes: {modelState.error_analysis.class_labels.join(", ")}</p>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                  {modelState?.error_analysis?.feature_importance && Object.keys(modelState.error_analysis.feature_importance).length > 0 ? (
+                    <div>
+                      <p className="font-medium mb-1">Feature importance (top 8)</p>
+                      <ul className="list-disc pl-4">
+                        {Object.entries(modelState.error_analysis.feature_importance)
+                          .sort((a, b) => b[1] - a[1])
+                          .slice(0, 8)
+                          .map(([name, val]) => (
+                            <li key={name}>{name}: {(val as number).toFixed(4)}</li>
+                          ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </CardContent>
+              </Card>
+            ) : null}
+          </div>
+        </div>
+      )}
 
       <AnimatePresence mode="wait">
-        {step === 1 && (
+        {step === 1 && !sessionId && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -768,7 +1383,7 @@ export default function Intent2ModelWizard() {
           </motion.div>
         )}
 
-        {step === 2 && (
+        {step === 2 && !sessionId && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -777,7 +1392,7 @@ export default function Intent2ModelWizard() {
           >
             <Card>
               <CardHeader>
-                <CardTitle>Define your Model's Intent</CardTitle>
+                <CardTitle>Define your Model&apos;s Intent</CardTitle>
                 <CardDescription>What should your machine learning model focus on?</CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
@@ -886,6 +1501,67 @@ export default function Intent2ModelWizard() {
                     <p className="text-xs text-muted-foreground">Categorize data into discrete labels</p>
                   </div>
                 </div>
+
+                <Separator />
+                <div className="space-y-3">
+                  <Label className="text-sm font-medium">User constraints (override LLM)</Label>
+                  <p className="text-xs text-muted-foreground">These affect the next run: exclude models, keep features, or choose metric.</p>
+                  <div className="flex flex-wrap gap-2">
+                    {["random_forest", "xgboost", "svm", "gradient_boosting", "naive_bayes"].map((m) => (
+                      <label key={m} className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={userConstraints.exclude_models.includes(m)}
+                          onChange={() => {
+                            setUserConstraints((prev) => ({
+                              ...prev,
+                              exclude_models: prev.exclude_models.includes(m)
+                                ? prev.exclude_models.filter((x) => x !== m)
+                                : [...prev.exclude_models, m],
+                            }));
+                          }}
+                          className="rounded"
+                        />
+                        <span className="text-sm">{m.replace(/_/g, " ")}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <Label className="text-xs">Keep features (comma-separated)</Label>
+                      <Input
+                        placeholder="e.g. col1, col2"
+                        value={userConstraints.keep_features}
+                        onChange={(e) => setUserConstraints((prev) => ({ ...prev, keep_features: e.target.value }))}
+                        className="mt-1 h-9"
+                      />
+                    </div>
+                    <div>
+                      <Label className="text-xs">Primary metric override</Label>
+                      <select
+                        className="w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm"
+                        value={userConstraints.primary_metric}
+                        onChange={(e) => setUserConstraints((prev) => ({ ...prev, primary_metric: e.target.value }))}
+                      >
+                        <option value="">Default</option>
+                        {selectedTaskType === "regression" ? (
+                          <>
+                            <option value="rmse">RMSE</option>
+                            <option value="mae">MAE</option>
+                            <option value="r2">R²</option>
+                          </>
+                        ) : (
+                          <>
+                            <option value="accuracy">Accuracy</option>
+                            <option value="f1">F1</option>
+                            <option value="recall">Recall</option>
+                            <option value="roc_auc">ROC AUC</option>
+                          </>
+                        )}
+                      </select>
+                    </div>
+                  </div>
+                </div>
               </CardContent>
               <CardFooter className="flex justify-between">
                 <Button variant="ghost" onClick={() => setStep(1)}>Back</Button>
@@ -895,7 +1571,7 @@ export default function Intent2ModelWizard() {
           </motion.div>
         )}
 
-        {step === 3 && (
+        {step === 3 && !sessionId && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -1144,7 +1820,7 @@ export default function Intent2ModelWizard() {
           )}
         </AnimatePresence>
 
-        {step === 4 && (
+        {step === 4 && !sessionId && (
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -1201,12 +1877,33 @@ export default function Intent2ModelWizard() {
                 })()
               )}
 
+              {/* Notebook (live reasoning surface — attempt-based log) */}
+              {(trainedModel?.run_id || currentRunId) && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Notebook (live reasoning surface)</CardTitle>
+                    <CardDescription>Attempt-based log: Attempt 1 → Failure / Repair diff → Attempt 2 → Outcome. Append-only; no clean final report when refused.</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <a
+                      href={`${BACKEND_HTTP_BASE}/download/${trainedModel?.run_id || currentRunId}/notebook`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 text-primary hover:underline"
+                    >
+                      <FileJson className="w-4 h-4" />
+                      Download notebook (.ipynb)
+                    </a>
+                  </CardContent>
+                </Card>
+              )}
+
               {/* What happened? — Execution timeline (visible on results step) */}
               {(step === 4 && (trainedModel?.run_id || currentRunId) && runState?.events?.length) ? (
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">What happened?</CardTitle>
-                    <CardDescription>Execution timeline: planning, training, failures, LLM diagnoses, retries.</CardDescription>
+                    <CardDescription>Execution timeline: attempt_start, failure, repair_proposal (diff), retry.</CardDescription>
                   </CardHeader>
                   <CardContent>
                     <div className="text-xs text-muted-foreground mb-2">
@@ -1214,18 +1911,23 @@ export default function Intent2ModelWizard() {
                     </div>
                     <div className="relative border-l-2 border-muted pl-3 space-y-1.5 max-h-[320px] overflow-y-auto">
                       {runState.events.slice(-100).map((ev: any, idx: number) => {
+                        const step = (ev.step_name || ev.stage || "").toLowerCase();
                         const isFailed = ev.status === "failed" || (ev.message && (ev.message.includes("❌") || ev.message.includes("failed") || ev.message.includes("REFUSED")));
-                        const isDiagnose = (ev.step_name || ev.stage || "").toLowerCase().includes("diagnose");
-                        const isRetry = (ev.step_name || ev.stage || "").toLowerCase().includes("retry");
-                        const isRepair = (ev.step_name || ev.stage || "").toLowerCase().includes("repair");
+                        const isAttemptStart = step.includes("attempt_start");
+                        const isAttemptFailure = step.includes("attempt_failure");
+                        const isRepairProposal = step.includes("repair_proposal");
+                        const isDiagnose = step.includes("diagnose");
+                        const isRetry = step.includes("retry");
+                        const isRepair = step.includes("repair");
                         return (
                           <div
                             key={idx}
                             className={`text-xs pl-2 py-1 rounded-r border-l-2 ${
-                              isFailed ? "border-red-500 bg-red-50 dark:bg-red-950/20" :
+                              isFailed || isAttemptFailure ? "border-red-500 bg-red-50 dark:bg-red-950/20" :
+                              isAttemptStart ? "border-green-500 bg-green-50 dark:bg-green-950/20" :
+                              isRepairProposal || isRepair ? "border-amber-500 bg-amber-50 dark:bg-amber-950/20" :
                               isDiagnose ? "border-blue-500 bg-blue-50 dark:bg-blue-950/20" :
                               isRetry ? "border-purple-500 bg-purple-50 dark:bg-purple-950/20" :
-                              isRepair ? "border-amber-500 bg-amber-50 dark:bg-amber-950/20" :
                               "border-muted bg-background"
                             }`}
                           >

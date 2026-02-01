@@ -38,6 +38,10 @@ out/
 *.log
 logs/
 
+# Runtime PIDs
+.backend.pid
+.frontend.pid
+
 # Storage
 backend/storage/runs/*.json
 !backend/storage/runs/.gitkeep

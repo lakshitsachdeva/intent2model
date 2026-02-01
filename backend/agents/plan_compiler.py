@@ -1,37 +1,67 @@
 """
-Plan → Code Compiler
+Plan → Code Compiler (DUMB TRANSLATOR)
 
-This is the EXECUTION NERVOUS SYSTEM that converts AutoMLPlan (reasoning) 
-into executable sklearn code.
+Accepts ONLY ExecutionPlan. Translates plan into code. Does NOT think:
+- NEVER inspects df.dtypes
+- NEVER infers transforms
+- NEVER guesses fallbacks
+- NEVER reacts to metrics
 
-CRITICAL RULE: If code does NOT reference AutoMLPlan fields, it is a BUG.
+If ExecutionPlan is incomplete → HARD FAIL (IncompleteExecutionPlan).
+If plan_quality == fallback_low_confidence → REFUSE (RefuseCodeGeneration).
 """
 
 from typing import List, Dict, Any, Optional
+
 import pandas as pd
-from schemas.pipeline_schema import AutoMLPlan, FeatureTransform, ModelCandidate
+
+from schemas.pipeline_schema import (
+    AutoMLPlan,
+    ExecutionPlan,
+    FeatureTransform,
+    ModelCandidate,
+)
 
 
-def compile_preprocessing_code(plan: AutoMLPlan, df: pd.DataFrame) -> str:
+class RefuseCodeGeneration(Exception):
+    """Compiler refuses to generate code (e.g. fallback_low_confidence)."""
+    pass
+
+
+class IncompleteExecutionPlan(Exception):
+    """ExecutionPlan is incomplete (e.g. empty feature_transforms or model_candidates)."""
+    pass
+
+
+def validate_execution_plan_for_compilation(plan: ExecutionPlan) -> None:
     """
-    Compile preprocessing code from AutoMLPlan.feature_transforms.
-    
-    NEVER uses select_dtypes.
-    NEVER applies StandardScaler unless plan explicitly says so.
-    Groups features by plan semantics, not dtype.
+    Call before any compile_* function.
+    Raises RefuseCodeGeneration if plan_quality == fallback_low_confidence.
+    Raises IncompleteExecutionPlan if plan is incomplete.
     """
-    import pandas as pd
-    
-    lines = []
-    lines.append("# Preprocessing compiled from AutoMLPlan\n")
-    lines.append("# Each feature transform is based on plan.feature_transforms\n")
-    lines.append("\n")
-    
-    # Validate plan has feature_transforms
+    if plan.plan_quality == "fallback_low_confidence":
+        raise RefuseCodeGeneration(
+            "Compiler refuses code generation: plan_quality is fallback_low_confidence. "
+            "Execution reasoning must produce a higher-confidence plan."
+        )
     if not plan.feature_transforms:
-        lines.append("# ⚠️ WARNING: plan.feature_transforms is empty! Using fallback.\n")
-        lines.append("# This should not happen - the plan is incomplete.\n")
-        lines.append("\n")
+        raise IncompleteExecutionPlan("ExecutionPlan.feature_transforms is empty. Cannot compile preprocessing.")
+    kept = [ft for ft in plan.feature_transforms if not getattr(ft, "drop", False)]
+    if not kept:
+        raise IncompleteExecutionPlan("ExecutionPlan has no non-dropped features. Cannot compile preprocessing.")
+    if not plan.model_candidates:
+        raise IncompleteExecutionPlan("ExecutionPlan.model_candidates is empty. Cannot compile model code.")
+
+
+def compile_preprocessing_code_from_execution_plan(plan: ExecutionPlan) -> str:
+    """
+    Compile preprocessing code from ExecutionPlan.feature_transforms only.
+    NEVER uses df. NEVER infers. If plan is incomplete, caller must have called validate_execution_plan_for_compilation.
+    """
+    validate_execution_plan_for_compilation(plan)
+    lines = []
+    lines.append("# Preprocessing compiled from ExecutionPlan.feature_transforms\n")
+    lines.append("\n")
     
     # Group features by transform strategy (from plan, not dtype)
     dropped_features = []
@@ -49,32 +79,44 @@ def compile_preprocessing_code(plan: AutoMLPlan, df: pd.DataFrame) -> str:
         if ft.drop:
             dropped_features.append(ft.name)
             continue
-        
-        # Numeric features
-        if ft.kind in ["continuous", "ordinal", "count"]:
-            if ft.scale == "standard":
+
+        encode = getattr(ft, "encode", "none") or "none"
+        scale = getattr(ft, "scale", "none") or "none"
+        impute = getattr(ft, "impute", "none") or "none"
+        kind = getattr(ft, "kind", "unknown") or "unknown"
+
+        # Numeric features (by kind or by scale/impute when kind is unknown)
+        if kind in ["continuous", "ordinal", "count"] or (
+            kind not in ["binary", "nominal"] and (scale != "none" or impute in ("mean", "median"))
+        ):
+            if scale == "standard":
                 numeric_scale.append(ft.name)
             else:
                 numeric_noscale.append(ft.name)
-            
-            if ft.impute == "mean":
+            if impute == "mean":
                 numeric_impute_mean.append(ft.name)
-            elif ft.impute == "median":
+            elif impute == "median":
                 numeric_impute_median.append(ft.name)
-        
-        # Categorical features
-        elif ft.kind in ["binary", "nominal"]:
-            if ft.encode == "one_hot":
+
+        # Categorical features (by kind or by encode when kind is unknown)
+        elif kind in ["binary", "nominal"] or (kind not in ["continuous", "ordinal", "count"] and encode != "none"):
+            if encode == "one_hot":
                 categorical_onehot.append(ft.name)
-            elif ft.encode == "ordinal":
+            elif encode == "ordinal":
                 categorical_ordinal.append(ft.name)
-            elif ft.encode == "frequency":
+            elif encode == "frequency":
                 categorical_frequency.append(ft.name)
-            
-            if ft.impute == "most_frequent":
+            else:
+                # encode is none but we treated as categorical (e.g. kind=nominal) — default one_hot for notebook
+                categorical_onehot.append(ft.name)
+            if impute == "most_frequent":
                 categorical_impute_mf.append(ft.name)
-            elif ft.impute == "constant":
+            elif impute == "constant":
                 categorical_impute_const.append(ft.name)
+
+        # Unknown kind and no encode/scale/impute hint — treat as numeric passthrough so we get at least one transformer
+        else:
+            numeric_noscale.append(ft.name)
     
     # Build transformers list
     lines.append("from sklearn.pipeline import Pipeline\n")
@@ -181,53 +223,33 @@ def compile_preprocessing_code(plan: AutoMLPlan, df: pd.DataFrame) -> str:
         lines.append(f"    transformers.append(('cat_freq', Pipeline(steps), cat_freq_cols))\n")
         lines.append("\n")
     
-    # Create preprocessor
-    lines.append("# Create preprocessor from plan-driven transformers\n")
+    # Create preprocessor — NO fallback; plan must be complete
+    lines.append("# Create preprocessor from ExecutionPlan\n")
     if dropped_features:
         lines.append(f"# Dropped features (from plan): {dropped_features}\n")
-    
-    # CRITICAL: If no transformers were generated from plan.feature_transforms, add a RUNTIME fallback.
-    # (Do NOT reference a Python variable named `transformers` in this compiler function.)
-    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    categorical_cols = [c for c in df.columns if c not in numeric_cols]
-    target = plan.inferred_target
-    numeric_cols = [c for c in numeric_cols if c != target and c not in dropped_features]
-    categorical_cols = [c for c in categorical_cols if c != target and c not in dropped_features]
-
-    lines.append("\n")
-    lines.append("if len(transformers) == 0:\n")
-    lines.append("    # ⚠️ WARNING: No transformers generated from plan.feature_transforms! Using runtime fallback.\n")
-    if numeric_cols:
-        lines.append(f"    numeric_cols = {numeric_cols}\n")
-        lines.append("    transformers.append(('num_scaled', Pipeline([('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())]), numeric_cols))\n")
-    if categorical_cols:
-        lines.append(f"    categorical_cols = {categorical_cols}\n")
-        lines.append("    try:\n")
-        lines.append("        ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False, min_frequency=5)\n")
-        lines.append("    except TypeError:\n")
-        lines.append("        ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False)\n")
-        lines.append("    transformers.append(('cat_onehot', Pipeline([('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', ohe)]), categorical_cols))\n")
-    
+    if not (numeric_scale or numeric_noscale or categorical_onehot or categorical_ordinal or categorical_frequency):
+        raise IncompleteExecutionPlan(
+            "No transformers could be built from ExecutionPlan.feature_transforms. "
+            "Plan must specify encode/scale/impute per feature."
+        )
     lines.append("preprocessor = ColumnTransformer(transformers, remainder='drop')\n")
     lines.append("\n")
     
     return "".join(lines)
 
 
-def compile_model_code(plan: AutoMLPlan, selected_model_name: Optional[str] = None) -> str:
-    """
-    Compile model instantiation code. MUST use the trained run's selected model when provided.
-    
-    - When selected_model_name is provided (best model from training), use it for code gen
-      even if not in plan.model_candidates — so notebook matches what was actually trained.
-    - Otherwise use plan.model_candidates[0].
-    """
+def compile_model_code_from_execution_plan(
+    plan: ExecutionPlan,
+    task: str,
+    selected_model_name: Optional[str] = None,
+) -> str:
+    """Compile model code from ExecutionPlan only. Uses task for classification vs regression."""
+    validate_execution_plan_for_compilation(plan)
     lines = []
-    lines.append("# Model compiled from AutoMLPlan.model_candidates\n")
+    lines.append("# Model compiled from ExecutionPlan.model_candidates\n")
     lines.append("\n")
-    
-    task = plan.task_type
-    is_classification = "classification" in task
+    _task = task
+    is_classification = "classification" in _task
     model_map = (
         {
             "logistic_regression": "LogisticRegression",
@@ -251,7 +273,7 @@ def compile_model_code(plan: AutoMLPlan, selected_model_name: Optional[str] = No
     
     model_candidate = None
     if selected_model_name:
-        for mc in (plan.model_candidates or []):
+        for mc in list(plan.model_candidates or []):
             if (getattr(mc, "model_name", None) or (mc if isinstance(mc, dict) else {}).get("model_name")) == selected_model_name:
                 model_candidate = mc
                 break
@@ -268,7 +290,7 @@ def compile_model_code(plan: AutoMLPlan, selected_model_name: Optional[str] = No
             model_name = None
             params = {}
             reason_md = ""
-    elif plan.model_candidates:
+    elif list(plan.model_candidates or []):
         mc = plan.model_candidates[0]
         model_name = getattr(mc, "model_name", None) or (mc.get("model_name") if isinstance(mc, dict) else None)
         params = getattr(mc, "params", None) or (mc.get("params") if isinstance(mc, dict) else {}) or {}
@@ -331,20 +353,13 @@ def compile_model_code(plan: AutoMLPlan, selected_model_name: Optional[str] = No
     return "".join(lines)
 
 
-def compile_metrics_code(plan: AutoMLPlan) -> str:
-    """
-    Compile metrics code from AutoMLPlan.primary_metric and plan.additional_metrics.
-    
-    NEVER hardcodes accuracy, R², RMSE.
-    Adapts to task_type and class imbalance.
-    """
+def compile_metrics_code_from_execution_plan(plan: ExecutionPlan, task: str) -> str:
+    """Compile metrics code from ExecutionPlan.primary_metric and additional_metrics. Uses task for classification vs regression."""
     lines = []
-    lines.append("# Metrics compiled from AutoMLPlan\n")
+    lines.append("# Metrics compiled from ExecutionPlan\n")
     lines.append(f"# Primary metric: {plan.primary_metric}\n")
     lines.append(f"# Additional metrics: {plan.additional_metrics}\n")
     lines.append("\n")
-    
-    task = plan.task_type
     is_classification = "classification" in task
     
     lines.append("from sklearn.metrics import (\n")
@@ -384,16 +399,60 @@ def compile_metrics_code(plan: AutoMLPlan) -> str:
     return "".join(lines)
 
 
-def compile_pipeline_code(plan: AutoMLPlan) -> str:
-    """Compile final pipeline assembly code."""
+def compile_pipeline_code_from_execution_plan(plan: ExecutionPlan) -> str:
+    """Compile final pipeline assembly code from ExecutionPlan."""
     lines = []
-    lines.append("# Assemble pipeline from plan-driven components\n")
+    lines.append("# Assemble pipeline from ExecutionPlan\n")
     lines.append("pipeline = Pipeline([\n")
     lines.append("    ('preprocessor', preprocessor),\n")
     lines.append("    ('model', model)\n")
     lines.append("])\n")
     lines.append("\n")
     return "".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility: accept AutoMLPlan (convert to ExecutionPlan) for existing callers
+# ---------------------------------------------------------------------------
+
+def compile_preprocessing_code(plan: Any, df: Optional[pd.DataFrame] = None) -> str:
+    """Backward compat: accept AutoMLPlan or ExecutionPlan. If AutoMLPlan, convert to ExecutionPlan (df ignored)."""
+    from agents.execution_planner import automl_plan_to_structural_and_execution
+    if isinstance(plan, ExecutionPlan):
+        return compile_preprocessing_code_from_execution_plan(plan)
+    _, exec_plan = automl_plan_to_structural_and_execution(plan)
+    return compile_preprocessing_code_from_execution_plan(exec_plan)
+
+
+def compile_model_code(plan: Any, selected_model_name: Optional[str] = None, task: Optional[str] = None) -> str:
+    """Backward compat: accept AutoMLPlan or ExecutionPlan. task required for ExecutionPlan."""
+    from agents.execution_planner import automl_plan_to_structural_and_execution
+    if isinstance(plan, ExecutionPlan):
+        _task = task or "regression"
+        return compile_model_code_from_execution_plan(plan, _task, selected_model_name)
+    _, exec_plan = automl_plan_to_structural_and_execution(plan)
+    _task = task or getattr(plan, "task_type", "regression")
+    return compile_model_code_from_execution_plan(exec_plan, _task, selected_model_name)
+
+
+def compile_metrics_code(plan: Any, task: Optional[str] = None) -> str:
+    """Backward compat: accept AutoMLPlan or ExecutionPlan."""
+    from agents.execution_planner import automl_plan_to_structural_and_execution
+    if isinstance(plan, ExecutionPlan):
+        _task = task or "regression"
+        return compile_metrics_code_from_execution_plan(plan, _task)
+    _, exec_plan = automl_plan_to_structural_and_execution(plan)
+    _task = task or getattr(plan, "task_type", "regression")
+    return compile_metrics_code_from_execution_plan(exec_plan, _task)
+
+
+def compile_pipeline_code(plan: Any) -> str:
+    """Backward compat: accept AutoMLPlan or ExecutionPlan."""
+    from agents.execution_planner import automl_plan_to_structural_and_execution
+    if isinstance(plan, ExecutionPlan):
+        return compile_pipeline_code_from_execution_plan(plan)
+    _, exec_plan = automl_plan_to_structural_and_execution(plan)
+    return compile_pipeline_code_from_execution_plan(exec_plan)
 
 
 def validate_plan_for_execution(plan: AutoMLPlan) -> None:

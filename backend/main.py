@@ -23,6 +23,7 @@ from ml.evaluator import evaluate_dataset
 from utils.logging import create_run_id, log_run
 from agents.automl_agent import plan_automl
 from schemas.pipeline_schema import UserIntent
+from schemas.session_schema import SessionState, ModelState
 from agents.llm_interface import LLMInterface, get_current_model_info
 from agents.error_analyzer import analyze_training_error
 from agents.recovery_agent import AutonomousRecoveryAgent
@@ -83,7 +84,7 @@ def _model_code_for_notebook(task: str, model_name: str) -> str:
             "gradient_boosting": "GradientBoostingClassifier(random_state=42)",
             "naive_bayes": "GaussianNB()",
             "svm": "SVC(random_state=42, probability=True)",
-            "xgboost": "XGBClassifier(random_state=42, eval_metric='logloss')",
+            "xgboost": "XGBClassifier(random_state=42, eval_metric='mlogloss')",
         }
         return mapping.get(model_name, "RandomForestClassifier(n_estimators=300, random_state=42)")
     else:
@@ -97,6 +98,36 @@ def _model_code_for_notebook(task: str, model_name: str) -> str:
             "xgboost": "XGBRegressor(random_state=42)",
         }
         return mapping.get(model_name, "RandomForestRegressor(n_estimators=300, random_state=42)")
+
+
+def _build_initial_chat_message(profile: Dict[str, Any], df: pd.DataFrame) -> tuple[str, Dict[str, Any]]:
+    """
+    Build the first agent message for chat-first flow: head, missing, target candidates, basic summary.
+    Returns (content_str, payload_dict).
+    """
+    n_rows = profile.get("n_rows", 0)
+    n_cols = profile.get("n_cols", 0)
+    numeric = profile.get("numeric_cols", []) or []
+    categorical = profile.get("categorical_cols", []) or []
+    missing = profile.get("missing_percent", {}) or {}
+    candidates = profile.get("candidate_targets", []) or list(df.columns)[:5]
+    head = df.head(5).to_dict(orient="split") if not df.empty else {"columns": [], "data": []}
+    missing_summary = {k: round(v, 1) for k, v in list(missing.items())[:20]}
+    content = (
+        f"Here's what I see in your data.\n\n"
+        f"**Shape:** {n_rows} rows × {n_cols} columns\n"
+        f"**Numeric:** {', '.join(numeric[:12]) or '—'}\n"
+        f"**Categorical:** {', '.join(categorical[:12]) or '—'}\n"
+        f"**Target candidates:** {', '.join(candidates[:8])}\n\n"
+        f"Want me to propose a plan? You can say e.g. \"drop id\", \"use X as target\", \"try something stronger\", or \"explain why accuracy is low\"."
+    )
+    payload = {
+        "head": head,
+        "missing_percent": missing_summary,
+        "target_candidates": candidates,
+        "profile": {k: v for k, v in profile.items() if k in ("n_rows", "n_cols", "numeric_cols", "categorical_cols", "candidate_targets")},
+    }
+    return content, payload
 
 
 def _preprocessing_recommendations(profile: Dict[str, Any], df: pd.DataFrame) -> list[dict[str, Any]]:
@@ -144,6 +175,455 @@ def _preprocessing_recommendations(profile: Dict[str, Any], df: pd.DataFrame) ->
 
     return recs
 
+
+def _parse_chat_to_constraints(message: str, columns: list[str]) -> tuple[bool, dict[str, Any], str]:
+    """
+    Parse user chat message into: is_question, constraints_delta, agent_reply.
+    Rules: question → respond only, no train. Instruction → merge constraints, reply "Want me to train?".
+    """
+    msg = (message or "").strip().lower()
+    cols_lower = {c: c.lower() for c in columns}
+    is_question = False
+    delta: dict[str, Any] = {}
+    reply = ""
+
+    # Question patterns: do not train, just answer
+    if any(x in msg for x in ("explain why", "why is", "why are", "what is", "what are", "how do", "how does", "?")):
+        is_question = True
+        reply = "I can explain after we run a training attempt — try training first, then ask 'explain why accuracy is low' and I'll analyze the results."
+        return is_question, delta, reply
+
+    # drop <column>
+    drop_match = re.search(r"drop\s+([a-zA-Z0-9_.\s]+?)(?:\s|$|,|\.)", msg)
+    if drop_match:
+        raw = drop_match.group(1).strip()
+        for col in columns:
+            if col.lower() == raw or raw in col.lower():
+                delta.setdefault("drop_columns", []).append(col)
+                break
+        else:
+            delta.setdefault("drop_columns", []).append(raw)
+        reply = f"I'll drop {delta['drop_columns'][-1]} from features. Want me to propose a plan and train?"
+
+    # use X as target / this target / target is X / wanna predict X / predict length
+    target_match = re.search(
+        r"(?:use|set|target is?)\s+([a-zA-Z0-9_.]+)\s+as\s+target|(?:use|set)\s+([a-zA-Z0-9_.]+)\s+as\s+target|"
+        r"target\s+is\s+([a-zA-Z0-9_.]+)|this target\s*[:\s]*([a-zA-Z0-9_.]+)|"
+        r"predict\s+([a-zA-Z0-9_.]+)|(?:wanna|want to)\s+predict\s+([a-zA-Z0-9_.]+)|"
+        r"(?:i said |the )?target is (\w+)",
+        msg,
+        re.IGNORECASE,
+    )
+    if target_match:
+        cand = next((g for g in target_match.groups() if g), "").strip()
+        resolved = None
+        for col in columns:
+            if col.lower() == cand.lower():
+                resolved = col
+                break
+        if not resolved and cand:
+            # Partial match: "length" -> petal.length or sepal.length; pick one that contains cand
+            containing = [c for c in columns if cand.lower() in c.lower()]
+            if len(containing) == 1:
+                resolved = containing[0]
+            elif len(containing) > 1:
+                # Prefer petal.X for "length"/"width" (common in iris); else first
+                preferred = [c for c in containing if "petal" in c.lower()]
+                resolved = preferred[0] if preferred else containing[0]
+        if resolved:
+            delta["target"] = resolved
+            reply = f"I'll use **{resolved}** as the target. Want me to propose a plan and train?"
+        else:
+            delta["target"] = cand
+            reply = f"I'll use '{cand}' as the target (please ensure it exists in the data). Want me to train?"
+
+    # try/use something stronger or better / more complex / aggressive / go for it
+    if any(x in msg for x in (
+        "try something stronger", "use something stronger", "something stronger",
+        "try something better", "something better", "better model", "try something better na",
+        "more complex", "aggressive", "stronger model", "xgboost", "use stronger",
+        "go for it", "go for it bro", "try stronger", "more powerful", "powerful models",
+    )):
+        delta["performance_mode"] = "aggressive"
+        reply = "I'll switch to aggressive mode (deeper trees, XGBoost allowed). Want me to train?"
+    if "balanced" in msg and "performance" in msg or msg.strip() == "balanced":
+        delta["performance_mode"] = "balanced"
+        reply = "I'll use balanced mode. Want me to train?"
+    if "conservative" in msg:
+        delta["performance_mode"] = "conservative"
+        reply = "I'll use conservative mode. Want me to train?"
+
+    if not reply and delta:
+        reply = "I've updated the plan. Want me to propose a plan and train?"
+    if not reply:
+        reply = "You can say e.g. 'drop id', 'use X as target', 'try something stronger', or 'yes' to train with the current plan."
+
+    return is_question, delta, reply
+
+
+# Control commands: execute action, no LLM. Everything else goes to LLM.
+_CHAT_CONTROL_COMMANDS = frozenset({
+    "start training", "start train", "train", "yes", "go", "run",
+    "stop", "cancel", "accept this plan", "accept plan",
+})
+
+
+# Phrases that mean "run training / execute plan" in any language or casual form (LLM also reasons about intent)
+_TRAIN_INTENT_PHRASES = frozenset({
+    "train", "yes", "go", "run", "start", "y", "begin", "run training", "start training", "start train",
+    "lets do it", "let's do it", "lets go", "let's go", "do it", "go ahead", "run it", "execute", "run the plan",
+    "chalo", "jao", "karo", "chalo karo", "chalo train", "jao train", "train na bhai", "train bhai",
+    "sure", "ok", "okay", "alright", "thik hai", "theek hai", "sahi hai", "ho jayega", "kr do", "kar do",
+})
+
+
+def _is_control_command(message: str) -> tuple[bool, str]:
+    """
+    If message is a pure control command, return (True, command_key).
+    Else return (False, ""). Accepts casual/multilingual phrasing (lets do it, chalo, karo, etc.).
+    """
+    msg = (message or "").strip().lower()
+    if not msg:
+        return False, ""
+    # Exact match
+    if msg in _CHAT_CONTROL_COMMANDS:
+        return True, msg
+    if msg in ("y", "run training", "begin"):
+        return True, "yes"
+    # Short "train" variants
+    if msg.startswith("train") and len(msg) <= 35:
+        return True, "train"
+    # Casual / multilingual "run training" intent
+    if msg in _TRAIN_INTENT_PHRASES:
+        return True, "train"
+    # Very short affirmations (e.g. "ok", "k", "sure") — only if short so we don't match random text
+    if len(msg) <= 12 and msg in ("ok", "k", "sure", "yeah", "yep", "yup", "alright", "thik", "theek", "haan", "ha", "ji", "ho"):
+        return True, "train"
+    return False, ""
+
+
+def _build_chat_context(session: Dict[str, Any], df: pd.DataFrame) -> str:
+    """Build context string for the chat LLM: dataset, model state, plan, last result."""
+    parts = []
+
+    # Dataset summary
+    profile = profile_dataset(df)
+    n_rows = profile.get("n_rows", len(df))
+    n_cols = profile.get("n_cols", len(df.columns))
+    numeric = profile.get("numeric_cols", []) or []
+    categorical = profile.get("categorical_cols", []) or []
+    candidates = profile.get("candidate_targets", []) or list(df.columns)[:5]
+    parts.append(
+        f"## Dataset\n"
+        f"- Rows: {n_rows}, Columns: {n_cols}\n"
+        f"- Numeric: {', '.join(numeric[:15]) or '—'}\n"
+        f"- Categorical: {', '.join(categorical[:15]) or '—'}\n"
+        f"- Target candidates: {', '.join(candidates)}"
+    )
+
+    # Model state (source of truth)
+    ms = session.get("model_state") or {}
+    if ms:
+        parts.append(
+            f"\n## Current model state\n"
+            f"- Model: {ms.get('current_model') or '—'}\n"
+            f"- Preprocessing: {', '.join(ms.get('preprocessing_steps') or []) or '—'}\n"
+            f"- Features used: {len(ms.get('current_features') or [])}\n"
+            f"- Attempt: {ms.get('attempt_number', 0)}\n"
+            f"- Last diff: {ms.get('last_diff') or '—'}"
+        )
+        metrics = ms.get("metrics") or {}
+        if metrics:
+            m_str = ", ".join(f"{k}={v}" for k, v in list(metrics.items())[:8] if not str(k).startswith("_"))
+            parts.append(f"- Metrics: {m_str}")
+    else:
+        parts.append("\n## Current model state\nNo training run yet.")
+
+    # Plan (structural + last execution)
+    sp = session.get("structural_plan")
+    ep_list = session.get("execution_plans") or []
+    last_ep = ep_list[-1] if ep_list else None
+    if sp:
+        parts.append(
+            f"\n## Plan\n"
+            f"- Task: {sp.get('task_type', '—')}, target: {sp.get('inferred_target', '—')}"
+        )
+    if last_ep:
+        models = [m.get("model_name") for m in (last_ep.get("model_candidates") or []) if m.get("model_name")]
+        parts.append(f"- Model candidates: {', '.join(models[:8]) or '—'}")
+        parts.append(f"- Primary metric: {last_ep.get('primary_metric', '—')}")
+        fts = last_ep.get("feature_transforms") or []
+        dropped = [ft.get("name") for ft in fts if ft.get("drop")]
+        kept = [ft.get("name") for ft in fts if not ft.get("drop")]
+        if dropped:
+            parts.append(f"- Dropped features: {', '.join(dropped[:10])}")
+        if kept:
+            parts.append(f"- Kept features: {', '.join(kept[:15])}")
+
+    # Last training result
+    if session.get("refused"):
+        parts.append(f"\n## Last run\nRefused: {session.get('refusal_reason', 'Model quality unacceptable')}")
+
+    # User constraints (so LLM knows what user asked for)
+    uc = session.get("user_constraints") or {}
+    if uc:
+        parts.append(f"\n## User constraints\n{uc}")
+
+    # Recent chat (last 6 messages) for continuity
+    chat = session.get("chat_history") or []
+    if chat:
+        recent = chat[-6:]
+        lines = []
+        for m in recent:
+            role = m.get("role", "user")
+            content = (m.get("content") or "")[:500]
+            lines.append(f"{role}: {content}")
+        parts.append("\n## Recent chat\n" + "\n".join(lines))
+
+    return "\n".join(parts)
+
+
+# Capability contract: LLM is code generator + ML advisor. Like Cursor's agent for the USER's work only; never touch platform.
+CHAT_CAPABILITY_CONTRACT = """You are an ML Engineer Agent inside an AutoML system.
+You behave like Cursor's agent: generate code, the system executes it, you see results, fix, re-execute. You work ONLY on the user's project: dataset, plan, notebooks, reports, training runs.
+You must NEVER edit or suggest edits to the PLATFORM (Intent2Model codebase, backend/main.py, frontend, Cursor app, wireframe, or any source code of the tool you run in). The platform is off-limits; the user's session (notebooks, reports, models) is your workspace."""
+
+CHAT_SYSTEM_PROMPT = f"""{CHAT_CAPABILITY_CONTRACT}
+
+You have access only to the context below (dataset summary, model state, plan, metrics). You do NOT have repo or tool access. The system runs training and builds notebooks; you reason, explain, and confirm in chat.
+
+CRITICAL — Use the LLM to understand what the user is saying (any language: English, Hindi, Hinglish, casual). Do NOT rely on keywords only. Reason about intent.
+
+Chat behavior:
+- Do NOT paste full training code or long code blocks. Keep replies short and human.
+- When the user wants to RUN TRAINING / execute the plan (any phrasing: "lets do it", "chalo", "haan kar ke dekhte hai", "yes", "karo", "go for it", etc.), reply briefly and set start_training true in INTENT_JSON below.
+- When the user asks "how can I improve the metric" or "why is it only X" or "make it better": explain in plain language (e.g. try stronger models like XGBoost, try different preprocessing/normalisation). If they then say "go for it" or "try it", set performance_mode to "aggressive" and start_training true so the system runs XGBoost and more models. The system validates all inputs/outputs with the data; you reason about preprocessing (scaling, normalisation) and model choice.
+- If the user says they want to predict X or target is X (e.g. "predict length", "target is length", "wanna predict length"), set target in INTENT_JSON to the exact column name from the context (e.g. petal.length or sepal.length). Use ONLY column names listed in the context.
+- If the user says "try something stronger" or "go for it" (after you suggested stronger models), set performance_mode to "aggressive" in INTENT_JSON so the system actually runs XGBoost and more models (not just the same ones again).
+- Answer "tell me the plan" (or equivalent) in human language. No code. Explain why accuracy is low in plain language.
+- Be concise. Use **bold** for emphasis; the UI renders it as actual bold.
+
+REQUIRED — At the very end of your reply, on a new line, output exactly:
+INTENT_JSON: {{"target": "column_name or null", "drop_columns": [], "performance_mode": "aggressive or balanced or conservative or null", "start_training": true or false}}
+
+Rules for INTENT_JSON:
+- target: use ONLY a column name from the context (Dataset / Target candidates). If user wants "length", use petal.length or sepal.length as appropriate. If no target change, use null.
+- drop_columns: array of column names to drop (from context only), or [].
+- performance_mode: "aggressive" or "balanced" or "conservative" or null.
+- start_training: true if the user wants to run/execute/train (in any language); false otherwise.
+- Use double quotes in JSON. No code blocks around INTENT_JSON."""
+
+# Forbid claims about REPO/TOOLS/FILESYSTEM and about editing the PLATFORM (Intent2Model / Cursor)
+_LLM_FORBIDDEN_PHRASES = [
+    "i inspected the file",
+    "i inspected the code",
+    "i opened the file",
+    "i edited the file",
+    "i modified the file",
+    "i used write_file",
+    "i used replace",
+    "i used a tool",
+    "i ran a tool",
+    "i applied a patch",
+    "in the repo",
+    "in the codebase",
+    "trainer.py",
+    "executor.py",
+    "ml/trainer",
+    "ml/executor",
+    "i have access to the",
+    "i opened ml/",
+    "i read the file",
+    "i looked at the code",
+    "i edited the codebase",
+    "filesystem access",
+    "i used the write_file",
+    "i used the replace tool",
+    "edit main.py",
+    "edit the backend",
+    "edit the frontend",
+    "edit intent2model",
+    "edit the platform",
+    "cursor source",
+    "cursor wireframe",
+    "cursor's source",
+    "cursor's wireframe",
+    "edit the wireframe",
+    "modify the codebase",
+]
+
+
+def _llm_response_violates_capability(response: str) -> bool:
+    """True if the response claims repo/filesystem/tool access (not when generating code as output)."""
+    if not response or not isinstance(response, str):
+        return False
+    lower = response.strip().lower()
+    return any(phrase in lower for phrase in _LLM_FORBIDDEN_PHRASES)
+
+
+CHAT_STRICT_PROMPT = f"""{CHAT_CAPABILITY_CONTRACT}
+
+CRITICAL: You must NEVER claim to inspect or edit the repo, use tools, or access the filesystem. You must NEVER suggest or generate edits to the platform (Intent2Model, backend, frontend, Cursor). You generate code and diffs as OUTPUT for the user's session only (notebooks, reports, plan). Reply with reasoning, explanations, and recommendations or generated artifacts. Do not claim any capability you do not have."""
+
+
+def _plan_summary_for_confirmation(session: Dict[str, Any]) -> str:
+    """One short paragraph: exact plan for confirmation (display plan, ask for confirmation)."""
+    ms = session.get("model_state") or {}
+    sp = session.get("structural_plan") or {}
+    ep_list = session.get("execution_plans") or []
+    last_ep = ep_list[-1] if ep_list else {}
+    target = sp.get("inferred_target", "—")
+    task = sp.get("task_type", "—")
+    models = [m.get("model_name") for m in (last_ep.get("model_candidates") or []) if m.get("model_name")]
+    if not models:
+        models = ["ridge", "random_forest", "xgboost"] if task == "regression" else ["logistic_regression", "random_forest"]
+    primary = last_ep.get("primary_metric", "—")
+    return (
+        f"**Plan:** Target **{target}**, task **{task}**, primary metric **{primary}**. "
+        f"Models to run: **{', '.join(models[:6])}**. "
+        f"Reply **'train'** or **'yes'** to confirm and run."
+    )
+
+
+def _handle_chat_message(user_message: str, session: Dict[str, Any], df: pd.DataFrame) -> tuple[str, dict, bool]:
+    """
+    Every message is handled as if talking to the LLM; the agent mediates and triggers backend tasks (train, etc.).
+    Returns (agent_reply, constraints_delta to merge into session, trigger_training).
+    """
+    msg = (user_message or "").strip()
+    columns = list(df.columns)
+
+    # 0) Plan confirmation: "let's try this first" → display plan, ask for confirmation, do NOT train
+    msg_lower = msg.lower()
+    if any(x in msg_lower for x in ("let's try this first", "try this first", "lets try this first", "try this plan")):
+        summary = _plan_summary_for_confirmation(session)
+        return (
+            f"Here’s the exact plan.\n\n{summary}",
+            {},
+            False,
+        )
+
+    # 0b) "Try something stronger/better" and we already have a run → merge constraints, start training (no silent retry)
+    if any(x in msg_lower for x in (
+        "try something stronger", "try something better", "something stronger", "something better",
+        "use something stronger", "stronger model", "better model", "try something better na",
+    )):
+        ms = session.get("model_state") or {}
+        attempt = ms.get("attempt_number") or 0
+        if attempt >= 1:
+            _, constraints_delta, _ = _parse_chat_to_constraints(msg, columns)
+            return "Starting training.", constraints_delta, True
+
+    # 1) Control command → no LLM
+    is_control, cmd = _is_control_command(msg)
+    if is_control:
+        if cmd in ("stop", "cancel"):
+            session["cancel_requested"] = True
+            return "Stopping. I will not start new attempts until you say to train again.", {}, False
+        if cmd in ("yes", "train", "go", "start training", "start train", "run", "y", "run training", "begin"):
+            # "go for it" / "try something stronger" → set aggressive so we actually run XGBoost etc.
+            train_constraints = {}
+            if any(x in msg_lower for x in ("go for it", "try something stronger", "try stronger", "something stronger", "more powerful")):
+                train_constraints["performance_mode"] = "aggressive"
+            return "Starting training.", train_constraints, True
+        if cmd in ("accept this plan", "accept plan"):
+            return "Plan accepted. Say 'train' or 'yes' to confirm and run.", {}, False
+        return "Done.", {}, False
+
+    # 2) Fallback constraints from regex (used if LLM intent parsing fails)
+    _, constraints_fallback, _ = _parse_chat_to_constraints(msg, columns)
+
+    # 3) Build context and call LLM — LLM understands what the user is saying (any language)
+    context = _build_chat_context(session, df)
+    user_prompt = f"{context}\n\n---\nUser message: {msg}"
+    provider = os.getenv("LLM_PROVIDER", "gemini_cli")
+    try:
+        llm = get_llm_with_custom_key(provider=provider)
+        response = llm.generate(user_prompt, CHAT_SYSTEM_PROMPT)
+        if not (response and str(response).strip()):
+            return "I didn't get a valid response. Please try again or rephrase.", constraints_fallback, False
+        response = response.strip()
+
+        # Parse LLM intent (INTENT_JSON) — LLM decides target, drop_columns, performance_mode, start_training
+        constraints_delta = dict(constraints_fallback) if constraints_fallback else {}
+        trigger_from_intent = False
+        intent_match = re.search(r"INTENT_JSON:\s*(\{.*?\})\s*$", response, re.DOTALL)
+        if intent_match:
+            try:
+                intent_str = intent_match.group(1).strip()
+                intent = json.loads(intent_str)
+                reply_only = response[: intent_match.start()].strip()
+                while reply_only.endswith("\n"):
+                    reply_only = reply_only[:-1].strip()
+                if reply_only:
+                    response = reply_only
+                if intent.get("target") is not None and str(intent["target"]).strip():
+                    col = str(intent["target"]).strip()
+                    if col in columns:
+                        constraints_delta["target"] = col
+                    else:
+                        containing = [c for c in columns if col.lower() in c.lower()]
+                        if len(containing) == 1:
+                            constraints_delta["target"] = containing[0]
+                        elif len(containing) > 1:
+                            preferred = [c for c in containing if "petal" in c.lower()]
+                            constraints_delta["target"] = preferred[0] if preferred else containing[0]
+                if intent.get("drop_columns"):
+                    valid_drops = [c for c in intent["drop_columns"] if isinstance(c, str) and c in columns]
+                    if valid_drops:
+                        constraints_delta.setdefault("drop_columns", []).extend(valid_drops)
+                if intent.get("performance_mode") in ("aggressive", "balanced", "conservative"):
+                    constraints_delta["performance_mode"] = intent["performance_mode"]
+                if intent.get("start_training") is True:
+                    trigger_from_intent = True
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
+        # Do not show long code blocks in chat — system runs training; keep reply conversational
+        if "```" in response and len(response) > 400:
+            before_code = response.split("```")[0].strip()
+            if before_code:
+                response = before_code + "\n\nStarting training — the system runs the plan."
+            else:
+                response = "Starting training — the system will run the plan."
+            # If user was clearly asking to run (e.g. "lets do it"), trigger training even though we stripped code
+            if msg_lower in _TRAIN_INTENT_PHRASES or any(x in msg_lower for x in ("lets do it", "let's do it", "do it", "chalo", "go ahead", "run it", "run the plan")):
+                return response, constraints_delta, True
+
+        # Response validation: discard if LLM claims code/filesystem/tool access
+        if _llm_response_violates_capability(response):
+            retry_prompt = f"{user_prompt}\n\n[Your previous reply incorrectly claimed repo, filesystem, or tool access. You do NOT have that. You generate code and diffs as OUTPUT only. Reply again with reasoning, explanations, or generated artifacts—no claims about inspecting or editing files.]"
+            response = llm.generate(retry_prompt, CHAT_STRICT_PROMPT)
+            if response and str(response).strip():
+                response = response.strip()
+                if _llm_response_violates_capability(response):
+                    return (
+                        "I can't show that response — it claimed filesystem, repo, or tool access I don't have. "
+                        "I generate code and notebooks as OUTPUT only; I never inspect or edit the repo. "
+                        "Ask me to explain, diagnose, or propose diffs instead.",
+                        constraints_delta,
+                        False,
+                    )
+            else:
+                response = (
+                    "I can't show that response — it claimed repo or tool access I don't have. "
+                    "I'm an ML agent: I explain, diagnose, and generate code/notebooks as output. "
+                    "Ask me to explain or propose changes as text/diffs instead."
+                )
+
+        # LLM can signal "start training" via [ACTION: start_training] or INTENT_JSON start_training: true
+        _ACTION_START_TRAINING = "[ACTION: start_training]"
+        if _ACTION_START_TRAINING in response:
+            response = response.replace(_ACTION_START_TRAINING, "").strip()
+            while response.endswith("\n"):
+                response = response[:-1].strip()
+            return response or "Starting training.", constraints_delta, True
+        return response, constraints_delta, trigger_from_intent
+    except Exception as e:
+        err = str(e)
+        return f"LLM is unavailable: {err}. Please check your API key or CLI configuration.", constraints_delta, False
+
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -156,7 +636,7 @@ app.add_middleware(
 # Check LLM availability on startup
 LLM_AVAILABLE = False
 LLM_RATE_LIMITED = False
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini_cli")
 
 # Get API key from api_key_manager (automatically uses .env file)
 from utils.api_key_manager import get_api_key
@@ -193,6 +673,9 @@ trained_models_cache = {}  # Store trained models for prediction
 # RunState store: single source of truth for GET /runs/{run_id}. Contract: run_id, status, current_step, attempt_count, progress, events[]
 # Each event: ts, step_name, message, status?, payload?
 run_state_store: Dict[str, Dict[str, Any]] = {}
+
+# Session store: chat-first flow. session_id -> SessionState (dataset_id, chat_history, execution_plans, notebook_cells, performance_mode)
+session_store: Dict[str, Dict[str, Any]] = {}
 
 # WebSocket connections for real-time log streaming
 websocket_connections: Set[WebSocket] = set()
@@ -380,12 +863,23 @@ current_llm_model = None  # Track which model is currently being used
 current_llm_reason = None  # Why this model was chosen
 
 
+class UserConstraints(BaseModel):
+    """User messages as state modifiers — override LLM preferences (chat-first)."""
+    drop_columns: Optional[list[str]] = None   # e.g. ["id"] from "drop id"
+    target: Optional[str] = None               # from "use X as target"
+    exclude_models: Optional[list[str]] = None  # e.g. ["random_forest"]
+    keep_features: Optional[list[str]] = None   # do not drop these
+    primary_metric: Optional[str] = None        # e.g. "mae" over "r2"
+    prefer_simple: Optional[bool] = None        # try simpler models first
+
+
 class TrainRequest(BaseModel):
     target: Optional[str] = None
     task: Optional[Literal["classification", "regression"]] = None
     metric: Optional[str] = None
     dataset_id: Optional[str] = None
     llm_provider: Optional[str] = None
+    user_constraints: Optional[UserConstraints] = None  # chat-first: user messages affect ExecutionPlan
 
 
 class SelectModelRequest(BaseModel):
@@ -510,7 +1004,7 @@ async def root():
         "llm_provider": LLM_PROVIDER if LLM_AVAILABLE else "rule-based-fallback"
     }
 
-def get_llm_with_custom_key(provider: str = "gemini"):
+def get_llm_with_custom_key(provider: str = "gemini_cli"):
     """Get LLMInterface with API key (automatically uses .env, custom key if set)."""
     api_key = get_api_key(provider=provider)
     return LLMInterface(provider=provider, api_key=api_key)
@@ -537,7 +1031,7 @@ async def health():
     # Update global state if API key changed
     global LLM_AVAILABLE, LLM_RATE_LIMITED, LLM_PROVIDER, current_llm_model, current_llm_reason
     # If using CLI provider, treat availability as "CLI installed"
-    provider = os.getenv("LLM_PROVIDER", LLM_PROVIDER or "gemini")
+    provider = os.getenv("LLM_PROVIDER", LLM_PROVIDER or "gemini_cli")
     if provider == "gemini_cli":
         LLM_PROVIDER = "gemini_cli"
         LLM_AVAILABLE = gemini_cli_available
@@ -817,12 +1311,35 @@ async def upload_dataset(file: UploadFile = File(...)):
         # Store dataset in cache
         dataset_id = create_run_id()
         dataset_cache[dataset_id] = df
-        
-        return {
+
+        # Chat-first: create session with ModelState (source of truth) and initial agent message
+        session_id = create_run_id()
+        content, payload = _build_initial_chat_message(profile, df)
+        initial_msg = {"role": "agent", "content": content, "payload": payload}
+        dataset_summary = {
+            "n_rows": profile.get("n_rows", len(df)),
+            "n_cols": profile.get("n_cols", len(df.columns)),
+            "numeric_cols": profile.get("numeric_cols", []),
+            "categorical_cols": profile.get("categorical_cols", []),
+            "candidate_targets": profile.get("candidate_targets", list(df.columns)[:5]),
+        }
+        model_state = ModelState(dataset_summary=dataset_summary, status="idle").model_dump()
+        session_state = SessionState(
+            session_id=session_id,
+            dataset_id=dataset_id,
+            chat_history=[initial_msg],
+            model_state=model_state,
+            user_constraints={},
+        )
+        session_store[session_id] = session_state.model_dump()
+
+        return _json_safe({
+            "session_id": session_id,
             "dataset_id": dataset_id,
             "profile": profile,
-            "message": "Dataset uploaded successfully"
-        }
+            "message": "Dataset uploaded successfully",
+            "initial_message": initial_msg,
+        })
     except Exception as e:
         # AUTONOMOUS: Try one more time with most permissive settings
         print(f"⚠️  Upload error: {e}. Trying one more time with permissive settings.")
@@ -846,12 +1363,27 @@ async def upload_dataset(file: UploadFile = File(...)):
                 profile = profile_dataset(df)
                 dataset_id = create_run_id()
                 dataset_cache[dataset_id] = df
-                return {
+                session_id = create_run_id()
+                content, payload = _build_initial_chat_message(profile, df)
+                initial_msg = {"role": "agent", "content": content, "payload": payload}
+                dataset_summary = {"n_rows": len(df), "n_cols": len(df.columns), "numeric_cols": profile.get("numeric_cols", []), "categorical_cols": profile.get("categorical_cols", []), "candidate_targets": list(df.columns)[:5]}
+                model_state = ModelState(dataset_summary=dataset_summary, status="idle").model_dump()
+                session_state = SessionState(
+                    session_id=session_id,
+                    dataset_id=dataset_id,
+                    chat_history=[initial_msg],
+                    model_state=model_state,
+                    user_constraints={},
+                )
+                session_store[session_id] = session_state.model_dump()
+                return _json_safe({
+                    "session_id": session_id,
                     "dataset_id": dataset_id,
                     "profile": profile,
-                    "message": "Dataset uploaded successfully"
-                }
-        except:
+                    "message": "Dataset uploaded successfully",
+                    "initial_message": initial_msg,
+                })
+        except Exception:
             pass
         
         # Last resort: create minimal dataset but DON'T use it - return error instead
@@ -860,6 +1392,416 @@ async def upload_dataset(file: UploadFile = File(...)):
             status_code=400,
             detail="Could not process the file. Please ensure it's a valid CSV, JSON, or XLSX file."
         )
+
+
+class ChatMessageRequest(BaseModel):
+    """Body for POST /session/{session_id}/chat."""
+    message: str
+
+
+@app.get("/session/{session_id}")
+async def get_session(session_id: str):
+    """Return full session state (chat, execution_plans, notebook_cells, performance_mode)."""
+    if session_id not in session_store:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _json_safe(session_store[session_id])
+
+
+@app.get("/session/{session_id}/notebook")
+async def session_notebook(session_id: str):
+    """Download or view notebook for this session's last run (uses current_run_id)."""
+    if session_id not in session_store:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session = session_store[session_id]
+    run_id = session.get("current_run_id")
+    if not run_id:
+        raise HTTPException(
+            status_code=404,
+            detail="No run yet. Say 'train' or 'yes' in chat to run training, then try again.",
+        )
+    if run_id not in trained_models_cache:
+        raise HTTPException(
+            status_code=404,
+            detail="Notebook not available (e.g. backend restarted). Run training again, then try.",
+        )
+    # Redirect to download endpoint so we reuse the same logic
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/download/{run_id}/notebook", status_code=302)
+
+
+@app.post("/session/{session_id}/cancel")
+async def session_cancel(session_id: str):
+    """User-driven steering: request to stop further iterations (no silent retry)."""
+    if session_id not in session_store:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session_store[session_id]["cancel_requested"] = True
+    return _json_safe({"status": "ok", "message": "Cancel requested. I will not start new attempts until you say to train again."})
+
+
+@app.post("/session/{session_id}/chat")
+async def session_chat(session_id: str, body: ChatMessageRequest):
+    """
+    Every message is like talking to the LLM; the LLM acts as mediator and agent to run tasks in the backend.
+    Control intents (train, stop, try something stronger) trigger backend tasks; reply is agent confirmation.
+    Else: full context (dataset, model state, plan, metrics) is sent to the LLM and its reply is returned.
+    Response includes trigger_training when the agent is starting a training run.
+    """
+    if session_id not in session_store:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session = session_store[session_id]
+    dataset_id = session.get("dataset_id")
+    if not dataset_id or dataset_id not in dataset_cache:
+        raise HTTPException(status_code=400, detail="Session dataset not available")
+    df = dataset_cache[dataset_id]
+
+    # Append user message
+    user_content = (body.message or "").strip()
+    session.setdefault("chat_history", []).append({"role": "user", "content": user_content})
+
+    # Single chat handler: every message goes through the agent; control intents trigger backend tasks (LLM as mediator)
+    agent_reply, constraints_delta, trigger_training = _handle_chat_message(user_content, session, df)
+
+    # Merge constraints into session (drop_columns, target, performance_mode)
+    if constraints_delta:
+        uc = session.setdefault("user_constraints", {})
+        if "drop_columns" in constraints_delta:
+            uc.setdefault("drop_columns", []).extend(constraints_delta["drop_columns"])
+        if "target" in constraints_delta:
+            uc["target"] = constraints_delta["target"]
+        if "performance_mode" in constraints_delta:
+            uc["performance_mode"] = constraints_delta["performance_mode"]
+        session["user_constraints"] = uc
+
+    # Append agent reply (LLM or control confirmation)
+    session["chat_history"].append({"role": "agent", "content": agent_reply})
+    session_store[session_id] = session
+
+    return _json_safe({"chat_history": session["chat_history"], "trigger_training": trigger_training})
+
+
+@app.post("/session/{session_id}/train")
+async def session_train(session_id: str):
+    """
+    Run ONE training attempt for this session. Uses session's dataset + user_constraints.
+    Updates session with execution_plans, notebook_cells, run_id; appends metrics + choices to chat.
+    """
+    if session_id not in session_store:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session = session_store[session_id]
+    dataset_id = session.get("dataset_id")
+    if not dataset_id or dataset_id not in dataset_cache:
+        raise HTTPException(status_code=400, detail="Session dataset not available")
+    df = dataset_cache[dataset_id].copy()
+    user_constraints = session.get("user_constraints") or {}
+    target_from_constraints = user_constraints.get("target")
+    performance_mode = user_constraints.get("performance_mode") or session.get("performance_mode") or "conservative"
+    session["performance_mode"] = performance_mode  # keep in sync for UI
+
+    # Resolve target
+    target = target_from_constraints
+    if not target or target not in df.columns:
+        profile = profile_dataset(df)
+        candidates = profile.get("candidate_targets") or list(df.columns)[:5]
+        target = candidates[0] if candidates else list(df.columns)[-1]
+
+    # Task / metric inference (same as legacy train)
+    from ml.evaluator import infer_classification_primary_metric
+    target_col = df[target]
+    if target_col.dtype in ["int64", "float64", "int32", "float32"]:
+        task = "classification" if target_col.nunique() <= 20 else "regression"
+    else:
+        task = "classification"
+    metric = infer_classification_primary_metric(df, target) if task == "classification" else "r2"
+
+    run_id = create_run_id()
+    session["current_run_id"] = run_id
+    run_state_store[run_id] = _run_state_init(run_id)
+    chosen_llm = os.getenv("LLM_PROVIDER", "gemini_cli")
+
+    # Plan once if not yet in session
+    structural_plan = session.get("structural_plan")
+    first_execution_plan = None
+    if session.get("execution_plans"):
+        # Reuse last execution plan with constraints applied
+        from schemas.pipeline_schema import ExecutionPlan
+        last_ep = session["execution_plans"][-1]
+        first_execution_plan = ExecutionPlan(**(last_ep if isinstance(last_ep, dict) else last_ep))
+    if not structural_plan or not first_execution_plan:
+        plan = plan_automl(df, requested_target=target, llm_provider=chosen_llm)
+        from agents.execution_planner import automl_plan_to_structural_and_execution
+        structural_plan_obj, first_execution_plan = automl_plan_to_structural_and_execution(plan)
+        structural_plan = structural_plan_obj.model_dump() if hasattr(structural_plan_obj, "model_dump") else structural_plan_obj
+        session["structural_plan"] = structural_plan
+        first_execution_plan = first_execution_plan  # use this for execution
+
+    # Build model_candidates from plan, then apply performance_mode (so "try something stronger" changes next run)
+    ep_dict = first_execution_plan.model_dump() if hasattr(first_execution_plan, "model_dump") else first_execution_plan
+    model_candidates = [m.get("model_name") for m in ep_dict.get("model_candidates", []) if m.get("model_name")]
+    if not model_candidates:
+        model_candidates = ["random_forest", "gradient_boosting", "logistic_regression"] if task == "classification" else ["random_forest", "gradient_boosting", "ridge"]
+
+    # Apply performance_mode: "try something stronger" → at least ONE nonlinear model runs, no early exit after linear only
+    if performance_mode == "aggressive":
+        stronger_reg = ["xgboost", "gradient_boosting", "random_forest", "ridge", "svm"]
+        stronger_clf = ["xgboost", "gradient_boosting", "random_forest", "logistic_regression", "svm"]
+        stronger = stronger_clf if task == "classification" else stronger_reg
+        model_candidates = list(dict.fromkeys([m for m in stronger if m not in model_candidates] + model_candidates))
+        # Executor runs all; propose message reports which models will run (full transparency)
+    elif performance_mode == "balanced":
+        balanced_reg = ["gradient_boosting", "random_forest", "ridge"]
+        balanced_clf = ["gradient_boosting", "random_forest", "logistic_regression"]
+        balanced = balanced_clf if task == "classification" else balanced_reg
+        model_candidates = list(dict.fromkeys([m for m in balanced if m not in model_candidates] + model_candidates))
+
+    # Propose: append system message so user sees "I'm about to try ..." (Cursor-for-ML)
+    propose_msg = f"I'm about to try: {', '.join(model_candidates[:5])}{'...' if len(model_candidates) > 5 else ''}. Target: **{target}**, task: **{task}**."
+    session.setdefault("chat_history", []).append({"role": "agent", "content": propose_msg, "payload": {"stage": "propose", "model_candidates": model_candidates, "target": target, "task": task}})
+
+    # Run one attempt via autonomous executor
+    from agents.autonomous_executor import AutonomousExecutor
+    from schemas.pipeline_schema import StructuralPlan
+    sp = StructuralPlan(**structural_plan) if isinstance(structural_plan, dict) else structural_plan
+    executor = AutonomousExecutor(run_id=run_id, log_callback=_log_run_event, llm_provider=chosen_llm)
+    uc_for_executor = {k: v for k, v in user_constraints.items() if v is not None}
+    train_result = executor.execute_with_auto_fix(
+        df=df,
+        target=target,
+        task=task,
+        metric=metric,
+        model_candidates=model_candidates,
+        requested_target=target,
+        llm_provider=chosen_llm,
+        structural_plan=sp,
+        first_execution_plan=first_execution_plan,
+        user_constraints=uc_for_executor or None,
+    )
+
+    # Update session: execution_plans, failure_history, notebook_cells
+    if train_result.get("execution_plans"):
+        session.setdefault("execution_plans", []).extend(train_result["execution_plans"])
+    if train_result.get("failure_history"):
+        session.setdefault("failure_history", []).extend(train_result["failure_history"])
+    if train_result.get("refused"):
+        session["refused"] = True
+        session["refusal_reason"] = train_result.get("refusal_reason", "Model quality unacceptable")
+
+    metrics = train_result.get("metrics") or {}
+    primary_val = metrics.get("primary_metric_value") or metrics.get("accuracy") or metrics.get("r2") or metrics.get("cv_mean")
+    primary = primary_val if primary_val is not None else "—"
+    if isinstance(primary, float):
+        primary = f"{primary:.2%}" if task == "classification" else f"{primary:.4f}"
+    current_model = train_result.get("model_name") or (model_candidates[0] if model_candidates else None)
+    prev_ms = session.get("model_state") or {}
+    previous_model = prev_ms.get("current_model")
+
+    # Build ModelState (source of truth for UI)
+    current_features = [c for c in df.columns if c != target]
+    preprocessing_steps = []
+    for ft in ep_dict.get("feature_transforms", [])[:20]:
+        ft_d = ft if isinstance(ft, dict) else (getattr(ft, "model_dump", lambda: ft)())
+        if ft_d.get("drop"):
+            continue
+        if ft_d.get("scale") and ft_d.get("scale") != "none":
+            preprocessing_steps.append(f"Scale({ft_d.get('name', '?')})")
+        if ft_d.get("encode") and ft_d.get("encode") != "none":
+            preprocessing_steps.append(f"Encode({ft_d.get('name', '?')})")
+    if not preprocessing_steps:
+        preprocessing_steps = ["StandardScaler", "OneHotEncoder"]
+
+    error_analysis = {}
+    if metrics.get("confusion_matrix") is not None:
+        error_analysis["confusion_matrix"] = metrics["confusion_matrix"]
+        error_analysis["class_labels"] = metrics.get("class_labels") or []
+    if train_result.get("feature_importance"):
+        fi = train_result["feature_importance"]
+        error_analysis["feature_importance"] = {str(k): float(v) for k, v in list(fi.items())[:30]} if isinstance(fi, dict) else fi
+
+    last_diff = {}
+    if previous_model and current_model and previous_model != current_model:
+        last_diff["model"] = f"{previous_model} → {current_model}"
+    dropped = user_constraints.get("drop_columns") or []
+    if dropped:
+        last_diff["dropped_features"] = dropped
+
+    attempt_number = (prev_ms.get("attempt_number") or 0) + 1
+    metrics_for_state = dict(metrics) if metrics else {}
+    if primary_val is not None:
+        metrics_for_state["primary_metric_value"] = float(primary_val)
+    model_state = {
+        "dataset_summary": (prev_ms.get("dataset_summary") or {}),
+        "current_features": current_features,
+        "preprocessing_steps": list(dict.fromkeys(preprocessing_steps))[:15],
+        "current_model": current_model,
+        "previous_model": previous_model,
+        "metrics": _json_safe(metrics_for_state),
+        "error_analysis": error_analysis,
+        "attempt_number": attempt_number,
+        "last_diff": last_diff,
+        "status": "refused" if train_result.get("refused") else "success",
+        "status_message": train_result.get("refusal_reason") or "Training completed",
+    }
+    session["model_state"] = model_state
+
+    # Discuss: accuracy as discussion, not just result (Cursor-for-ML)
+    primary_float = None
+    if isinstance(primary_val, (int, float)):
+        primary_float = float(primary_val)
+    elif task == "classification" and metrics.get("accuracy") is not None:
+        primary_float = float(metrics["accuracy"])
+    elif task == "regression" and metrics.get("r2") is not None:
+        primary_float = float(metrics.get("r2"))
+
+    weak_threshold = 0.75 if task == "classification" else 0.5  # r2
+    is_weak = primary_float is not None and (
+        (task == "classification" and primary_float < weak_threshold) or (task == "regression" and primary_float < weak_threshold)
+    )
+
+    # Per-model summary so user sees we actually tried XGBoost etc. and WHY a model failed (show error)
+    all_models = train_result.get("all_models") or []
+    per_model_line = ""
+    if len(all_models) > 1:
+        def _fmt_score(m):
+            if m.get("failed"):
+                err = (m.get("error") or "unknown error").strip()[:60]
+                if len((m.get("error") or "")) > 60:
+                    err += "..."
+                return f"failed ({err})"
+            v = m.get("primary_metric") or m.get("cv_mean")
+            if v is None:
+                return "—"
+            if task == "classification":
+                return f"{float(v):.2%}"
+            return f"{float(v):.4f}"
+        parts_list = [f"{m.get('model_name', '?')} {_fmt_score(m)}" for m in all_models[:8]]
+        per_model_line = f"We tried **{len(all_models)}** models: {', '.join(parts_list)}. Best: **{current_model}** ({primary}).\n\n"
+        failed_models = [m for m in all_models if m.get("failed") and m.get("error")]
+        if failed_models:
+            per_model_line += "**Why some failed:** " + " | ".join(
+                f"**{m.get('model_name', '?')}**: {str(m.get('error', ''))[:200]}" for m in failed_models[:3]
+            ) + "\n\n"
+    prev_primary = None
+    if prev_ms.get("metrics"):
+        pm = prev_ms["metrics"]
+        prev_primary = pm.get("primary_metric_value") or pm.get("r2") or pm.get("accuracy") or pm.get("cv_mean")
+    same_as_before = (
+        prev_primary is not None and primary_float is not None
+        and abs(float(prev_primary) - float(primary_float)) < 0.001
+    )
+    if same_as_before and len(all_models) > 1:
+        per_model_line += "None of the stronger models beat the previous best — for this target we might be near the limit without more features or different preprocessing. You can ask me to \"try different preprocessing\" or \"drop X\" / \"use Y as target\".\n\n"
+
+    # Reasoning Diff + What to Try Next + Bottleneck + Honesty (ML Engineer Agent)
+    reasoning_block = ""
+    try:
+        from agents.reasoning_agent import build_reasoning_block
+        ds = (model_state.get("dataset_summary") or {})
+        n_rows = int(ds.get("n_rows") or 0)
+        n_features = len(current_features) or int(ds.get("n_cols") or 0)
+        reasoning_block = build_reasoning_block(
+            prev_ms,
+            train_result,
+            session,
+            task,
+            target,
+            primary,
+            primary_float,
+            same_as_before,
+            all_models,
+            error_analysis,
+            metrics,
+            n_rows,
+            n_features,
+        )
+        if reasoning_block:
+            reasoning_block = "\n\n" + reasoning_block
+    except Exception as _:
+        pass
+
+    if train_result.get("refused"):
+        agent_content = (
+            f"Training was **refused**: {train_result.get('refusal_reason', 'Model quality unacceptable')}.\n\n"
+            "I did not deliver a model. You can ask me to try again with different constraints (e.g. \"try something stronger\", \"drop feature X\")."
+            + (reasoning_block if reasoning_block else "")
+        )
+    elif is_weak:
+        agent_content = (
+            f"**{primary}** {'accuracy' if task == 'classification' else 'R²'} — this is weak for this dataset.\n\n"
+        )
+        if per_model_line:
+            agent_content += per_model_line
+        if error_analysis.get("confusion_matrix") and error_analysis.get("class_labels"):
+            agent_content += "Confusion matrix and class labels are in the **Error analysis** panel. "
+        if error_analysis.get("feature_importance"):
+            agent_content += "Feature importance is available in the panel.\n\n"
+        agent_content += (
+            "**What next?**\n"
+            "- Say \"try something stronger\" for a more complex model.\n"
+            "- Say \"try different preprocessing\" or \"explain confusion matrix\".\n"
+            "- Or tell me which feature to drop / which metric to optimize (recall vs precision)."
+        )
+        if reasoning_block:
+            agent_content += reasoning_block
+    else:
+        agent_content = (
+            f"Training finished. Primary metric: **{primary}**.\n\n"
+            + (per_model_line if per_model_line else "")
+            + "I can:\n1) Try more complex models — say \"try something stronger\"\n2) Engineer features — say \"drop X\" or \"use Y as target\"\n3) Try different preprocessing — say \"try different preprocessing\"\n4) Stop here — say \"that's enough\""
+            + (reasoning_block if reasoning_block else "")
+        )
+
+    session.setdefault("chat_history", []).append({
+        "role": "agent",
+        "content": agent_content,
+        "payload": {"metrics": _json_safe(metrics), "run_id": run_id, "model_state": model_state, "error_analysis": error_analysis},
+    })
+
+    # Live notebook: append one cell (diff-based iteration)
+    notebook_cell = {
+        "attempt": attempt_number,
+        "model": current_model,
+        "diff": last_diff,
+        "preprocessing": preprocessing_steps,
+        "primary_metric": primary,
+    }
+    session.setdefault("notebook_cells", []).append(notebook_cell)
+    session_store[session_id] = session
+
+    # Cache run in trained_models_cache so downloads/notebook work
+    if not train_result.get("refused") and train_result.get("best_model") is not None:
+        config = {"task": task, "model": train_result.get("model_name"), "structural_plan": structural_plan, "execution_plans": session.get("execution_plans"), "failure_history": session.get("failure_history")}
+        trained_models_cache[run_id] = {
+            "model": train_result["best_model"],
+            "target": target,
+            "task": task,
+            "feature_columns": [c for c in df.columns if c != target],
+            "label_encoder": train_result.get("label_encoder"),
+            "config": config,
+            "df": df,
+            "metrics": metrics,
+            "structural_plan": session.get("structural_plan"),
+            "execution_plans": session.get("execution_plans"),
+            "failure_history": session.get("failure_history"),
+        }
+    else:
+        trained_models_cache[run_id] = {
+            "model": None,
+            "target": target,
+            "task": task,
+            "feature_columns": [],
+            "label_encoder": None,
+            "config": {"refused": True, "refusal_reason": train_result.get("refusal_reason"), "structural_plan": structural_plan, "execution_plans": session.get("execution_plans"), "failure_history": session.get("failure_history")},
+            "df": df,
+            "metrics": metrics,
+        }
+
+    return _json_safe({
+        "run_id": run_id,
+        "session_id": session_id,
+        "metrics": metrics,
+        "refused": train_result.get("refused", False),
+        "refusal_reason": train_result.get("refusal_reason"),
+        "agent_message": agent_content,
+    })
 
 
 @app.post("/train")
@@ -997,14 +1939,16 @@ async def train_model(request: TrainRequest):
             except Exception:
                 return "classification"
 
-        # STEP 0–3: LLM-driven AutoML planning BEFORE any model training
+        # STEP 0–3: LLM-driven AutoML planning ONCE → StructuralPlan + ExecutionPlan (agentic loop)
         trace.append("STEP 0–3: Planning (target/task/feature strategy/model shortlist) via AutoML agent.")
         _log_run_event(run_id, "AutoML planning started (Step 0–3)", stage="plan", progress=5)
         chosen_llm_provider = (request.llm_provider or os.getenv("LLM_PROVIDER") or "gemini").strip()
         plan = plan_automl(df, requested_target=request.target, llm_provider=chosen_llm_provider)
+        from agents.execution_planner import automl_plan_to_structural_and_execution
+        structural_plan, first_execution_plan = automl_plan_to_structural_and_execution(plan)
         _log_run_event(
             run_id,
-            f"AutoML planning finished (source={getattr(plan, 'planning_source', 'unknown')})",
+            f"AutoML planning finished (source={getattr(plan, 'planning_source', 'unknown')}) → StructuralPlan + ExecutionPlan",
             stage="plan",
             progress=15,
         )
@@ -1086,6 +2030,9 @@ async def train_model(request: TrainRequest):
                 log_callback=_log_run_event,
                 llm_provider=chosen_llm_provider
             )
+            user_constraints = request.user_constraints.model_dump() if getattr(request, "user_constraints", None) else None
+            if user_constraints:
+                user_constraints = {k: v for k, v in user_constraints.items() if v is not None}
             train_result = executor.execute_with_auto_fix(
                 df=df,
                 target=request.target,
@@ -1094,14 +2041,38 @@ async def train_model(request: TrainRequest):
                 model_candidates=model_candidates,
                 requested_target=request.target,
                 llm_provider=chosen_llm_provider,
+                structural_plan=structural_plan,
+                first_execution_plan=first_execution_plan,
+                user_constraints=user_constraints or None,
             )
             
             # Check if training was REFUSED (epistemically honest failure)
             if train_result.get("refused"):
                 _log_run_event(run_id, "🛑 Training REFUSED - model quality unacceptable", stage="refuse", progress=100)
                 trace.append("Training refused due to unacceptable error rates")
-                
-                # Return refusal response
+                # Cache minimal entry so notebook download shows attempt-based log + refusal (no final model)
+                refusal_config = {
+                    "refused": True,
+                    "refusal_reason": train_result.get("refusal_reason", "Model quality unacceptable"),
+                    "plan": train_result.get("plan", {}),
+                    "structural_plan": train_result.get("structural_plan"),
+                    "execution_plans": train_result.get("execution_plans", []),
+                    "failure_history": train_result.get("failure_history", []),
+                }
+                trained_models_cache[run_id] = {
+                    "model": None,
+                    "target": request.target,
+                    "task": task,
+                    "feature_columns": [],
+                    "label_encoder": None,
+                    "config": refusal_config,
+                    "df": df.copy(),
+                    "metrics": train_result.get("metrics", {}),
+                    "structural_plan": train_result.get("structural_plan"),
+                    "execution_plans": train_result.get("execution_plans", []),
+                    "failure_history": train_result.get("failure_history", []),
+                    "refused": True,
+                }
                 return _json_safe({
                     "status": "refused",
                     "run_id": run_id,
@@ -1254,11 +2225,21 @@ async def train_model(request: TrainRequest):
         except Exception:
             pass
         
+        # Agentic: pass through structural_plan, execution_plans, failure_history for notebook
+        if train_result.get("structural_plan"):
+            config["structural_plan"] = train_result["structural_plan"]
+        if train_result.get("execution_plans"):
+            config["execution_plans"] = train_result["execution_plans"]
+        if train_result.get("failure_history"):
+            config["failure_history"] = train_result["failure_history"]
+
+        # Feature columns = all columns except target (never include target in prediction input)
+        _feature_cols = [c for c in df.columns if c != request.target]
         trained_models_cache[run_id] = {
             "model": train_result["best_model"],
             "target": request.target,
             "task": task,
-            "feature_columns": list(df.drop(columns=[request.target]).columns),
+            "feature_columns": _feature_cols,
             "label_encoder": train_result.get("label_encoder") if task == "classification" else None,
             "config": config,
             "model_name": train_result.get("model_name", config.get("model") if config else None),
@@ -1266,6 +2247,9 @@ async def train_model(request: TrainRequest):
             "pipelines_by_model": pipelines_by_model,
             "automl_plan": final_plan_dict,  # Store plan dict for notebook generation
             "plan": final_plan_dict,  # Also store as "plan" for compatibility
+            "structural_plan": train_result.get("structural_plan"),  # Agentic: once per dataset
+            "execution_plans": train_result.get("execution_plans"),  # Agentic: per attempt
+            "failure_history": train_result.get("failure_history"),  # Agentic: failures & repairs
             "df": df.copy(),  # Store dataset for artifact generation
             "metrics": train_result["metrics"],
             "feature_importance": train_result.get("feature_importance"),
@@ -1590,7 +2574,7 @@ If the user uses key:value format, use those mappings.
 Return ONLY valid JSON, nothing else."""
 
         # Use LLM to extract
-        llm = get_llm_with_custom_key(provider="gemini")
+        llm = get_llm_with_custom_key(provider="gemini_cli")
         response_text = llm.generate(prompt, system_prompt)
         
         # Extract JSON from response (LLM might add extra text)
@@ -1668,26 +2652,36 @@ async def predict(request: PredictRequest):
     model_info = trained_models_cache[request.run_id]
     model = model_info["model"]
     feature_columns = model_info["feature_columns"]
+    target_col = model_info.get("target")
     task = model_info["task"]
     label_encoder = model_info.get("label_encoder")
-    
-    # Prepare input data
-    try:
-        import pandas as pd
-        # Create DataFrame with features
-        input_data = pd.DataFrame([request.features])
-        
-        # Ensure all required features are present
-        missing_features = set(feature_columns) - set(input_data.columns)
-        if missing_features:
+
+    # Build features dict: only feature_columns; coerce to numeric (reject target/label strings like "Setosa")
+    features_clean = {}
+    for col in feature_columns:
+        val = request.features.get(col)
+        if val is None or (isinstance(val, str) and not val.strip()):
             raise HTTPException(
                 status_code=400,
-                detail=f"Missing features: {', '.join(missing_features)}. Required: {', '.join(feature_columns)}"
+                detail=f"Missing feature: {col}. Required: {', '.join(feature_columns)}"
             )
-        
-        # Reorder columns to match training
-        input_data = input_data[feature_columns]
-        
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            features_clean[col] = float(val)
+            continue
+        s = str(val).strip()
+        try:
+            features_clean[col] = float(s)
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Feature '{col}' must be numeric; got '{val}'. Do not enter the target/label (e.g. Setosa) here — only feature values."
+            )
+
+    # Prepare input data (order matches training)
+    try:
+        import pandas as pd
+        input_data = pd.DataFrame([{c: features_clean[c] for c in feature_columns}])
+
         # Make prediction (pipeline = preprocessor + model; expects raw feature columns)
         pred_raw = model.predict(input_data)
         if pred_raw is None or len(pred_raw) == 0:
@@ -1826,20 +2820,24 @@ async def download_notebook(run_id: str):
         if "plan" in model_info:
             automl_plan = model_info["plan"]
     
+    config_for_notebook = {
+        **(model_info.get("config", {}) or {}),
+        "model": model_name,
+        "all_models": model_info.get("all_models", []),
+        "feature_columns": model_info.get("feature_columns", []),
+        "model_code": _model_code_for_notebook(model_info["task"], model_name),
+        "feature_transforms": (model_info.get("config", {}) or {}).get("feature_transforms", []),
+        "automl_plan": automl_plan,
+        "structural_plan": model_info.get("structural_plan"),  # Agentic: show in notebook
+        "execution_plans": model_info.get("execution_plans"),
+        "failure_history": model_info.get("failure_history"),
+    }
     try:
         notebook_json = generate_notebook(
             df=df,
             target=model_info["target"],
             task=model_info["task"],
-            config={
-                **(model_info.get("config", {}) or {}),
-                "model": model_name,
-                "all_models": model_info.get("all_models", []),  # so notebook can derive best if model missing
-                "feature_columns": model_info.get("feature_columns", []),
-                "model_code": _model_code_for_notebook(model_info["task"], model_name),
-                "feature_transforms": (model_info.get("config", {}) or {}).get("feature_transforms", []),
-                "automl_plan": automl_plan,  # CRITICAL: plan drives code generation
-            },
+            config=config_for_notebook,
             metrics=model_info.get("metrics", {}),
             feature_importance=model_info.get("feature_importance"),
             model=model_info["model"]
@@ -1868,12 +2866,17 @@ async def download_notebook(run_id: str):
 
 @app.get("/download/{run_id}/model")
 async def download_model(run_id: str):
-    """Download trained model as pickle file."""
+    """Download trained model as pickle file. Disabled when run was refused (no model)."""
     if run_id not in trained_models_cache:
         raise HTTPException(status_code=404, detail="Model not found")
     
     model_info = trained_models_cache[run_id]
-    model = model_info["model"]
+    model = model_info.get("model")
+    if model is None or model_info.get("refused"):
+        raise HTTPException(
+            status_code=400,
+            detail="Model download disabled — training was refused or failed. No model to download."
+        )
     
     with tempfile.NamedTemporaryFile(mode='wb', suffix='.pkl', delete=False) as f:
         import pickle

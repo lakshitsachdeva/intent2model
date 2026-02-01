@@ -45,20 +45,43 @@ class DiagnosisAgent:
             return self._fallback_diagnosis(failure_report, str(e))
     
     def _build_system_prompt(self) -> str:
-        return """You are a senior ML engineer diagnosing a failed model training.
+        return """You are an ML engineer advisor diagnosing a failed training run.
+You DO NOT have access to the codebase, filesystem, or tools. Do NOT claim to inspect or modify files or code.
 
 Your job is to:
-1. Understand WHY the model failed
+1. Explain WHY the model failed (from the failure report only)
 2. Identify which assumptions were wrong
-3. Suggest STRUCTURED changes to the AutoMLPlan
-4. Assess whether the task is learnable with the available data
+3. Propose ONE or TWO structured changes as a diff only (e.g. change_target_transformation, drop_features, replace_model)
+4. Say whether this task is realistically learnable with this data
 
-Be epistemically honest. If the task is not learnable, say so.
-If the data is insufficient, say so.
-If the model architecture is wrong, suggest alternatives.
+You MUST return:
+- diagnosis_md: markdown explanation (reasoning only; do not claim you applied or inspected code)
+- repair_plan / plan_changes: STRUCTURED DIFF ONLY. No full plans. No free text for execution.
+- recovery_confidence: 0-1
+- suggested_stop: true if task is not learnable
 
-Your response MUST be valid JSON matching the DiagnosisResponse schema."""
+You are NOT allowed to:
+- Claim you inspected, modified, or applied code or files
+- Write any code (no sklearn, pandas, pipeline code)
+- Disable or relax error gates or metrics
+- Force or pretend success
+- Output anything other than structured diffs and the required JSON fields
+
+Be epistemically honest. Refusal is a valid outcome. Your response MUST be valid JSON."""
     
+    def _format_residual_diagnostics(self, rd: Optional[Dict[str, Any]]) -> str:
+        if not rd:
+            return "  (none)"
+        lines = []
+        for k, v in rd.items():
+            if isinstance(v, bool):
+                lines.append(f"  - {k}: {v}")
+            elif isinstance(v, str):
+                lines.append(f"  - {k}: {v}")
+            elif v is not None:
+                lines.append(f"  - {k}: {v}")
+        return "\n".join(lines) if lines else "  (none)"
+
     def _build_diagnosis_prompt(self, failure_report: FailureReport) -> str:
         report_dict = failure_report.model_dump()
         
@@ -81,11 +104,17 @@ Metrics:
 Target Statistics:
 {chr(10).join(f"  - {k}: {v:.4f}" if isinstance(v, (int, float)) else f"  - {k}: {v}" for k, v in report_dict['target_stats'].items())}
 
+Residual Diagnostics (if present):
+{self._format_residual_diagnostics(report_dict.get('residual_diagnostics'))}
+
 Feature Summary:
 {chr(10).join(f"  - {k}: {v}" for k, v in report_dict['feature_summary'].items())}
 
 Model Used: {report_dict['model_used']}
 Hyperparameters: {json.dumps(report_dict['model_hyperparameters'], indent=2)}
+
+Last ExecutionPlan (what was used this attempt):
+{json.dumps(report_dict.get('last_execution_plan') or {}, indent=2)[:2000]}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 YOUR DIAGNOSIS
@@ -93,27 +122,20 @@ YOUR DIAGNOSIS
 
 Provide a JSON response with:
 1. diagnosis_md: Markdown explanation of why it failed and what assumptions were wrong
-2. plan_changes: Structured changes to apply:
-   - target_transformation: Optional transformation ("log", "quantile", "robust", null)
-   - feature_transforms: List of changes (add/drop/modify features)
-   - model_selection: Alternative model to try
-   - evaluation_metrics: Different metrics to use
-3. recovery_confidence: 0-1 confidence that changes will fix it
-4. is_task_learnable: Whether this task is learnable with this data
-5. suggested_stop: Whether to stop trying (if task is not learnable)
+2. plan_changes (or repair_plan): STRUCTURED DIFF ONLY. Allowed keys:
+   - target_transformation: "log" | "log1p" | "quantile" | "robust" | null
+   - drop_features: list of feature names to drop
+   - add_features: list of feature names to add back (if previously dropped)
+   - replace_model: single model name to use instead
+   - add_models: list of model names to add to candidates
+   - remove_models: list of model names to remove
+   - reorder_models: list of model names in desired order
+   - change_encoding: {{ "feature_name": "one_hot"|"ordinal"|"frequency" }}
+3. recovery_confidence: 0-1
+4. is_task_learnable: bool
+5. suggested_stop: bool (true if task is not learnable)
 
-Example plan_changes:
-{{
-  "target_transformation": "log",
-  "feature_transforms": [
-    {{"action": "drop", "feature": "leakage_candidate_col"}},
-    {{"action": "add_encoding", "feature": "high_cardinality_col", "encoding": "frequency"}}
-  ],
-  "model_selection": "gradient_boosting",
-  "evaluation_metrics": ["rmse", "mae"]
-}}
-
-Return ONLY valid JSON, no markdown code blocks."""
+You must NOT: write code, disable gates, relax metrics, or force success. Return ONLY valid JSON, no markdown code blocks."""
         
         return prompt
     
