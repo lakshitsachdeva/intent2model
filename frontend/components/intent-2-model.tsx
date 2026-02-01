@@ -307,7 +307,7 @@ export default function Intent2Model() {
 
       // AUTONOMOUS: Use fallback detection if LLM failed
       if (!intentData) {
-        intentData = detectIntentFallback(userMessage, availableColumns, trainedModel)
+        intentData = detectIntentFallback(userMessage, availableColumns, !!trainedModel)
       }
         
       // Handle based on detected intent

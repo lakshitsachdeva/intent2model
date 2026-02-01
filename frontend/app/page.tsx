@@ -1,6 +1,11 @@
 import Link from "next/link";
-import Prism from "@/components/Prism";
+import dynamic from "next/dynamic";
 import TextType from "@/components/TextType";
+
+const Prism = dynamic(() => import("@/components/Prism"), {
+  ssr: false,
+  loading: () => <div className="absolute inset-0 bg-black" />,
+});
 
 export default function Home() {
   return (

@@ -1,5 +1,10 @@
 import Link from "next/link";
-import Prism from "@/components/Prism";
+import dynamic from "next/dynamic";
+
+const Prism = dynamic(() => import("@/components/Prism"), {
+  ssr: false,
+  loading: () => <div className="absolute inset-0 bg-black" />,
+});
 
 export default function DriftPage() {
   return (
