@@ -6,9 +6,9 @@
 import sys
 import os
 
-# Repo root = parent of engine_build/ (where this spec lives)
-SPEC_DIR = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
-REPO_ROOT = os.path.dirname(SPEC_DIR)
+# Repo root = cwd when running: pyinstaller engine_build/drift-engine.spec (from repo root)
+# __file__ is not defined when PyInstaller exec()s the spec
+REPO_ROOT = os.path.abspath(os.getcwd())
 SCRIPT_PATH = os.path.join(REPO_ROOT, "backend", "run_engine.py")
 BACKEND_PATH = os.path.join(REPO_ROOT, "backend")
 
