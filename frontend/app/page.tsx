@@ -1,43 +1,96 @@
-import Intent2ModelWizard from "@/components/intent-2-model-wizard";
 import Link from "next/link";
+import Prism from "@/components/Prism";
+import TextType from "@/components/TextType";
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 flex flex-col">
-      <nav className="border-b bg-white dark:bg-black/50 backdrop-blur-xl sticky top-0 z-50">
+    <div className="min-h-screen bg-black flex flex-col relative overflow-hidden">
+      {/* Prism background */}
+      <div className="absolute inset-0 z-0">
+        <Prism
+          animationType="rotate"
+          timeScale={0.3}
+          height={3.5}
+          baseWidth={5.5}
+          scale={3.6}
+          hueShift={0}
+          colorFrequency={1}
+          noise={0.2}
+          glow={1.2}
+        />
+      </div>
+
+      {/* Nav */}
+      <nav className="border-b border-white/10 backdrop-blur-xl sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
           <Link href="/" className="flex items-center space-x-2">
-            <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
-              <span className="text-primary-foreground font-bold">i2</span>
+            <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center">
+              <span className="text-black font-bold">d</span>
             </div>
-            <span className="font-bold text-xl tracking-tight">Intent2Model</span>
+            <span className="font-bold text-xl tracking-tight text-white">drift</span>
           </Link>
           <div className="flex items-center space-x-4">
-            <Link href="/drift" className="text-sm font-medium hover:text-primary transition-colors">
-              Drift CLI
+            <Link href="/drift" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
+              CLI
             </Link>
-            <Link href="/drift#setup" className="text-sm font-medium hover:text-primary transition-colors">
-              Docs &amp; setup
-            </Link>
-            <div className="h-6 w-px bg-border mx-2" />
-            <Link
-              href="/drift#run-locally"
-              className="px-4 py-2 bg-black dark:bg-white text-white dark:text-black rounded-full text-sm font-medium hover:opacity-90 transition-opacity"
-            >
-              Run locally
+            <Link href="/drift#setup" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
+              Docs
             </Link>
           </div>
         </div>
       </nav>
 
-      <main className="flex-1 py-12 px-4 sm:px-6 lg:px-8">
-        <Intent2ModelWizard />
+      {/* Main content */}
+      <main className="flex-1 flex items-center justify-center px-4 relative z-10">
+        <div className="max-w-4xl text-center">
+          <h1 className="text-6xl md:text-8xl font-bold text-white mb-6">
+            drift
+          </h1>
+          <div className="text-2xl md:text-3xl text-white/90 mb-12 h-12">
+            <TextType
+              texts={[
+                "Terminal-first AutoML",
+                "Chat-based ML engineer",
+                "Local-first training",
+                "No commands to memorize"
+              ]}
+              typingSpeed={75}
+              pauseDuration={2000}
+              deletingSpeed={50}
+              showCursor
+              cursorCharacter="_"
+            />
+          </div>
+
+          <p className="text-xl text-white/70 mb-12">
+            drift web coming soon
+          </p>
+
+          <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
+            <Link
+              href="/drift#run-locally"
+              className="px-8 py-4 bg-white text-black rounded-full text-lg font-semibold hover:bg-white/90 transition-all shadow-2xl"
+            >
+              Try locally
+            </Link>
+            <Link
+              href="/drift"
+              className="px-8 py-4 border-2 border-white/30 text-white rounded-full text-lg font-medium hover:bg-white/10 transition-all"
+            >
+              Get drift CLI
+            </Link>
+          </div>
+
+          <p className="text-sm text-white/50 mt-12">
+            by Lakshit Sachdeva
+          </p>
+        </div>
       </main>
 
-      <footer className="border-t py-8 bg-white dark:bg-black">
+      <footer className="border-t border-white/10 py-8 relative z-10">
         <div className="max-w-7xl mx-auto px-4 text-center">
-          <p className="text-sm text-muted-foreground">
-            Built with ❤️ by lakshit for autonomous machine learning. &copy; 2026 Intent2Model Inc.
+          <p className="text-sm text-white/50">
+            Local-first ML engineer. Same engine as the CLI. &copy; 2026
           </p>
         </div>
       </footer>
