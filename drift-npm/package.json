@@ -1,6 +1,6 @@
 {
   "name": "drift-ml",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Drift — terminal-first, chat-based AutoML. Same engine as the web app. On first run: downloads and starts the engine locally (never exposes engine source).",
   "bin": {
     "drift": "./bin/drift.js"
