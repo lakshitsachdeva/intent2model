@@ -142,6 +142,41 @@ npm install
 
 ---
 
+## drift — Terminal-first CLI
+
+**drift** by Lakshit Sachdeva. Terminal-first, chat-based AutoML — same engine as the web UI. No commands to memorize.
+
+### Exactly what to do (any computer)
+
+1. **Install drift** (pick one):
+   ```bash
+   npm install -g drift-ml
+   ```
+   or:
+   ```bash
+   pipx install drift
+   ```
+
+2. **Run drift:**
+   ```bash
+   drift
+   ```
+   You’ll see the welcome and step-by-step instructions in the terminal.
+
+3. **Engine** — On first run the CLI downloads and starts the drift engine locally (or set `DRIFT_BACKEND_URL` to a running engine). You need an LLM: Gemini CLI, Ollama, or another local LLM.
+
+4. **In drift:** type `load path/to/your.csv`, then chat (e.g. `predict price`, `try something stronger`). Type `quit` to exit.
+
+drift shows you the rest when you run it.
+
+### Install (details)
+
+- **Local-first** — Same engine as the web app; planning and training run on your machine.
+- **Chat-based**: e.g. `load iris.csv`, `predict price`, `try something stronger`, `why is accuracy capped`.
+- **Engine** runs locally (CLI auto-starts it or use `DRIFT_BACKEND_URL`). Web UI can be hosted on Vercel.
+
+---
+
 ## 📚 More Info
 
 See `HOW_TO_USE.md` for detailed instructions and examples.

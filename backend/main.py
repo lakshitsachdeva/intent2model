@@ -1741,12 +1741,15 @@ async def session_train(session_id: str):
         )
         if reasoning_block:
             agent_content += reasoning_block
+        if run_id:
+            agent_content += "\n\n📓 **Notebook:** Get it from **Artifacts & downloads** (sidebar) — full story and code."
     else:
         agent_content = (
             f"Training finished. Primary metric: **{primary}**.\n\n"
             + (per_model_line if per_model_line else "")
             + "I can:\n1) Try more complex models — say \"try something stronger\"\n2) Engineer features — say \"drop X\" or \"use Y as target\"\n3) Try different preprocessing — say \"try different preprocessing\"\n4) Stop here — say \"that's enough\""
             + (reasoning_block if reasoning_block else "")
+            + (f"\n\n📓 **Notebook:** See **Artifacts & downloads** in the sidebar (or Charts) to view/download your notebook — full story, reasoning, and code to rerun locally." if run_id else "")
         )
 
     session.setdefault("chat_history", []).append({

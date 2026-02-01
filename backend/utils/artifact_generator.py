@@ -631,8 +631,17 @@ def generate_notebook(
             },
         ]
 
-    # Attempt-based (when not using full-LLM): append attempt log then Outcome
-    if use_attempt_based and not use_full_llm_notebook:
+    # Attempt-based: either full-LLM notebook (already complete) or attempt log + Outcome
+    if use_attempt_based:
+        if use_full_llm_notebook:
+            # Full-LLM notebook is already complete (Setup + LLM cells + Save & Use). Do NOT append legacy ## 4–10.
+            notebook = {
+                "cells": base_cells,
+                "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}, "language_info": {"name": "python", "version": "3.10.0"}},
+                "nbformat": 4,
+                "nbformat_minor": 4,
+            }
+            return json.dumps(notebook, indent=1)
         base_cells.extend(attempt_based_cells)
         refusal_reason = (config or {}).get("refusal_reason") or ""
         if is_refused_or_low:
@@ -666,7 +675,7 @@ def generate_notebook(
         }
         return json.dumps(notebook, indent=1)
 
-    # Legacy: linear report (single plan)
+    # Legacy: linear report (single plan) — only when NOT attempt-based
     notebook = {
         "cells": [
             *base_cells,

@@ -2,17 +2,51 @@
 Model trainer for Intent2Model.
 
 Handles cross-validation, model training, and metric calculation.
+Auto-installs missing packages (e.g. xgboost) on ImportError when error message suggests pip install.
 """
 
 import pandas as pd
 import numpy as np
+import subprocess
+import sys
+import re
 from sklearn.model_selection import cross_val_score, cross_validate, StratifiedKFold, KFold, train_test_split
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
     mean_squared_error, mean_absolute_error, r2_score, confusion_matrix
 )
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Callable
 import warnings
+
+
+def _try_pip_install_from_error(error_msg: str) -> Tuple[bool, str]:
+    """
+    If error_msg suggests 'pip install X', run it once. Returns (installed, package_name).
+    Used so the system can auto-install xgboost etc. instead of asking the user.
+    """
+    err = (error_msg or "").strip().lower()
+    if "pip install" not in err:
+        return False, ""
+    # Match "pip install xgboost" or "Install with: pip install xgboost"
+    match = re.search(r"pip\s+install\s+(\S+)", err, re.IGNORECASE)
+    if not match:
+        return False, ""
+    pkg = match.group(1).strip()
+    if not pkg or len(pkg) > 50:
+        return False, ""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", pkg],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode == 0:
+            print(f"✅ Auto-installed {pkg} (pip install {pkg})")
+            return True, pkg
+    except Exception as e:
+        print(f"⚠️ Auto-install failed for {pkg}: {e}")
+    return False, pkg
 
 from .pipeline_builder import build_pipeline, get_model_complexity
 from .profiler import profile_dataset
@@ -505,10 +539,13 @@ def compare_models(
     task: str,
     metric: str,
     model_candidates: List[str],
-    base_config: Optional[Dict[str, Any]] = None
+    base_config: Optional[Dict[str, Any]] = None,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Dict:
     """
     Try multiple models and return ALL results with detailed comparison.
+    On ImportError with "pip install X", auto-installs and retries once.
+    progress_callback(message, current_index, total) for live activity (e.g. "Training model 2/5: xgboost").
     
     Args:
         df: Input DataFrame
@@ -517,6 +554,7 @@ def compare_models(
         metric: Metric to optimize
         model_candidates: List of model names to try
         base_config: Base pipeline configuration
+        progress_callback: Optional (message, current, total) for live logging
         
     Returns:
         Dictionary with:
@@ -547,55 +585,70 @@ def compare_models(
     y = df[target]
     
     results = []
+    total = len(model_candidates)
     
-    for model_name in model_candidates:
-        try:
-            if base_config:
-                config = base_config.copy()
-            else:
-                config = {
-                    "task": task,
-                    "preprocessing": ["standard_scaler", "one_hot"],
-                    "model": model_name
-                }
-            config["model"] = model_name
-            
-            if task == "classification":
-                result = train_classification(df, target, metric, config)
-            else:
-                result = train_regression(df, target, metric, config)
-            
-            # Primary metric for ranking/table: use CV mean when available (generalization), else in-sample
-            cv_mean = result.get("cv_mean")
-            primary_metric_value = (cv_mean if cv_mean is not None else result["metrics"].get(metric))
-            if primary_metric_value is None:
-                primary_metric_value = result["metrics"].get(metric, 0)
-            # Complexity penalty: effective_score = cv_score - 0.05 * complexity (complex must earn place)
-            complexity = get_model_complexity(model_name)
-            penalty = COMPLEXITY_PENALTY * complexity
-            # For "higher is better" metrics (r2, accuracy, f1), subtract penalty
-            # For "lower is better" (rmse, mae), add penalty so effective "score" is worse
-            reverse = metric not in ["rmse", "mae"]
-            if reverse:
-                effective = (primary_metric_value - penalty) if primary_metric_value is not None else -float("inf")
-            else:
-                effective = (primary_metric_value + penalty) if primary_metric_value is not None else float("inf")
-            result["model_name"] = model_name
-            result["primary_metric"] = primary_metric_value
-            result["effective_score"] = effective
-            result["complexity"] = complexity
-            results.append(result)
-        except Exception as e:
-            print(f"Model {model_name} failed: {e}")
-            reverse = metric not in ["rmse", "mae"]
-            results.append({
-                "model_name": model_name,
-                "primary_metric": None,
-                "failed": True,
-                "error": str(e)[:200],
-                "effective_score": -float("inf") if reverse else float("inf"),
-            })
-            continue
+    for idx, model_name in enumerate(model_candidates):
+        retried = False
+        while True:
+            try:
+                if progress_callback:
+                    progress_callback(f"Training model {idx + 1}/{total}: {model_name}...", idx + 1, total)
+                if base_config:
+                    config = base_config.copy()
+                else:
+                    config = {
+                        "task": task,
+                        "preprocessing": ["standard_scaler", "one_hot"],
+                        "model": model_name
+                    }
+                config["model"] = model_name
+                
+                if task == "classification":
+                    result = train_classification(df, target, metric, config)
+                else:
+                    result = train_regression(df, target, metric, config)
+                
+                # Primary metric for ranking/table: use CV mean when available (generalization), else in-sample
+                cv_mean = result.get("cv_mean")
+                primary_metric_value = (cv_mean if cv_mean is not None else result["metrics"].get(metric))
+                if primary_metric_value is None:
+                    primary_metric_value = result["metrics"].get(metric, 0)
+                # Complexity penalty: effective_score = cv_score - 0.05 * complexity (complex must earn place)
+                complexity = get_model_complexity(model_name)
+                penalty = COMPLEXITY_PENALTY * complexity
+                # For "higher is better" metrics (r2, accuracy, f1), subtract penalty
+                # For "lower is better" (rmse, mae), add penalty so effective "score" is worse
+                reverse = metric not in ["rmse", "mae"]
+                if reverse:
+                    effective = (primary_metric_value - penalty) if primary_metric_value is not None else -float("inf")
+                else:
+                    effective = (primary_metric_value + penalty) if primary_metric_value is not None else float("inf")
+                result["model_name"] = model_name
+                result["primary_metric"] = primary_metric_value
+                result["effective_score"] = effective
+                result["complexity"] = complexity
+                results.append(result)
+                break
+            except Exception as e:
+                err_str = str(e)
+                # Auto-install on ImportError when error suggests pip install (e.g. xgboost)
+                if isinstance(e, ImportError) and not retried and "pip install" in err_str.lower():
+                    installed, pkg = _try_pip_install_from_error(err_str)
+                    if installed and progress_callback:
+                        progress_callback(f"Installed {pkg}; retrying {model_name}...", idx + 1, total)
+                    if installed:
+                        retried = True
+                        continue
+                print(f"Model {model_name} failed: {e}")
+                reverse = metric not in ["rmse", "mae"]
+                results.append({
+                    "model_name": model_name,
+                    "primary_metric": None,
+                    "failed": True,
+                    "error": err_str[:200],
+                    "effective_score": -float("inf") if reverse else float("inf"),
+                })
+                break
     
     if not results:
         # Check if it's a compiler error vs training error

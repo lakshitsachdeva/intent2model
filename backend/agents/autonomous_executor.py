@@ -205,13 +205,17 @@ class AutonomousExecutor:
                 self._log(f"🚀 Step 3: Training models: {', '.join(model_candidates)}...", "train", 60)
                 if len(model_candidates) > 1:
                     self._log(f"📊 Comparing {len(model_candidates)} models...", "train", 62)
+                    def _progress_cb(msg: str, cur: int, tot: int):
+                        pct = 60 + int(8 * cur / max(tot, 1))
+                        self._log(msg, "train", min(pct, 68))
                     result = compare_models(
                         df=df,
                         target=target,
                         task=task,
                         metric=metric,
                         model_candidates=model_candidates,
-                        base_config=config
+                        base_config=config,
+                        progress_callback=_progress_cb,
                     )
                     self._log(f"✅ Model comparison complete: {len(result.get('all_models', []))} models trained", "train", 68)
                 else:
@@ -1095,7 +1099,12 @@ class AutonomousExecutor:
         # Try training with minimal config
         try:
             if len(model_candidates) > 1:
-                result = compare_models(df, target, task, metric, model_candidates, config)
+                def _fallback_progress_cb(msg: str, cur: int, tot: int):
+                    self._log(msg, "train", 50 + int(10 * cur / max(tot, 1)))
+                result = compare_models(
+                    df, target, task, metric, model_candidates, config,
+                    progress_callback=_fallback_progress_cb,
+                )
             else:
                 if task == "classification":
                     result = train_classification(df, target, metric, config)
