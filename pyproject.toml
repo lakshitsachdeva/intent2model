@@ -3,9 +3,9 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "intent2model"
-version = "0.1.0"
-description = "Intent2Model with drift CLI"
+name = "drift"
+version = "0.1.1"
+description = "Terminal-first AutoML CLI - chat-based ML engineer"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.28.0",
