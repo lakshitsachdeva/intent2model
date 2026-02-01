@@ -54,10 +54,21 @@ export default function DriftPage() {
           <h2 className="text-2xl font-semibold text-white">Exactly what to do</h2>
           <div className="space-y-4 text-white/80">
             <div>
-              <p className="text-white/60 text-sm mb-2">1. Install drift</p>
-              <pre className="bg-black/60 border border-white/20 text-green-400 p-4 rounded-lg overflow-x-auto text-sm">
+              <p className="text-white/60 text-sm mb-2">1. Install drift (pick one)</p>
+              <div className="space-y-2">
+                <div>
+                  <p className="text-white/40 text-xs mb-1">via npm</p>
+                  <pre className="bg-black/60 border border-white/20 text-green-400 p-4 rounded-lg overflow-x-auto text-sm">
 npm install -g drift-ml
-              </pre>
+                  </pre>
+                </div>
+                <div>
+                  <p className="text-white/40 text-xs mb-1">via pipx (Python)</p>
+                  <pre className="bg-black/60 border border-white/20 text-green-400 p-4 rounded-lg overflow-x-auto text-sm">
+pipx install drift-ml
+                  </pre>
+                </div>
+              </div>
             </div>
             <div>
               <p className="text-white/60 text-sm mb-2">2. Run drift</p>
