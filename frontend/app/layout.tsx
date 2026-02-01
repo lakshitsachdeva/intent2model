@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import VisualEditsMessenger from "../components/VisualEditsMessenger";
@@ -14,6 +14,12 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "drift — Local-first AutoML",
   description: "Terminal-first, chat-based AutoML. Same engine as the web app. No commands to memorize.",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
 };
 
 export default function RootLayout({

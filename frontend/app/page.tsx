@@ -29,11 +29,11 @@ export default function Home() {
 
       {/* Nav */}
       <nav className="border-b border-white/10 backdrop-blur-xl sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between">
           <Link href="/" className="flex items-center">
-            <span className="font-bold text-2xl tracking-tight text-white">drift</span>
+            <span className="font-bold text-xl sm:text-2xl tracking-tight text-white">drift</span>
           </Link>
-          <div className="flex items-center space-x-4">
+          <div className="flex items-center gap-3 sm:gap-4">
             <Link href="/drift" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
               CLI
             </Link>
@@ -45,12 +45,12 @@ export default function Home() {
       </nav>
 
       {/* Main content */}
-      <main className="flex-1 flex items-center justify-center px-4 relative z-10">
-        <div className="max-w-4xl text-center">
-          <h1 className="text-6xl md:text-8xl font-bold text-white mb-6">
+      <main className="flex-1 flex items-center justify-center px-4 sm:px-6 py-8 sm:py-0 relative z-10">
+        <div className="max-w-4xl w-full text-center">
+          <h1 className="text-5xl sm:text-6xl md:text-8xl font-bold text-white mb-4 sm:mb-6">
             drift
           </h1>
-          <div className="text-2xl md:text-3xl text-white/90 mb-12 h-12">
+          <div className="text-lg sm:text-2xl md:text-3xl text-white/90 mb-8 sm:mb-12 min-h-12 sm:h-12 flex items-center justify-center">
             <TextType
               texts={[
                 "Terminal-first AutoML",
@@ -66,34 +66,34 @@ export default function Home() {
             />
           </div>
 
-          <p className="text-xl text-white/70 mb-12">
+          <p className="text-base sm:text-xl text-white/70 mb-8 sm:mb-12">
             drift web — coming soon
           </p>
 
-          <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
+          <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 justify-center items-center w-full sm:w-auto">
             <Link
               href="/drift#run-locally"
-              className="px-8 py-4 bg-white text-black rounded-full text-lg font-semibold hover:bg-white/90 transition-all shadow-2xl"
+              className="w-full sm:w-auto px-6 sm:px-8 py-3 sm:py-4 bg-white text-black rounded-full text-base sm:text-lg font-semibold hover:bg-white/90 transition-all shadow-2xl active:scale-[0.98]"
             >
               Try locally
             </Link>
             <Link
               href="/drift"
-              className="px-8 py-4 border-2 border-white/30 text-white rounded-full text-lg font-medium hover:bg-white/10 transition-all"
+              className="w-full sm:w-auto px-6 sm:px-8 py-3 sm:py-4 border-2 border-white/30 text-white rounded-full text-base sm:text-lg font-medium hover:bg-white/10 transition-all active:scale-[0.98]"
             >
               Get drift CLI
             </Link>
           </div>
 
-          <p className="text-sm text-white/50 mt-12">
+          <p className="text-sm text-white/50 mt-8 sm:mt-12">
             by Lakshit Sachdeva
           </p>
 
         </div>
       </main>
 
-      <footer className="border-t border-white/10 py-8 relative z-10">
-        <div className="max-w-7xl mx-auto px-4 text-center">
+      <footer className="border-t border-white/10 py-6 sm:py-8 relative z-10">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 text-center">
           <p className="text-sm text-white/50">
             Local-first ML engineer. Same engine as the CLI. &copy; 2026
           </p>

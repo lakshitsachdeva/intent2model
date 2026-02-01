@@ -28,11 +28,11 @@ export default function DriftPage() {
 
       {/* Nav */}
       <nav className="border-b border-white/10 backdrop-blur-xl sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between">
           <Link href="/" className="flex items-center">
-            <span className="font-bold text-2xl tracking-tight text-white">drift</span>
+            <span className="font-bold text-xl sm:text-2xl tracking-tight text-white">drift</span>
           </Link>
-          <div className="flex items-center space-x-4">
+          <div className="flex items-center gap-3 sm:gap-4">
             <Link href="/" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
               Home
             </Link>
@@ -44,27 +44,27 @@ export default function DriftPage() {
       </nav>
 
       {/* Main content */}
-      <main className="flex-1 max-w-4xl mx-auto py-16 px-4 sm:px-6 lg:px-8 relative z-10">
-        <h1 className="text-5xl font-bold text-white mb-4">drift</h1>
-        <p className="text-xl text-white/70 mb-12">
+      <main className="flex-1 max-w-4xl mx-auto py-10 sm:py-16 px-4 sm:px-6 lg:px-8 relative z-10">
+        <h1 className="text-4xl sm:text-5xl font-bold text-white mb-3 sm:mb-4">drift</h1>
+        <p className="text-lg sm:text-xl text-white/70 mb-8 sm:mb-12">
           Terminal-first AutoML agent. Same engine as the web app.
         </p>
 
-        <section className="space-y-6 mb-12">
-          <h2 className="text-2xl font-semibold text-white">Exactly what to do</h2>
+        <section className="space-y-4 sm:space-y-6 mb-10 sm:mb-12">
+          <h2 className="text-xl sm:text-2xl font-semibold text-white">Exactly what to do</h2>
           <div className="space-y-4 text-white/80">
             <div>
               <p className="text-white/60 text-sm mb-2">1. Install drift (pick one)</p>
               <div className="space-y-2">
                 <div>
                   <p className="text-white/40 text-xs mb-1">via npm</p>
-                  <pre className="bg-black/60 border border-white/20 text-green-400 p-4 rounded-lg overflow-x-auto text-sm">
+                  <pre className="bg-black/60 border border-white/20 text-green-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
 npm install -g drift-ml
                   </pre>
                 </div>
                 <div>
                   <p className="text-white/40 text-xs mb-1">via pipx (Python)</p>
-                  <pre className="bg-black/60 border border-white/20 text-green-400 p-4 rounded-lg overflow-x-auto text-sm">
+                  <pre className="bg-black/60 border border-white/20 text-green-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
 pipx install drift-ml
                   </pre>
                 </div>
@@ -72,7 +72,7 @@ pipx install drift-ml
             </div>
             <div>
               <p className="text-white/60 text-sm mb-2">2. Run drift</p>
-              <pre className="bg-black/60 border border-white/20 text-green-400 p-4 rounded-lg overflow-x-auto text-sm">
+              <pre className="bg-black/60 border border-white/20 text-green-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
 drift
               </pre>
               <p className="text-white/50 text-sm mt-2">
@@ -89,7 +89,7 @@ drift
             </div>
             <div>
               <p className="text-white/60 text-sm mb-2">4. Chat</p>
-              <pre className="bg-black/60 border border-white/20 text-cyan-400 p-4 rounded-lg overflow-x-auto text-sm">
+              <pre className="bg-black/60 border border-white/20 text-cyan-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
 drift › load data.csv
 drift › predict price
 drift › try something stronger
@@ -100,8 +100,8 @@ drift › quit
           </div>
         </section>
 
-        <section id="setup" className="space-y-6 mb-12 scroll-mt-8">
-          <h2 className="text-2xl font-semibold text-white">Setup — LLM required</h2>
+        <section id="setup" className="space-y-4 sm:space-y-6 mb-10 sm:mb-12 scroll-mt-20">
+          <h2 className="text-xl sm:text-2xl font-semibold text-white">Setup — LLM required</h2>
           <p className="text-white/70">
             Training and planning use an LLM. You need one of these:
           </p>
@@ -124,12 +124,12 @@ drift › quit
           </p>
         </section>
 
-        <section id="run-locally" className="space-y-6 mb-12 scroll-mt-8">
-          <h2 className="text-2xl font-semibold text-white">Run locally</h2>
+        <section id="run-locally" className="space-y-4 sm:space-y-6 mb-10 sm:mb-12 scroll-mt-20">
+          <h2 className="text-xl sm:text-2xl font-semibold text-white">Run locally</h2>
           <p className="text-white/70 text-sm">
             Clone the repo and start the engine:
           </p>
-          <pre className="bg-black/60 border border-white/20 text-green-400 p-4 rounded-lg overflow-x-auto text-sm">
+          <pre className="bg-black/60 border border-white/20 text-green-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
 ./start.sh
           </pre>
           <p className="text-white/50 text-sm">
@@ -138,15 +138,15 @@ drift › quit
         </section>
 
         <section className="space-y-4">
-          <h2 className="text-2xl font-semibold text-white">What is drift?</h2>
+          <h2 className="text-xl sm:text-2xl font-semibold text-white">What is drift?</h2>
           <p className="text-white/70">
             Local-first: the engine runs on your machine. Training and planning stay local; you never send data to our servers. Terminal-first, chat-based — same engine as the web app. No commands to memorize.
           </p>
         </section>
       </main>
 
-      <footer className="border-t border-white/10 py-8 relative z-10">
-        <div className="max-w-7xl mx-auto px-4 text-center">
+      <footer className="border-t border-white/10 py-6 sm:py-8 relative z-10">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 text-center">
           <p className="text-sm text-white/50">
             by Lakshit Sachdeva &copy; 2026
           </p>
