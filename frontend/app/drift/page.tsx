@@ -22,11 +22,8 @@ export default function DriftPage() {
       {/* Nav */}
       <nav className="border-b border-white/10 backdrop-blur-xl sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center space-x-2">
-            <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center">
-              <span className="text-black font-bold">d</span>
-            </div>
-            <span className="font-bold text-xl tracking-tight text-white">drift</span>
+          <Link href="/" className="flex items-center">
+            <span className="font-bold text-2xl tracking-tight text-white">drift</span>
           </Link>
           <div className="flex items-center space-x-4">
             <Link href="/" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
