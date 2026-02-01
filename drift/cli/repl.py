@@ -3,10 +3,12 @@ Chat-based CLI loop for drift.
 Natural language input; maintains session state; reuses backend planner + executor.
 """
 
+import os
 import re
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from drift.cli.client import BackendClient, BackendError, DEFAULT_BASE_URL
@@ -194,8 +196,9 @@ def _run_training_and_show(client: BackendClient, session: SessionState) -> None
         print(f"Training error: {train_error}", file=sys.stderr)
         return
     if train_result:
+        run_id = train_result.get("run_id", "")
         session.update_after_train(
-            run_id=train_result.get("run_id", ""),
+            run_id=run_id,
             metrics=train_result.get("metrics") or {},
             agent_message=train_result.get("agent_message"),
         )
@@ -207,6 +210,37 @@ def _run_training_and_show(client: BackendClient, session: SessionState) -> None
             primary = metrics.get("primary_metric_value") or metrics.get("accuracy") or metrics.get("r2")
             if primary is not None:
                 print(f"  Primary metric: {primary}")
+        # Auto-save notebook and model to current directory for terminal users
+        if run_id and not train_result.get("refused"):
+            _save_artifacts(client, run_id)
+
+
+def _save_artifacts(client: BackendClient, run_id: str) -> None:
+    """Download notebook and model to current directory. Print where saved."""
+    cwd = Path(os.getcwd())
+    prefix = f"model_{run_id[:8]}"
+    saved = []
+    try:
+        nb = client.download_notebook(run_id)
+        if nb:
+            path = cwd / f"{prefix}_training_notebook.ipynb"
+            path.write_bytes(nb)
+            saved.append(str(path))
+    except Exception:
+        pass
+    try:
+        mdl = client.download_model(run_id)
+        if mdl:
+            path = cwd / f"{prefix}.pkl"
+            path.write_bytes(mdl)
+            saved.append(str(path))
+    except Exception:
+        pass
+    if saved:
+        print()
+        print("  Saved to current directory:")
+        for p in saved:
+            print(f"    {p}")
 
 
 def _print_message(content: str) -> None:

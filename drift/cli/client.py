@@ -123,3 +123,17 @@ class BackendClient:
                 detail = r.text or str(r.status_code)
             raise BackendError(f"Train failed: {detail}", status_code=r.status_code, body=r.text)
         return r.json()
+
+    def download_notebook(self, run_id: str) -> Optional[bytes]:
+        """GET /download/{run_id}/notebook — download notebook bytes, or None if failed."""
+        r = requests.get(self._url(f"/download/{run_id}/notebook"), timeout=60)
+        if r.status_code != 200:
+            return None
+        return r.content
+
+    def download_model(self, run_id: str) -> Optional[bytes]:
+        """GET /download/{run_id}/model — download model pickle bytes, or None if refused/failed."""
+        r = requests.get(self._url(f"/download/{run_id}/model"), timeout=60)
+        if r.status_code != 200:
+            return None
+        return r.content
