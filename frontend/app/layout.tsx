@@ -1,12 +1,18 @@
 import type { Metadata } from "next";
+import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import VisualEditsMessenger from "../components/VisualEditsMessenger";
 import ErrorReporter from "@/components/ErrorReporter";
 import Script from "next/script";
 
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-jetbrains-mono",
+});
+
 export const metadata: Metadata = {
-  title: "Intent2Model - LLM-Guided AutoML Platform",
-  description: "Upload datasets, chat with AI, and train machine learning models autonomously",
+  title: "drift — Local-first AutoML",
+  description: "Terminal-first, chat-based AutoML. Same engine as the web app. No commands to memorize.",
 };
 
 export default function RootLayout({
@@ -16,7 +22,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className="antialiased">
+      <body className={`${jetbrainsMono.variable} antialiased font-mono`}>
         <Script
           id="orchids-browser-logs"
           src="https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/object/public/scripts/orchids-browser-logs.js"
