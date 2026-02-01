@@ -5,18 +5,7 @@ const nextConfig: NextConfig = {
   experimental: {
     optimizePackageImports: ['ogl'],
   },
-  webpack: (config, { isServer }) => {
-    // Handle OGL library properly
-    if (!isServer) {
-      config.resolve.fallback = {
-        ...config.resolve.fallback,
-        fs: false,
-        net: false,
-        tls: false,
-      };
-    }
-    return config;
-  },
+  turbopack: {},
 };
 
 export default nextConfig;
