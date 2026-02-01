@@ -86,6 +86,7 @@ export default function Home() {
           <p className="text-sm text-white/50 mt-12">
             by Lakshit Sachdeva
           </p>
+
         </div>
       </main>
 
