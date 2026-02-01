@@ -1,9 +1,16 @@
 # PyInstaller spec for drift engine binary.
 # Run from project root: pyinstaller engine_build/drift-engine.spec
 # Output: dist/drift-engine (Unix) or dist/drift-engine.exe (Windows)
+# Paths are absolute so the spec works regardless of cwd or spec location.
 
 import sys
 import os
+
+# Repo root = parent of engine_build/ (where this spec lives)
+SPEC_DIR = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
+REPO_ROOT = os.path.dirname(SPEC_DIR)
+SCRIPT_PATH = os.path.join(REPO_ROOT, "backend", "run_engine.py")
+BACKEND_PATH = os.path.join(REPO_ROOT, "backend")
 
 # Platform-specific output name for release (drift-engine-macos-arm64, etc.)
 platform_map = {"darwin": "macos", "linux": "linux", "win32": "windows"}
@@ -19,8 +26,8 @@ out_name = f"drift-engine-{plat}-{arch}{exe_suffix}"
 block_cipher = None
 
 a = Analysis(
-    ["backend/run_engine.py"],
-    pathex=[os.path.abspath("."), os.path.abspath("backend")],
+    [SCRIPT_PATH],
+    pathex=[REPO_ROOT, BACKEND_PATH],
     binaries=[],
     datas=[],
     hiddenimports=[
