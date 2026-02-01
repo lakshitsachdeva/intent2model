@@ -2,17 +2,10 @@
 
 import { useEffect, useRef } from 'react';
 
-// Minimal OGL types for TypeScript
-interface GL extends WebGLRenderingContext {
-  canvas: HTMLCanvasElement;
-  drawingBufferWidth: number;
-  drawingBufferHeight: number;
-}
-
 const Prism = ({
   height = 3.5,
   baseWidth = 5.5,
-  animationType = 'rotate',
+  animationType = 'hover',
   glow = 1,
   offset = { x: 0, y: 0 },
   noise = 0.5,
@@ -21,6 +14,9 @@ const Prism = ({
   hueShift = 0,
   colorFrequency = 1,
   timeScale = 0.5,
+  hoverStrength = 2,
+  inertia = 0.05,
+  bloom = 1,
 }: {
   height?: number;
   baseWidth?: number;
@@ -33,6 +29,9 @@ const Prism = ({
   hueShift?: number;
   colorFrequency?: number;
   timeScale?: number;
+  hoverStrength?: number;
+  inertia?: number;
+  bloom?: number;
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -51,10 +50,14 @@ const Prism = ({
     const SCALE = Math.max(0.001, scale);
     const HUE = hueShift || 0;
     const CFREQ = Math.max(0.0, colorFrequency || 1);
+    const BLOOM = Math.max(0.0, bloom || 1);
     const TS = Math.max(0, timeScale || 1);
+    const HOVSTR = Math.max(0, hoverStrength || 1);
+    const INERT = Math.max(0, Math.min(1, inertia || 0.12));
 
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
     const canvas = document.createElement('canvas');
-    const gl = canvas.getContext('webgl', { alpha: transparent, antialias: false }) as GL;
+    const gl = canvas.getContext('webgl', { alpha: transparent, antialias: true, preserveDrawingBuffer: false });
     if (!gl) return;
 
     Object.assign(canvas.style, {
@@ -124,6 +127,8 @@ const Prism = ({
         return W + U * c + V * s;
       }
 
+      uniform float uBloom;
+
       void main() {
         vec2 f = (gl_FragCoord.xy - 0.5 * iResolution.xy - uOffsetPx) * uPxScale;
         float z = 5.0;
@@ -154,7 +159,7 @@ const Prism = ({
           o += (sin((p.y + z) * cf + vec4(0.0, 1.0, 2.0, 3.0)) + 1.0) / d;
         }
 
-        o = tanh4(o * o * (uGlow) / 1e5);
+        o = tanh4(o * o * (uGlow * uBloom) / 1e5);
         vec3 col = o.rgb;
         float n = rand(gl_FragCoord.xy + vec2(iTime));
         col += (n - 0.5) * uNoise;
@@ -214,6 +219,7 @@ const Prism = ({
       'uMinAxis',
       'uPxScale',
       'uTimeScale',
+      'uBloom',
     ].forEach((name) => {
       uniforms[name] = gl.getUniformLocation(program, name);
     });
@@ -221,12 +227,14 @@ const Prism = ({
     const resize = () => {
       const w = container.clientWidth || 1;
       const h = container.clientHeight || 1;
-      canvas.width = w;
-      canvas.height = h;
-      gl.viewport(0, 0, w, h);
-      gl.uniform2f(uniforms.iResolution, w, h);
-      gl.uniform2f(uniforms.uOffsetPx, offX, offY);
-      gl.uniform1f(uniforms.uPxScale, 1 / (h * 0.1 * SCALE));
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.uniform2f(uniforms.iResolution, canvas.width, canvas.height);
+      gl.uniform2f(uniforms.uOffsetPx, offX * dpr, offY * dpr);
+      gl.uniform1f(uniforms.uPxScale, 1 / (canvas.height * 0.1 * SCALE));
     };
 
     const ro = new ResizeObserver(resize);
@@ -247,37 +255,73 @@ const Prism = ({
     gl.uniform1f(uniforms.uInvHeight, 1 / H);
     gl.uniform1f(uniforms.uMinAxis, Math.min(BASE_HALF, H));
     gl.uniform1f(uniforms.uTimeScale, TS);
+    gl.uniform1f(uniforms.uBloom, BLOOM);
 
     const rotBuf = new Float32Array(9);
     rotBuf[0] = 1;
     rotBuf[4] = 1;
     rotBuf[8] = 1;
-    gl.uniformMatrix3fv(uniforms.uRot, false, rotBuf);
+
+    const setMat3FromEuler = (yawY: number, pitchX: number, rollZ: number) => {
+      const cy = Math.cos(yawY), sy = Math.sin(yawY);
+      const cx = Math.cos(pitchX), sx = Math.sin(pitchX);
+      const cz = Math.cos(rollZ), sz = Math.sin(rollZ);
+      rotBuf[0] = cy * cz + sy * sx * sz;
+      rotBuf[1] = cx * sz;
+      rotBuf[2] = -sy * cz + cy * sx * sz;
+      rotBuf[3] = -cy * sz + sy * sx * cz;
+      rotBuf[4] = cx * cz;
+      rotBuf[5] = sy * sz + cy * sx * cz;
+      rotBuf[6] = sy * cx;
+      rotBuf[7] = -sx;
+      rotBuf[8] = cy * cx;
+    };
 
     let raf = 0;
     const t0 = performance.now();
+    let yaw = 0, pitch = 0, roll = 0;
+    let targetYaw = 0, targetPitch = 0;
+    const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+    const pointer = { x: 0, y: 0, inside: false };
+    const onMove = (e: MouseEvent) => {
+      const ww = Math.max(1, window.innerWidth);
+      const wh = Math.max(1, window.innerHeight);
+      const cx = ww * 0.5;
+      const cy = wh * 0.5;
+      const nx = (e.clientX - cx) / (ww * 0.5);
+      const ny = (e.clientY - cy) / (wh * 0.5);
+      pointer.x = Math.max(-1, Math.min(1, nx));
+      pointer.y = Math.max(-1, Math.min(1, ny));
+      pointer.inside = true;
+    };
+    const onLeave = () => { pointer.inside = false; };
+
+    if (animationType === 'hover') {
+      window.addEventListener('pointermove', onMove, { passive: true });
+      window.addEventListener('mouseleave', onLeave);
+    }
 
     const render = (t: number) => {
       const time = (t - t0) * 0.001;
       gl.uniform1f(uniforms.iTime, time);
 
-      if (animationType === 'rotate') {
+      if (animationType === 'hover') {
+        const maxPitch = 0.6 * HOVSTR;
+        const maxYaw = 0.6 * HOVSTR;
+        targetYaw = (pointer.inside ? -pointer.x : 0) * maxYaw;
+        targetPitch = (pointer.inside ? pointer.y : 0) * maxPitch;
+        yaw = lerp(yaw, targetYaw, INERT);
+        pitch = lerp(pitch, targetPitch, INERT);
+        roll = lerp(roll, 0, 0.1);
+        setMat3FromEuler(yaw, pitch, roll);
+        gl.uniformMatrix3fv(uniforms.uRot, false, rotBuf);
+      } else if (animationType === '3drotate' || animationType === 'rotate') {
         const tScaled = time * TS;
-        const yaw = tScaled * 0.3;
-        const pitch = Math.sin(tScaled * 0.4) * 0.6;
-        const roll = Math.sin(tScaled * 0.2) * 0.5;
-        const cy = Math.cos(yaw), sy = Math.sin(yaw);
-        const cx = Math.cos(pitch), sx = Math.sin(pitch);
-        const cz = Math.cos(roll), sz = Math.sin(roll);
-        rotBuf[0] = cy * cz + sy * sx * sz;
-        rotBuf[1] = cx * sz;
-        rotBuf[2] = -sy * cz + cy * sx * sz;
-        rotBuf[3] = -cy * sz + sy * sx * cz;
-        rotBuf[4] = cx * cz;
-        rotBuf[5] = sy * sz + cy * sx * cz;
-        rotBuf[6] = sy * cx;
-        rotBuf[7] = -sx;
-        rotBuf[8] = cy * cx;
+        const y = tScaled * 0.3;
+        const p = Math.sin(tScaled * 0.4) * 0.6;
+        const r = Math.sin(tScaled * 0.2) * 0.5;
+        setMat3FromEuler(y, p, r);
         gl.uniformMatrix3fv(uniforms.uRot, false, rotBuf);
       }
 
@@ -290,9 +334,13 @@ const Prism = ({
     return () => {
       if (raf) cancelAnimationFrame(raf);
       ro.disconnect();
+      if (animationType === 'hover') {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('mouseleave', onLeave);
+      }
       if (canvas.parentElement === container) container.removeChild(canvas);
     };
-  }, [height, baseWidth, animationType, glow, noise, offset?.x, offset?.y, scale, transparent, hueShift, colorFrequency, timeScale]);
+  }, [height, baseWidth, animationType, glow, noise, offset?.x, offset?.y, scale, transparent, hueShift, colorFrequency, timeScale, hoverStrength, inertia, bloom]);
 
   return <div className="prism-container" ref={containerRef} style={{ position: 'relative', width: '100%', height: '100%' }} />;
 };

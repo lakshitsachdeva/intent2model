@@ -5,17 +5,20 @@ export default function DriftPage() {
   return (
     <div className="min-h-screen bg-black flex flex-col relative overflow-hidden font-mono">
       {/* Prism background */}
-      <div className="absolute inset-0 z-0 opacity-40">
+      <div className="absolute inset-0 z-0 opacity-30">
         <Prism
-          animationType="rotate"
-          timeScale={0.2}
+          animationType="hover"
+          timeScale={0.5}
           height={3.5}
           baseWidth={5.5}
           scale={3.6}
           hueShift={0}
           colorFrequency={1}
-          noise={0.1}
+          noise={0}
           glow={1}
+          bloom={1}
+          hoverStrength={1.5}
+          inertia={0.08}
         />
       </div>
 

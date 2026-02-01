@@ -8,15 +8,18 @@ export default function Home() {
       {/* Prism background */}
       <div className="absolute inset-0 z-0">
         <Prism
-          animationType="rotate"
-          timeScale={0.3}
+          animationType="hover"
+          timeScale={0.5}
           height={3.5}
           baseWidth={5.5}
           scale={3.6}
           hueShift={0}
           colorFrequency={1}
-          noise={0.2}
-          glow={1.2}
+          noise={0}
+          glow={1}
+          bloom={1}
+          hoverStrength={2}
+          inertia={0.05}
         />
       </div>
 
