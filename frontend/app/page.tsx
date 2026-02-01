@@ -4,7 +4,7 @@ import TextType from "@/components/TextType";
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-black flex flex-col relative overflow-hidden">
+    <div className="min-h-screen bg-black flex flex-col relative overflow-hidden font-mono">
       {/* Prism background */}
       <div className="absolute inset-0 z-0">
         <Prism
