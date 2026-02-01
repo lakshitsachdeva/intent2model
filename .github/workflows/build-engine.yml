@@ -3,6 +3,9 @@
 #
 # Trigger: push a tag matching v* (e.g. v0.1.0)
 # Result: Draft release with binaries for macOS (arm64), Linux (x64), Windows (x64)
+#
+# Important: The tag must point to a commit that contains engine_build/ and backend/.
+# If you tagged an older commit, delete the tag and re-tag the latest: git tag -d v0.1.0; git push origin :refs/tags/v0.1.0; git tag v0.1.0; git push origin v0.1.0
 
 name: Build engine and draft release
 
@@ -42,14 +45,16 @@ jobs:
           pip install pyinstaller
 
       - name: Build engine binary
-        run: pyinstaller engine_build/drift-engine.spec
-        working-directory: ${{ github.workspace }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          ls -la engine_build/ || true
+          pyinstaller engine_build/drift-engine.spec
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/
+          path: ${{ github.workspace }}/dist/
 
   release-draft:
     needs: build
