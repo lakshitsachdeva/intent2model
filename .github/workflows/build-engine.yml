@@ -1,13 +1,15 @@
-# Build drift engine binaries and attach to a DRAFT GitHub Release.
-# Does NOT publish the release — you publish manually after review.
+# Build drift engine binaries and publish to PUBLIC repo (lakshitsachdeva/drift).
+# Private repo (intent2model) builds; public repo holds release assets only.
 #
-# Trigger: push a tag matching v* (e.g. v0.1.0)
-# Result: Draft release with binaries for macOS (arm64), Linux (x64), Windows (x64)
+# Trigger: push a tag matching v* (e.g. v0.1.1)
+# Result: Published release in lakshitsachdeva/drift with binaries (macOS arm64, Linux x64, Windows x64)
 #
-# Important: The tag must point to a commit that contains engine_build/ and backend/.
-# If you tagged an older commit, delete the tag and re-tag the latest: git tag -d v0.1.0; git push origin :refs/tags/v0.1.0; git tag v0.1.0; git push origin v0.1.0
+# Required secret: DRIFT_RELEASES_TOKEN — PAT with repo scope for lakshitsachdeva/drift
+# Add at: intent2model repo → Settings → Secrets and variables → Actions
+#
+# Re-tag if needed: git tag -d v0.1.1; git push origin :refs/tags/v0.1.1; git tag v0.1.1; git push origin v0.1.1
 
-name: Build engine and draft release
+name: Build engine and publish to drift
 
 on:
   push:
@@ -82,14 +84,13 @@ jobs:
           find artifacts -type f -exec cp {} release_files/ \;
           ls -la release_files/
 
-      - name: Create draft release and upload binaries
+      - name: Create release in public drift repo
         uses: softprops/action-gh-release@v2
-        repository: lakshitsachdeva/drift
         with:
-          draft: true
+          repository: lakshitsachdeva/drift
+          token: ${{ secrets.DRIFT_RELEASES_TOKEN }}
+          draft: false
           generate_release_notes: true
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          files: release_files/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.DRIFT_RELEASES_TOKEN}}
+          files: "release_files/*"
