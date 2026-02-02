@@ -16,7 +16,7 @@ try:
 except ImportError:
     requests = None
 
-ENGINE_TAG = "v0.1.3"
+ENGINE_TAG = "v0.1.4"
 GITHUB_REPO = "lakshitsachdeva/drift"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{ENGINE_TAG}"
 ENGINE_PORT = os.environ.get("DRIFT_ENGINE_PORT", "8000")

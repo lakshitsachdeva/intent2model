@@ -17,7 +17,7 @@ const http = require("http");
 const isWindows = process.platform === "win32";
 const ENGINE_PORT = process.env.DRIFT_ENGINE_PORT || "8000";
 // Pinned tag: draft releases are invisible to /releases/latest.
-const ENGINE_TAG = "v0.1.3";
+const ENGINE_TAG = "v0.1.4";
 const GITHUB_REPO = "lakshitsachdeva/drift";
 const ENGINE_BASE_URL = process.env.DRIFT_ENGINE_BASE_URL || `https://github.com/${GITHUB_REPO}/releases/download/${ENGINE_TAG}`;
 const GITHUB_API_RELEASE = `https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${ENGINE_TAG}`;
