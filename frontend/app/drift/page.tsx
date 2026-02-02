@@ -63,10 +63,11 @@ npm install -g drift-ml
                   </pre>
                 </div>
                 <div>
-                  <p className="text-white/40 text-xs mb-1">via pipx (Python)</p>
+                  <p className="text-white/40 text-xs mb-1">via pipx (Python) — macOS, Linux, Windows</p>
                   <pre className="bg-black/60 border border-white/20 text-green-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
 pipx install drift-ml
                   </pre>
+                  <p className="text-white/50 text-xs mt-1">Update later: <code className="bg-white/10 px-1 rounded">pipx upgrade drift-ml</code></p>
                 </div>
               </div>
             </div>

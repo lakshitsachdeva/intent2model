@@ -52,12 +52,18 @@ drift
 
 The `drift` command installs or upgrades the chat CLI (Python) and runs it. You get the welcome and instructions every time.
 
-### Alternative: pipx (Python only)
+### Alternative: pipx (Python only — macOS, Linux, Windows)
 
 ```bash
-pipx install drift
+pipx install drift-ml
 drift
 ```
+
+**Update (pipx):**
+```bash
+pipx upgrade drift-ml
+```
+(PowerShell on Windows: same command.)
 
 ---
 
