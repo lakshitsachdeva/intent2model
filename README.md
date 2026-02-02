@@ -79,6 +79,15 @@ print(d.get_last_reply(reply))
 
 ---
 
+## Windows (npm / pipx)
+
+On Windows, when using `npm` or `pipx`, the engine can inherit a limited PATH — Gemini CLI may not be found. We now auto-prepend npm/pipx bin paths. If you still see "I'm ready for your first command" or planning failures:
+
+1. **Add GEMINI_API_KEY** — Create `.env` in project root with `GEMINI_API_KEY=your-key`. The backend will use the API instead of the CLI.
+2. **Run backend manually** — `cd backend && python -m uvicorn main:app --host 0.0.0.0 --port 8000`, then `set DRIFT_BACKEND_URL=http://localhost:8000`.
+
+---
+
 ## Philosophy
 
 drift should feel like `git`, `docker`, `brew` — a tool you trust immediately. Zero friction. Open source.

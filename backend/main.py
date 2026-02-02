@@ -210,14 +210,21 @@ def _parse_chat_to_constraints(message: str, columns: list[str]) -> tuple[bool, 
         reply = f"I'll drop {delta['drop_columns'][-1]} from features. Want me to propose a plan and train?"
 
     # use X as target / this target / target is X / wanna predict X / predict length / predict sepal length
+    # Hinglish: "predict karna hai variety ko" / "variety ko predict" / "merko predict karna hai variety ko"
     target_match = re.search(
         r"(?:use|set|target is?)\s+([a-zA-Z0-9_.]+)\s+as\s+target|(?:use|set)\s+([a-zA-Z0-9_.]+)\s+as\s+target|"
         r"target\s+is\s+([a-zA-Z0-9_.]+)|this target\s*[:\s]*([a-zA-Z0-9_.]+)|"
-        r"predict\s+([a-zA-Z0-9_.]+)|(?:wanna|want to)\s+predict\s+([a-zA-Z0-9_.\s]+?)(?:\s*$|\s+as|\s+please)|"
+        r"predict\s+karna\s+hai\s+([a-zA-Z0-9_.]+)|"  # "predict karna hai variety"
+        r"([a-zA-Z0-9_.]+)\s+ko\s+(?:predict|flower|karna)|"  # "variety ko predict" / "variety ko flower"
+        r"predict\s+([a-zA-Z0-9_.]+)(?:\s+ko|\s*$)|"  # "predict variety" or "predict variety ko"
+        r"(?:wanna|want to)\s+predict\s+([a-zA-Z0-9_.\s]+?)(?:\s*$|\s+as|\s+please)|"
         r"(?:i said |the )?target is (\w+)",
         msg,
         re.IGNORECASE,
     )
+    # Hindi/Hinglish stopwords - never use these as target (e.g. "predict karna hai variety" -> variety)
+    _HINGLISH_STOPWORDS = frozenset({"karna", "hai", "ko", "ki", "merko", "mujhe", "chahta", "chahti", "chahiye"})
+
     if target_match:
         cand = next((g for g in target_match.groups() if g), "").strip()
         resolved = None
@@ -233,21 +240,33 @@ def _parse_chat_to_constraints(message: str, columns: list[str]) -> tuple[bool, 
                     resolved = col
                     break
         if not resolved and cand:
-            # Partial match: "length" -> petal.length or sepal.length; pick one that contains cand
+            # Partial match: "length" -> petal.length or sepal.length
             cand_clean = cand.replace(" ", ".").lower()
             containing = [c for c in columns if cand_clean in c.lower() or cand.lower().replace(" ", "") in c.lower()]
             if len(containing) == 1:
                 resolved = containing[0]
             elif len(containing) > 1:
-                # Prefer petal.X for "length"/"width" (common in iris); else first
                 preferred = [c for c in containing if "petal" in c.lower()]
                 resolved = preferred[0] if preferred else containing[0]
+        # Hinglish fallback: cand might be "karna"/"hai" - find column mentioned in msg (e.g. "variety ko")
+        if not resolved and "predict" in msg:
+            mentioned = [c for c in columns if c.lower() in msg or c.replace(".", " ").lower() in msg]
+            if len(mentioned) == 1:
+                resolved = mentioned[0]
+            elif len(mentioned) > 1:
+                # Prefer last one (often "variety ko" = variety is target)
+                resolved = mentioned[-1]
+        # Never use stopwords as target - treat as unresolved
+        if cand and cand.lower() in _HINGLISH_STOPWORDS and not resolved:
+            resolved = None  # Force "Which column?" or fallback
         if resolved:
             delta["target"] = resolved
             reply = f"I'll use **{resolved}** as the target. Want me to propose a plan and train?"
-        else:
+        elif cand and cand.lower() not in _HINGLISH_STOPWORDS:
             delta["target"] = cand
             reply = f"I'll use '{cand}' as the target (please ensure it exists in the data). Want me to train?"
+        else:
+            reply = "Which column do you want to predict? Say e.g. 'predict variety' or 'use variety as target'."
 
     # try/use something stronger or better / more complex / aggressive / go for it
     if any(x in msg for x in (

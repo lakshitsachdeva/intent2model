@@ -16,7 +16,7 @@ except ImportError:
     requests = None
 
 GITHUB_REPO = "lakshitsachdeva/intent2model"  # Engine binaries (same repo)
-ENGINE_TAG = "v0.2.10"  # Pinned — direct URL, no API, no rate limits
+ENGINE_TAG = "v0.2.11"  # Pinned — direct URL, no API, no rate limits
 ENGINE_PORT = os.environ.get("DRIFT_ENGINE_PORT", "8000")
 HEALTH_URL = f"http://127.0.0.1:{ENGINE_PORT}/health"
 
@@ -189,6 +189,23 @@ def ensure_engine() -> bool:
         launch_cmd = [str(bin_path)]
 
     env = {**os.environ, "DRIFT_ENGINE_PORT": ENGINE_PORT}
+    # Windows + npm/pipx: Engine inherits limited PATH. Prepend npm/pipx bins so Gemini CLI is found.
+    if platform.system() == "Windows":
+        home = os.environ.get("USERPROFILE") or os.environ.get("HOME", "")
+        appdata = os.environ.get("APPDATA", "")
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        pf = os.environ.get("ProgramFiles", "")
+        pf86 = os.environ.get("ProgramFiles(x86)", "")
+        extra = [
+            os.path.join(localappdata, "npm") if localappdata else "",
+            os.path.join(appdata, "npm") if appdata else "",
+            os.path.join(pf, "nodejs") if pf else "",
+            os.path.join(pf86, "nodejs") if pf86 else "",
+            os.path.join(home, ".local", "bin") if home else "",
+        ]
+        extra = [p for p in extra if p and os.path.isdir(p)]
+        if extra:
+            env["PATH"] = os.pathsep.join(extra) + os.pathsep + env.get("PATH", "")
     stderr_file = bin_dir / ".engine-stderr.log"
     proc = None
     try:

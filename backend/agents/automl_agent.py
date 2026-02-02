@@ -226,28 +226,65 @@ def _system_prompt() -> str:
 def _extract_json(text: str) -> Dict[str, Any]:
     """
     Extract JSON object from LLM response.
-    Does NOT require schema keys - normalization handles missing fields.
+    Handles mixed content (terminal output, markdown) - tries multiple strategies.
+    Does NOT require schema keys - _map_alternate_schema handles wrong schemas.
     """
-    # Prefer fenced JSON, else first object
+    # 1. Prefer fenced JSON block (cleanest)
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
     if fence:
-        text = fence.group(1)
+        try:
+            return json.loads(fence.group(1).strip())
+        except json.JSONDecodeError:
+            pass  # Fall through to other strategies
+
+    # 2. Find all {...} spans and try parsing (LLM may mix terminal output)
+    # Match balanced braces by finding candidate objects
+    candidates = []
+    i = 0
+    while i < len(text):
+        start = text.find("{", i)
+        if start < 0:
+            break
+        depth = 0
+        j = start
+        while j < len(text):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start : j + 1]
+                    try:
+                        data = json.loads(candidate)
+                        if isinstance(data, dict):
+                            candidates.append(data)
+                    except json.JSONDecodeError:
+                        pass
+                    break
+            j += 1
+        i = start + 1
+
+    # Prefer object with inferred_target/task_type, else first (root object - most complete)
+    for c in candidates:
+        if c.get("inferred_target") and c.get("task_type"):
+            return c
+    if candidates:
+        return candidates[0]  # Root object, not nested fragment
+
+    # 3. Fallback: first { ... } match (original behavior)
     m = re.search(r"\{[\s\S]*\}", text)
     if not m:
         raise ValueError("No JSON object found in LLM response")
-    
     try:
-        data = json.loads(m.group(0))
+        return json.loads(m.group(0))
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in LLM response: {str(e)}")
-    
-    return data
 
 
 def _map_alternate_schema(plan_dict: Dict[str, Any], profile: Dict[str, Any], requested_target: Optional[str]) -> Dict[str, Any]:
     """
     Map LLM responses that use a different schema (e.g. task_description, dataset_config,
-    preprocessing_pipeline, model_selection_strategy) to our AutoMLPlan schema.
+    data_preparation, model_selection_and_training, autoML_task_description) to our AutoMLPlan schema.
     """
     # Already in our schema (both required fields present and non-empty)
     if plan_dict.get("inferred_target") and plan_dict.get("task_type"):
@@ -257,10 +294,13 @@ def _map_alternate_schema(plan_dict: Dict[str, Any], profile: Dict[str, Any], re
     cols = profile.get("columns", [])
     id_like = set(profile.get("identifier_like_columns", []))
 
-    # inferred_target: from dataset_config.target_column, or infer from profile
+    # inferred_target: from dataset_config, data_preparation, or infer from profile
     target = None
     if "dataset_config" in plan_dict and isinstance(plan_dict["dataset_config"], dict):
         target = plan_dict["dataset_config"].get("target_column")
+    if not target and "data_preparation" in plan_dict and isinstance(plan_dict["data_preparation"], dict):
+        dp = plan_dict["data_preparation"]
+        target = dp.get("target_column") or dp.get("target")
     if not target and requested_target and requested_target in cols:
         target = requested_target
     if not target:
@@ -269,19 +309,28 @@ def _map_alternate_schema(plan_dict: Dict[str, Any], profile: Dict[str, Any], re
 
     mapped["inferred_target"] = str(target).strip() if target else "unknown"
 
-    # task_type: from dataset_config.problem_type, or infer from profile
+    # task_type: from dataset_config, data_preparation, or infer from profile
     task_type = None
+    pt = None
     if "dataset_config" in plan_dict and isinstance(plan_dict["dataset_config"], dict):
         pt = plan_dict["dataset_config"].get("problem_type")
-        if pt:
-            pt_lower = str(pt).lower()
-            if "regress" in pt_lower:
-                task_type = "regression"
-            elif "binary" in pt_lower or "classif" in pt_lower:
-                task_type = "binary_classification" if profile.get("nunique", {}).get(target, 0) <= 2 else "multiclass_classification"
-            else:
-                task_type = "multiclass_classification"
+    if not pt and "data_preparation" in plan_dict and isinstance(plan_dict["data_preparation"], dict):
+        pt = plan_dict["data_preparation"].get("problem_type") or plan_dict["data_preparation"].get("task_type")
+    if pt:
+        pt_lower = str(pt).lower()
+        if "regress" in pt_lower:
+            task_type = "regression"
+        elif "binary" in pt_lower or "classif" in pt_lower:
+            task_type = "binary_classification" if profile.get("nunique", {}).get(target, 0) <= 2 else "multiclass_classification"
+        else:
+            task_type = "multiclass_classification"
 
+    if not task_type and "autoML_task_description" in plan_dict:
+        desc = str(plan_dict.get("autoML_task_description", "")).lower()
+        if "regress" in desc:
+            task_type = "regression"
+        elif "classif" in desc or "classification" in desc:
+            task_type = "binary_classification" if profile.get("nunique", {}).get(target, 0) <= 2 else "multiclass_classification"
     if not task_type and profile:
         dtypes = profile.get("dtypes", {})
         nunique = profile.get("nunique", {})
@@ -317,11 +366,19 @@ def _map_alternate_schema(plan_dict: Dict[str, Any], profile: Dict[str, Any], re
                 })
     # else: normalize_plan_dict will generate from profile
 
-    # model_candidates: from model_selection_strategy.algorithms
+    # model_candidates: from model_selection_strategy or model_selection_and_training
     if "model_candidates" in plan_dict and plan_dict["model_candidates"]:
         mapped["model_candidates"] = plan_dict["model_candidates"]
     elif "model_selection_strategy" in plan_dict and isinstance(plan_dict["model_selection_strategy"], dict):
         algs = plan_dict["model_selection_strategy"].get("algorithms", [])
+        if algs:
+            mapped["model_candidates"] = [
+                {"model_name": a if isinstance(a, str) else a.get("name", "random_forest"), "reason_md": "From LLM.", "params": {}}
+                for a in algs
+            ]
+    elif "model_selection_and_training" in plan_dict and isinstance(plan_dict["model_selection_and_training"], dict):
+        mst = plan_dict["model_selection_and_training"]
+        algs = mst.get("algorithms_to_consider") or mst.get("algorithms", [])
         if algs:
             mapped["model_candidates"] = [
                 {"model_name": a if isinstance(a, str) else a.get("name", "random_forest"), "reason_md": "From LLM.", "params": {}}

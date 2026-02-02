@@ -13,7 +13,7 @@ const http = require("http");
 const isWindows = process.platform === "win32";
 const ENGINE_PORT = process.env.DRIFT_ENGINE_PORT || "8000";
 const GITHUB_REPO = "lakshitsachdeva/intent2model";  // Engine binaries (same repo)
-const ENGINE_TAG = "v0.2.10";  // Pinned — direct URL, no API, no rate limits
+const ENGINE_TAG = "v0.2.11";  // Pinned — direct URL, no API, no rate limits
 const ENGINE_BASE_URL = `https://github.com/${GITHUB_REPO}/releases/download/${ENGINE_TAG}`;
 const HEALTH_URL = `http://127.0.0.1:${ENGINE_PORT}/health`;
 const HEALTH_TIMEOUT_MS = 2000;
@@ -177,6 +177,26 @@ async function ensureEngine() {
 
   const absPath = path.resolve(binPath);
   const env = { ...process.env, DRIFT_ENGINE_PORT: ENGINE_PORT };
+
+  // Windows + npm/pipx: Engine inherits limited PATH. Prepend npm/pipx bins so Gemini CLI is found.
+  if (isWindows) {
+    const home = process.env.USERPROFILE || process.env.HOME || "";
+    const appdata = process.env.APPDATA || "";
+    const localappdata = process.env.LOCALAPPDATA || "";
+    const pf = process.env.ProgramFiles || "";
+    const pf86 = process.env["ProgramFiles(x86)"] || "";
+    const extraPaths = [
+      path.join(localappdata, "npm"),
+      path.join(appdata, "npm"),
+      path.join(pf, "nodejs"),
+      path.join(pf86, "nodejs"),
+      path.join(home, ".local", "bin"),
+    ].filter((p) => p && fs.existsSync(p));
+    if (extraPaths.length) {
+      const sep = path.delimiter;
+      env.PATH = extraPaths.join(sep) + sep + (env.PATH || "");
+    }
+  }
 
   // macOS: spawn a wrapper script instead of the binary directly (avoids -88)
   // Windows: use batch file so engine starts reliably (inherits PATH for gemini etc.)

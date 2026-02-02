@@ -261,8 +261,11 @@ ollama run llama3.2
           </p>
 
           <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-6 space-y-3">
-            <h3 className="text-amber-400 font-semibold">Windows: engine crashes or LLM planning fails?</h3>
+            <h3 className="text-amber-400 font-semibold">Windows (npm/pipx): engine crashes or LLM planning fails?</h3>
             <p className="text-white/70 text-sm">
+              When using <code className="bg-white/10 px-1 rounded">npm</code> or <code className="bg-white/10 px-1 rounded">pipx</code>, the engine can inherit a limited PATH — Gemini CLI may not be found. We now auto-prepend npm/pipx bins. If issues persist:
+            </p>
+            <p className="text-white/70 text-sm mt-2">
               <strong>Option A:</strong> Run the backend manually (skips engine binary):
             </p>
             <pre className="bg-black/60 border border-white/20 text-green-400 p-3 rounded-lg overflow-x-auto text-xs sm:text-sm">
@@ -270,7 +273,7 @@ ollama run llama3.2
 python -m uvicorn main:app --host 0.0.0.0 --port 8000`}
             </pre>
             <p className="text-white/70 text-sm mt-2">
-              Create <code className="bg-white/10 px-1 rounded">.env</code> in project root with <code className="bg-white/10 px-1 rounded">GEMINI_API_KEY=your-key</code> — fixes &quot;I am ready for your first command&quot; / empty JSON from Gemini CLI. (Root cause: Windows cmd.exe has an 8K char limit; we now pass prompts via stdin.)
+              Create <code className="bg-white/10 px-1 rounded">.env</code> in project root with <code className="bg-white/10 px-1 rounded">GEMINI_API_KEY=your-key</code> — fixes &quot;I am ready for your first command&quot; / empty JSON. (Root cause: Windows cmd.exe 8K char limit; we pass prompts via stdin.)
             </p>
             <p className="text-white/70 text-sm mt-2">
               <strong>Option B:</strong> If engine binary crashes, run it manually to see the error:
