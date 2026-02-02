@@ -1,83 +1,57 @@
-# drift-ml
+# drift
 
-**Drift** by Lakshit Sachdeva — terminal-first, chat-based AutoML. Same engine as the web app. Local-first: the engine runs on your machine; no commands to memorize.
-
----
-
-## Exactly what to do
-
-1. **Install drift** (pipx recommended — works standalone)
-   ```bash
-   pipx install drift-ml
-   ```
-   Or: `npm install -g drift-ml` (requires `pipx install drift-ml` for the CLI).
-
-2. **Run drift**
-   ```bash
-   drift
-   ```
-   On first run, the CLI detects your OS and architecture, downloads the correct engine binary into `~/.drift/bin/`, and starts the engine in the background. You’ll see a short welcome and instructions in the terminal.
-
-3. **Use a local LLM**
-   Training and planning use an LLM. You need one of:
-   - **Gemini CLI** — install it and set `GEMINI_API_KEY` or have `gemini` on your PATH.
-   - **Ollama** — run `ollama run llama2` (or another model).
-   - Another local LLM the engine supports.
-
-4. **Chat**
-   - `load path/to/data.csv`
-   - `predict price` (or any column)
-   - `try something stronger`
-   - `why is accuracy capped`
-   - `quit` to exit.
-
-That’s it. The engine runs locally. The web app (if you use it) can be hosted on Vercel; the engine stays on your machine.
+**Terminal-first, chat-based AutoML.** Open source. No tokens. No auth. Works fully local.
 
 ---
 
-## What is drift?
-
-- **Local-first** — The engine runs on your machine. Training and planning stay local; you never send data to our servers.
-- **Terminal-first, chat-based** — Same engine as the web app. No commands to memorize; chat in natural language.
-- **Engine** — On first run the CLI downloads and starts the engine from `~/.drift/bin/`. Or set `DRIFT_BACKEND_URL` to a running engine URL.
-
-**Custom / private repo:** Engine binaries are hosted at [lakshitsachdeva/drift](https://github.com/lakshitsachdeva/drift) (public). For a private fork, set `DRIFT_GITHUB_TOKEN` with a token that has repo read access.
-
----
-
-## Install (details)
-
-```bash
-npm install -g drift-ml
-drift
-```
-
-The `drift` command installs or upgrades the chat CLI (Python) and runs it. You get the welcome and instructions every time.
-
-### Alternative: pipx (Python only — macOS, Linux, Windows)
+## Install
 
 ```bash
 pipx install drift-ml
-drift
 ```
 
-**Update (pipx):**
+Or with npm (also requires pipx for the CLI):
+
 ```bash
-pipx upgrade drift-ml
+pipx install drift-ml
+npm install -g drift-ml
 ```
-(PowerShell on Windows: same command.)
 
 ---
 
-## Example usage
+## Run
+
+```bash
+drift
+```
+
+That's it. On first run, drift downloads and starts the engine automatically. No backend setup. No config.
+
+---
+
+## How it works
+
+- **Local-first** — Engine runs on your machine. Data never leaves.
+- **Chat-based** — `load data.csv`, `predict price`, `try something stronger`
+- **Auto-start** — Engine downloads and starts in the background. You never touch it.
+- **No tokens** — No API keys for drift. (You need an LLM for training: Ollama, Gemini CLI, etc.)
+
+---
+
+## Example
 
 ```text
 drift › load iris.csv
-drift › predict sepal.length
+drift › predict variety
 drift › try something stronger
-drift › why is accuracy capped
 drift › quit
 ```
+
+---
+
+## Philosophy
+
+drift should feel like `git`, `docker`, `brew` — a tool you trust immediately. Zero friction. Open source.
 
 ---
 

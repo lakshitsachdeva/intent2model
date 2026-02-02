@@ -1,11 +1,7 @@
 #!/usr/bin/env node
 //
-// REMOVED: Any pip/pipx/python -m pip install or upgrade logic.
-// WHY: PEP 668 and user envs; we must not modify Python. User installs CLI via pipx once.
-//
-// FINAL FLOW: (1) If no DRIFT_BACKEND_URL, ensure engine at 127.0.0.1:8000 (download + start if needed).
-//             (2) Locate Python drift ONLY in ~/.local/bin (macOS/Linux) or %USERPROFILE%\.local\bin (Windows).
-//             (3) Spawn that binary with DRIFT_BACKEND_URL set; never run drift.cmd/drift.ps1/drift.js (self).
+// drift — terminal-first AutoML. Engine auto-starts locally.
+// No tokens. No auth. No backend setup.
 //
 
 const { spawnSync, spawn } = require("child_process");
@@ -16,16 +12,13 @@ const http = require("http");
 
 const isWindows = process.platform === "win32";
 const ENGINE_PORT = process.env.DRIFT_ENGINE_PORT || "8000";
-// Pinned tag: draft releases are invisible to /releases/latest.
-const ENGINE_TAG = "v0.1.4";
-const GITHUB_REPO = "lakshitsachdeva/drift";
-const ENGINE_BASE_URL = process.env.DRIFT_ENGINE_BASE_URL || `https://github.com/${GITHUB_REPO}/releases/download/${ENGINE_TAG}`;
-const GITHUB_API_RELEASE = `https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${ENGINE_TAG}`;
-const GITHUB_TOKEN = process.env.DRIFT_GITHUB_TOKEN || process.env.GITHUB_TOKEN;
+const GITHUB_REPO = "lakshitsachdeva/drift";  // Engine binaries
+const ENGINE_TAG = "v0.2.0";  // Pinned — direct URL, no API, no rate limits
+const ENGINE_BASE_URL = `https://github.com/${GITHUB_REPO}/releases/download/${ENGINE_TAG}`;
 const HEALTH_URL = `http://127.0.0.1:${ENGINE_PORT}/health`;
 const HEALTH_TIMEOUT_MS = 2000;
 const HEALTH_POLL_MS = 500;
-const HEALTH_POLL_MAX = 60; // 30 seconds total
+const HEALTH_POLL_MAX = 60;
 const isMac = process.platform === "darwin";
 
 function getPlatformKey() {
@@ -66,67 +59,32 @@ function fetchOk(url) {
   });
 }
 
-const API_HEADERS = {
-  "User-Agent": "Drift-Engine-Launcher/1.0",
-  Accept: "application/vnd.github+json",
-  ...(GITHUB_TOKEN && { Authorization: `Bearer ${GITHUB_TOKEN}` }),
-};
-const DOWNLOAD_HEADERS = {
-  "User-Agent": "Drift-Engine-Launcher/1.0",
-  Accept: "application/octet-stream",
-  ...(GITHUB_TOKEN && { Authorization: `Bearer ${GITHUB_TOKEN}` }),
-};
+function getAssetUrl(assetName) {
+  const baseUrl = process.env.DRIFT_ENGINE_BASE_URL;
+  if (baseUrl) {
+    return `${baseUrl.replace(/\/$/, "")}/${assetName}`;
+  }
+  return `${ENGINE_BASE_URL}/${assetName}`;
+}
 
-// Resolve download URL. Try direct URL first (no API, no rate limits); fallback to API for private repos.
-function getGitHubAssetUrl(assetName) {
-  const directUrl = `${ENGINE_BASE_URL}/${assetName}`;
+function downloadWithCurl(url, destPath) {
   return new Promise((resolve, reject) => {
-    function tryApi() {
-      https.get(GITHUB_API_RELEASE, { headers: API_HEADERS }, (apiRes) => {
-        if (apiRes.statusCode === 404) {
-          reject(new Error(
-            "Release not found (404). If the repo is private, set DRIFT_GITHUB_TOKEN with a token that has repo read access."
-          ));
-          return;
-        }
-        if (apiRes.statusCode !== 200) {
-          reject(new Error(`Release not found: ${apiRes.statusCode}`));
-          return;
-        }
-        let body = "";
-        apiRes.on("data", (chunk) => { body += chunk; });
-        apiRes.on("end", () => {
-          try {
-            const data = JSON.parse(body);
-            const asset = (data.assets || []).find((a) => a.name === assetName);
-            const url = asset?.browser_download_url || asset?.url;
-            if (!url) {
-              reject(new Error(`Asset not found: ${assetName}`));
-              return;
-            }
-            resolve(url);
-          } catch (e) {
-            reject(e);
-          }
-        });
-      }).on("error", reject);
-    }
-    const req = https.request(directUrl, { method: "HEAD" }, (res) => {
-      if (res.statusCode === 200 || (res.statusCode >= 301 && res.statusCode <= 302)) {
-        resolve(directUrl);
-        return;
-      }
-      tryApi();
+    const result = spawnSync("curl", ["-fsSL", "-o", destPath, url], {
+      stdio: "pipe",
+      timeout: 120000,
     });
-    req.on("error", tryApi);
-    req.end();
+    if (result.status !== 0) {
+      reject(new Error("Download failed"));
+      return;
+    }
+    resolve();
   });
 }
 
 function downloadFile(url, destPath) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https") ? https : http;
-    const req = client.get(url, { headers: DOWNLOAD_HEADERS }, (res) => {
+    const req = client.get(url, { headers: { "User-Agent": "Drift/1.0" } }, (res) => {
       const redirect = res.statusCode >= 301 && res.statusCode <= 302 && res.headers.location;
       if (redirect) {
         downloadFile(redirect, destPath).then(resolve).catch(reject);
@@ -178,16 +136,12 @@ async function ensureEngine() {
     const { plat, arch } = getPlatformKey();
     const ext = isWindows ? ".exe" : "";
     const asset = `drift-engine-${plat}-${arch}${ext}`;
-    const isDefaultGitHub = !process.env.DRIFT_ENGINE_BASE_URL;
-    const url = isDefaultGitHub
-      ? await getGitHubAssetUrl(asset)
-      : `${ENGINE_BASE_URL.replace(/\/$/, "")}/${asset}`;
+    const url = getAssetUrl(asset);
     process.stderr.write(`drift: Downloading engine (${asset})...\n`);
     try {
-      await downloadFile(url, binPath);
+      await downloadWithCurl(url, binPath).catch(() => downloadFile(url, binPath));
     } catch (e) {
       console.error("drift: Download failed.", e.message);
-      console.error("drift: Set DRIFT_ENGINE_BASE_URL or run the engine manually.");
       return false;
     }
     if (!isWindows) {
@@ -199,7 +153,6 @@ async function ensureEngine() {
       } catch (_) {}
     }
   }
-  // On macOS, always ensure binary is executable and not quarantined before spawn (covers existing binaries).
   if (isMac && binPath) {
     try {
       fs.chmodSync(binPath, 0o755);
@@ -216,7 +169,6 @@ async function ensureEngine() {
   return waitForEngine();
 }
 
-// Locate Python drift ONLY in pipx bin dir. Never search PATH (avoids running drift.cmd/drift.ps1/drift.js).
 function findPythonDrift() {
   const home = process.env.HOME || process.env.USERPROFILE || "";
   if (!home) return null;
@@ -242,7 +194,6 @@ async function main() {
       });
       if (!started) {
         console.error("Failed to start drift engine.");
-        console.error("Please check permissions or download the engine manually.");
         process.exit(1);
       }
     }
@@ -251,9 +202,7 @@ async function main() {
   const driftPath = findPythonDrift();
   if (!driftPath) {
     console.error(`
-drift is not installed.
-
-Install it with:
+drift is not installed. Install it with:
 
   pipx install drift-ml
 `);

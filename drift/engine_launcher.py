@@ -1,11 +1,10 @@
 """
 Download and start the drift engine binary when no backend is running.
-Makes pipx install drift-ml work standalone (no npm needed).
+Open source — no tokens, no auth. Downloads from public GitHub Releases.
 """
 
 import os
 import platform
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -16,9 +15,8 @@ try:
 except ImportError:
     requests = None
 
-ENGINE_TAG = "v0.1.4"
-GITHUB_REPO = "lakshitsachdeva/drift"
-GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{ENGINE_TAG}"
+GITHUB_REPO = "lakshitsachdeva/drift"  # Engine binaries (v0.2.0+ also in intent2model)
+ENGINE_TAG = "v0.2.0"  # Pinned — direct URL, no API, no rate limits
 ENGINE_PORT = os.environ.get("DRIFT_ENGINE_PORT", "8000")
 HEALTH_URL = f"http://127.0.0.1:{ENGINE_PORT}/health"
 
@@ -60,47 +58,26 @@ def _engine_running() -> bool:
         return False
 
 
-def _get_asset_download_url(asset_name: str) -> str:
-    """Resolve GitHub release asset to download URL. Prefer direct URL (no API)."""
+def _get_asset_url(asset_name: str) -> str:
+    """Direct download URL. No API — avoids rate limits."""
     base = os.environ.get("DRIFT_ENGINE_BASE_URL")
     if base:
         return f"{base.rstrip('/')}/{asset_name}"
     return f"https://github.com/{GITHUB_REPO}/releases/download/{ENGINE_TAG}/{asset_name}"
 
 
-def _get_asset_download_url_via_api(asset_name: str) -> str:
-    """Fallback: get URL via GitHub API (for private repos)."""
-    token = os.environ.get("DRIFT_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    headers = {
-        "User-Agent": "Drift-Engine-Launcher/1.0",
-        "Accept": "application/vnd.github+json",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    r = requests.get(GITHUB_API, headers=headers, timeout=15)
-    if r.status_code == 404:
-        raise RuntimeError(
-            f"Release {ENGINE_TAG} not found. "
-            "If the repo is private, set DRIFT_GITHUB_TOKEN with repo read access."
-        )
-    r.raise_for_status()
-    data = r.json()
-    for a in data.get("assets", []):
-        if a.get("name") == asset_name:
-            url = a.get("browser_download_url") or a.get("url")
-            if url:
-                return url
-    raise RuntimeError(f"Asset {asset_name} not found in release {ENGINE_TAG}")
-
-
 def _download_file(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    token = os.environ.get("DRIFT_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-    if "api.github.com" in url:
-        headers["Accept"] = "application/octet-stream"
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    headers = {"User-Agent": "Drift/1.0"}
+
+    def try_curl():
+        result = subprocess.run(
+            ["curl", "-fsSL", "-o", str(dest), url],
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("curl failed")
 
     def try_requests():
         r = requests.get(url, headers=headers, stream=True, timeout=60)
@@ -116,40 +93,28 @@ def _download_file(url: str, dest: Path) -> None:
             with open(dest, "wb") as f:
                 f.write(resp.read())
 
-    def try_curl():
-        result = subprocess.run(
-            ["curl", "-fsSL", "-o", str(dest), url],
-            capture_output=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"curl failed: {result.stderr.decode() or result.returncode}")
-
     for attempt in [try_curl, try_requests, try_urllib]:
         try:
             attempt()
             return
         except Exception:
             continue
-    raise RuntimeError(f"Download failed. Try manually: curl -L -o {dest} {url}")
+    raise RuntimeError(f"Download failed. Try: curl -L -o {dest} {url}")
 
 
 def ensure_engine() -> bool:
-    """
-    If engine not running: download (if needed), start it, wait for health.
-    Returns True if engine is ready, False on failure.
-    """
+    """Download (if needed), start engine, wait for health."""
     if _engine_running():
         return True
 
     if not requests:
-        print("drift: 'requests' required for engine download. pip install requests", file=sys.stderr)
+        print("drift: 'requests' required. pip install requests", file=sys.stderr)
         return False
 
     bin_path = _get_engine_path()
     bin_dir = _get_engine_dir()
     if not bin_path or not bin_dir:
-        print("drift: Could not resolve engine dir (~/.drift/bin). Set HOME or USERPROFILE.", file=sys.stderr)
+        print("drift: Could not resolve ~/.drift/bin. Set HOME or USERPROFILE.", file=sys.stderr)
         return False
 
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -159,14 +124,12 @@ def ensure_engine() -> bool:
         ext = ".exe" if platform.system() == "Windows" else ""
         asset = f"drift-engine-{plat}-{arch}{ext}"
         print(f"drift: Downloading engine ({asset})...", file=sys.stderr)
-        url = _get_asset_download_url(asset)
         try:
+            url = _get_asset_url(asset)
             _download_file(url, bin_path)
         except Exception as e:
             print(f"drift: Download failed: {e}", file=sys.stderr)
-            print(f"drift: Run this manually, then try again:", file=sys.stderr)
-            print(f"  mkdir -p ~/.drift/bin && curl -L -o ~/.drift/bin/{asset} {url}", file=sys.stderr)
-            print(f"  chmod +x ~/.drift/bin/{asset}", file=sys.stderr)
+            print(f"drift: Run: mkdir -p ~/.drift/bin && curl -L -o ~/.drift/bin/{asset} <url>", file=sys.stderr)
             return False
         if platform.system() != "Windows":
             bin_path.chmod(0o755)
@@ -176,7 +139,13 @@ def ensure_engine() -> bool:
             except Exception:
                 pass
 
-    # Start engine
+    if platform.system() == "Darwin" and bin_path:
+        try:
+            bin_path.chmod(0o755)
+            subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(bin_path)], check=False, capture_output=True)
+        except Exception:
+            pass
+
     env = {**os.environ, "DRIFT_ENGINE_PORT": ENGINE_PORT}
     proc = subprocess.Popen(
         [str(bin_path)],
@@ -186,10 +155,9 @@ def ensure_engine() -> bool:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    proc.wait()  # wait briefly to avoid race
+    proc.wait()
     del proc
 
-    # Poll for health
     for _ in range(60):
         if _engine_running():
             return True

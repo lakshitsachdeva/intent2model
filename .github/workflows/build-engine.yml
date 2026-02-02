@@ -1,15 +1,9 @@
-# Build drift engine binaries and publish to PUBLIC repo (lakshitsachdeva/drift).
-# Private repo (intent2model) builds; public repo holds release assets only.
-#
-# Trigger: push a tag matching v* (e.g. v0.1.1)
-# Result: Published release in lakshitsachdeva/drift with binaries (macOS arm64, Linux x64, Windows x64)
-#
-# Required secret: DRIFT_RELEASES_TOKEN — PAT with repo scope for lakshitsachdeva/drift
-# Add at: intent2model repo → Settings → Secrets and variables → Actions
-#
-# Re-tag if needed: git tag -d v0.1.1; git push origin :refs/tags/v0.1.1; git tag v0.1.1; git push origin v0.1.1
+# Build drift engine binaries and publish to this repo (intent2model).
+# Trigger: push a tag matching v* (e.g. v0.1.5)
+# Result: Release in intent2model with binaries (macOS arm64, Linux x64, Windows x64)
+# No secrets required — uses default GITHUB_TOKEN (same repo).
 
-name: Build engine and publish to drift
+name: Build engine and publish
 
 on:
   push:
@@ -50,7 +44,6 @@ jobs:
         shell: bash
         run: |
           cd "$GITHUB_WORKSPACE"
-          ls -la engine_build/ || true
           pyinstaller engine_build/drift-engine.spec
 
       - name: Upload binary
@@ -59,7 +52,7 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: ${{ github.workspace }}/dist/
 
-  release-draft:
+  release:
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -84,21 +77,9 @@ jobs:
           find artifacts -type f -exec cp {} release_files/ \;
           ls -la release_files/
 
-      - name: Check DRIFT_RELEASES_TOKEN
-        run: |
-          if [ -z "${{ secrets.DRIFT_RELEASES_TOKEN }}" ]; then
-            echo "::error::DRIFT_RELEASES_TOKEN secret is not set."
-            echo "Add it at: intent2model → Settings → Secrets and variables → Actions"
-            echo "Create a PAT with repo scope for lakshitsachdeva/drift"
-            exit 1
-          fi
-
-      - name: Create release in public drift repo
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          repository: lakshitsachdeva/drift
-          token: ${{ secrets.DRIFT_RELEASES_TOKEN }}
-          draft: false
           generate_release_notes: true
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}

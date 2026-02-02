@@ -1,7 +1,7 @@
 {
   "name": "drift-ml",
-  "version": "0.1.17",
-  "description": "Drift — terminal-first, chat-based AutoML. Same engine as the web app. On first run: downloads and starts the engine locally (never exposes engine source).",
+  "version": "0.2.1",
+  "description": "drift — terminal-first, chat-based AutoML. Open source. No tokens. No auth.",
   "bin": {
     "drift": "bin/drift.js"
   },
@@ -9,7 +9,7 @@
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["drift", "automl", "cli", "ml", "terminal", "local-first"],
+  "keywords": ["drift", "automl", "cli", "ml", "terminal", "local-first", "ai", "open-source"],
   "license": "MIT",
   "author": "Lakshit Sachdeva",
   "repository": {

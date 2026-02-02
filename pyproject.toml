@@ -4,12 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drift-ml"
-version = "0.1.11"
-description = "Terminal-first AutoML CLI - chat-based ML engineer"
+version = "0.2.1"
+description = "drift — terminal-first, chat-based AutoML. Open source. No tokens. No auth."
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.28.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/lakshitsachdeva/intent2model"
+Repository = "https://github.com/lakshitsachdeva/intent2model"
 
 [project.scripts]
 drift = "drift.__main__:main"
