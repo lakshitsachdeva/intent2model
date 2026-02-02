@@ -270,7 +270,7 @@ ollama run llama3.2
 python -m uvicorn main:app --host 0.0.0.0 --port 8000`}
             </pre>
             <p className="text-white/70 text-sm mt-2">
-              Create <code className="bg-white/10 px-1 rounded">.env</code> in project root with <code className="bg-white/10 px-1 rounded">GEMINI_API_KEY=your-key</code> — fixes &quot;I am ready for your first command&quot; / empty JSON from Gemini CLI.
+              Create <code className="bg-white/10 px-1 rounded">.env</code> in project root with <code className="bg-white/10 px-1 rounded">GEMINI_API_KEY=your-key</code> — fixes &quot;I am ready for your first command&quot; / empty JSON from Gemini CLI. (Root cause: Windows cmd.exe has an 8K char limit; we now pass prompts via stdin.)
             </p>
             <p className="text-white/70 text-sm mt-2">
               <strong>Option B:</strong> If engine binary crashes, run it manually to see the error:

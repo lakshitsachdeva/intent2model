@@ -45,11 +45,14 @@ def plan_automl(df: pd.DataFrame, requested_target: Optional[str] = None, llm_pr
             response = llm.generate(prompt, system_prompt)
             last_response = response
             plan_dict = _extract_json(response)
-            
+
+            # Map alternate LLM schemas (task_description, dataset_config, etc.) to our schema
+            plan_dict = _map_alternate_schema(plan_dict, profile=profile, requested_target=requested_target)
+
             # Set planning_source BEFORE normalization (so it's preserved)
             plan_dict["planning_source"] = "llm"
             plan_dict["planning_error"] = None
-            
+
             # CENTRAL NORMALIZATION LAYER (single source of truth)
             plan_dict = normalize_plan_dict(plan_dict, profile=profile, requested_target=requested_target)
             
@@ -193,19 +196,21 @@ def _build_prompt(profile: Dict[str, Any], requested_target: Optional[str]) -> s
         ],
         "model_selection_confidence": 0.8,
     }
-    return f"""TASK: Analyze the dataset below and output a single JSON object (AutoMLPlan). No other text. No questions. No preamble. Just the JSON.
+    return f"""TASK: Analyze the dataset below and output a single JSON object. Use EXACTLY this schema - no other format.
+
+CRITICAL: Your JSON MUST have top-level keys "inferred_target" (a column name from the dataset) and "task_type" (one of: regression, binary_classification, multiclass_classification). Do NOT use task_description, dataset_config, preprocessing_pipeline, model_selection_strategy, evaluation_config, or output_config - those are WRONG.
 
 Dataset profile:
 {json.dumps(profile)[:15000]}
 
 Requested target: {requested_target or "NONE"}
 
-You MUST output a JSON object with these exact keys: plan_schema_version, inferred_target, target_confidence, alternative_targets, task_type, task_confidence, task_inference_md, dataset_intelligence_md, transformation_strategy_md, model_selection_md, training_validation_md, error_behavior_analysis_md, explainability_md, primary_metric, additional_metrics, metric_selection_confidence, feature_transforms, model_candidates, model_selection_confidence.
+Required keys: plan_schema_version, inferred_target, target_confidence, alternative_targets, task_type, task_confidence, task_inference_md, dataset_intelligence_md, transformation_strategy_md, model_selection_md, training_validation_md, error_behavior_analysis_md, explainability_md, primary_metric, additional_metrics, metric_selection_confidence, feature_transforms, model_candidates, model_selection_confidence.
 
-Example structure (adapt to the actual dataset):
+Example (adapt column names to the actual dataset):
 {json.dumps(example_json, indent=2)[:2000]}
 
-Rules: inferred_target must be a column in the dataset. task_type in [regression, binary_classification, multiclass_classification]. feature_transforms: one object per column with name, inferred_dtype, kind, kind_confidence, drop, impute, encode, scale, notes_md, transform_confidence. model_candidates: list of {{model_name, reason_md, params}}.
+Rules: inferred_target must be a column from the dataset. task_type in [regression, binary_classification, multiclass_classification]. feature_transforms: one object per column with name, inferred_dtype, kind, kind_confidence, drop, impute, encode, scale, notes_md, transform_confidence. model_candidates: list of {{model_name, reason_md, params}}.
 
 Output ONLY the JSON object, nothing else:""".strip()
 
@@ -220,8 +225,8 @@ def _system_prompt() -> str:
 
 def _extract_json(text: str) -> Dict[str, Any]:
     """
-    Strict JSON extraction with validation.
-    Requires presence of all top-level schema keys.
+    Extract JSON object from LLM response.
+    Does NOT require schema keys - normalization handles missing fields.
     """
     # Prefer fenced JSON, else first object
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
@@ -236,13 +241,121 @@ def _extract_json(text: str) -> Dict[str, Any]:
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in LLM response: {str(e)}")
     
-    # Validate top-level keys exist (required fields)
-    required_keys = ["inferred_target", "task_type"]
-    missing = [k for k in required_keys if k not in data]
-    if missing:
-        raise ValueError(f"Missing required top-level keys: {missing}")
-    
     return data
+
+
+def _map_alternate_schema(plan_dict: Dict[str, Any], profile: Dict[str, Any], requested_target: Optional[str]) -> Dict[str, Any]:
+    """
+    Map LLM responses that use a different schema (e.g. task_description, dataset_config,
+    preprocessing_pipeline, model_selection_strategy) to our AutoMLPlan schema.
+    """
+    # Already in our schema (both required fields present and non-empty)
+    if plan_dict.get("inferred_target") and plan_dict.get("task_type"):
+        return plan_dict
+
+    mapped: Dict[str, Any] = {}
+    cols = profile.get("columns", [])
+    id_like = set(profile.get("identifier_like_columns", []))
+
+    # inferred_target: from dataset_config.target_column, or infer from profile
+    target = None
+    if "dataset_config" in plan_dict and isinstance(plan_dict["dataset_config"], dict):
+        target = plan_dict["dataset_config"].get("target_column")
+    if not target and requested_target and requested_target in cols:
+        target = requested_target
+    if not target:
+        candidates = [c for c in cols if c not in id_like]
+        target = candidates[-1] if candidates else (cols[-1] if cols else "unknown")
+
+    mapped["inferred_target"] = str(target).strip() if target else "unknown"
+
+    # task_type: from dataset_config.problem_type, or infer from profile
+    task_type = None
+    if "dataset_config" in plan_dict and isinstance(plan_dict["dataset_config"], dict):
+        pt = plan_dict["dataset_config"].get("problem_type")
+        if pt:
+            pt_lower = str(pt).lower()
+            if "regress" in pt_lower:
+                task_type = "regression"
+            elif "binary" in pt_lower or "classif" in pt_lower:
+                task_type = "binary_classification" if profile.get("nunique", {}).get(target, 0) <= 2 else "multiclass_classification"
+            else:
+                task_type = "multiclass_classification"
+
+    if not task_type and profile:
+        dtypes = profile.get("dtypes", {})
+        nunique = profile.get("nunique", {})
+        n_rows = int(profile.get("n_rows", 0))
+        t_nuniq = int(nunique.get(target, 0))
+        t_dtype = str(dtypes.get(target, ""))
+        if "float" in t_dtype or ("int" in t_dtype and t_nuniq > max(20, int(0.1 * n_rows))):
+            task_type = "regression"
+        else:
+            task_type = "binary_classification" if t_nuniq <= 2 else "multiclass_classification"
+
+    mapped["task_type"] = task_type or "regression"
+
+    # feature_transforms: from preprocessing_pipeline or dataset_config.features, or generate from profile
+    if "feature_transforms" in plan_dict and plan_dict["feature_transforms"]:
+        mapped["feature_transforms"] = plan_dict["feature_transforms"]
+    elif "preprocessing_pipeline" in plan_dict and plan_dict["preprocessing_pipeline"]:
+        # Convert preprocessing_pipeline items to feature_transforms (best-effort)
+        mapped["feature_transforms"] = []
+        for item in plan_dict["preprocessing_pipeline"]:
+            if isinstance(item, dict) and item.get("name"):
+                mapped["feature_transforms"].append({
+                    "name": item["name"],
+                    "inferred_dtype": item.get("inferred_dtype", "unknown"),
+                    "kind": item.get("kind", "unknown"),
+                    "kind_confidence": 0.8,
+                    "drop": item.get("drop", False),
+                    "impute": item.get("impute", "none"),
+                    "encode": item.get("encode", "none"),
+                    "scale": item.get("scale", "none"),
+                    "notes_md": item.get("notes_md", ""),
+                    "transform_confidence": 0.8,
+                })
+    # else: normalize_plan_dict will generate from profile
+
+    # model_candidates: from model_selection_strategy.algorithms
+    if "model_candidates" in plan_dict and plan_dict["model_candidates"]:
+        mapped["model_candidates"] = plan_dict["model_candidates"]
+    elif "model_selection_strategy" in plan_dict and isinstance(plan_dict["model_selection_strategy"], dict):
+        algs = plan_dict["model_selection_strategy"].get("algorithms", [])
+        if algs:
+            mapped["model_candidates"] = [
+                {"model_name": a if isinstance(a, str) else a.get("name", "random_forest"), "reason_md": "From LLM.", "params": {}}
+                for a in algs
+            ]
+
+    # When mapping from alternate schema, ensure we have models (LLM often returns empty)
+    if not mapped.get("model_candidates"):
+        tt = mapped.get("task_type", "regression")
+        if tt == "regression":
+            mapped["model_candidates"] = [
+                {"model_name": "linear_regression", "reason_md": "Baseline.", "params": {}},
+                {"model_name": "ridge", "reason_md": "L2 regularized.", "params": {}},
+                {"model_name": "random_forest", "reason_md": "Nonlinear.", "params": {}},
+                {"model_name": "gradient_boosting", "reason_md": "Strong tabular.", "params": {}},
+            ]
+        else:
+            mapped["model_candidates"] = [
+                {"model_name": "logistic_regression", "reason_md": "Baseline.", "params": {}},
+                {"model_name": "random_forest", "reason_md": "Nonlinear.", "params": {}},
+                {"model_name": "gradient_boosting", "reason_md": "Strong tabular.", "params": {}},
+            ]
+
+    # Copy any other fields we recognize
+    for k in ["plan_schema_version", "target_confidence", "alternative_targets", "task_confidence",
+              "task_inference_md", "dataset_intelligence_md", "transformation_strategy_md",
+              "model_selection_md", "training_validation_md", "error_behavior_analysis_md", "explainability_md",
+              "primary_metric", "additional_metrics", "metric_selection_confidence", "model_selection_confidence"]:
+        if k in plan_dict and plan_dict[k] is not None:
+            mapped[k] = plan_dict[k]
+
+    if mapped.get("inferred_target") and mapped.get("task_type"):
+        print("   Mapped alternate LLM schema to AutoMLPlan format")
+    return mapped
 
 
 def _validate_plan(plan_dict: Dict[str, Any], profile: Dict[str, Any]) -> None:
@@ -281,134 +394,6 @@ def _validate_plan(plan_dict: Dict[str, Any], profile: Dict[str, Any]) -> None:
     elif task_type in ["binary_classification", "multiclass_classification"]:
         if "float" in t_dtype and t_nuniq > max(20, int(0.1 * n_rows)):
             print(f"⚠️  Warning: Task type '{task_type}' but target appears continuous - consider regression")
-
-
-def _fix_plan_dict(plan_dict: Dict[str, Any], profile: Dict[str, Any], requested_target: Optional[str]) -> Dict[str, Any]:
-    """
-    DEPRECATED: Use normalize_plan_dict from plan_normalizer instead.
-    Kept for backward compatibility during migration.
-    """
-    """
-    Auto-fix common issues in LLM-generated plan_dict to make it schema-compliant.
-    """
-    # Ensure all required markdown fields exist
-    required_md_fields = [
-        "task_inference_md", "dataset_intelligence_md", "transformation_strategy_md",
-        "model_selection_md", "training_validation_md", "error_behavior_analysis_md", "explainability_md"
-    ]
-    for field in required_md_fields:
-        if field not in plan_dict or not plan_dict[field]:
-            plan_dict[field] = f"LLM-generated content for {field.replace('_md', '')} (auto-filled)."
-    
-    # Ensure inferred_target exists and is valid
-    if "inferred_target" not in plan_dict or not plan_dict["inferred_target"]:
-        cols = profile.get("columns", [])
-        id_like = set(profile.get("identifier_like_columns", []))
-        candidates = [c for c in cols if c not in id_like]
-        plan_dict["inferred_target"] = (requested_target or candidates[-1] if candidates else (cols[-1] if cols else "unknown")).strip()
-    
-    # Ensure task_type exists
-    if "task_type" not in plan_dict:
-        # Infer from target
-        target = plan_dict.get("inferred_target", "")
-        dtypes = profile.get("dtypes", {})
-        nunique = profile.get("nunique", {})
-        n_rows = int(profile.get("n_rows", 0))
-        t_nuniq = int(nunique.get(target, 0))
-        t_dtype = str(dtypes.get(target, ""))
-        if "float" in t_dtype or ("int" in t_dtype and t_nuniq > max(20, int(0.1 * n_rows))):
-            plan_dict["task_type"] = "regression"
-        else:
-            plan_dict["task_type"] = "binary_classification" if t_nuniq <= 2 else "multiclass_classification"
-    
-    # Ensure primary_metric exists
-    if "primary_metric" not in plan_dict:
-        task_type = plan_dict.get("task_type", "regression")
-        plan_dict["primary_metric"] = "rmse" if task_type == "regression" else "f1"
-    
-    # Ensure additional_metrics exists
-    if "additional_metrics" not in plan_dict:
-        task_type = plan_dict.get("task_type", "regression")
-        plan_dict["additional_metrics"] = ["mae", "r2"] if task_type == "regression" else ["precision", "recall"]
-    
-    # Ensure feature_transforms exists and is a list
-    if "feature_transforms" not in plan_dict or not isinstance(plan_dict["feature_transforms"], list):
-        # Generate minimal feature_transforms from profile
-        cols = profile.get("columns", [])
-        feature_transforms = []
-        for c in cols:
-            dtypes_dict = profile.get("dtypes", {})
-            nunique_dict = profile.get("nunique", {})
-            kind = "unknown"
-            if c in profile.get("numeric_cols", []):
-                kind = "continuous"
-            else:
-                nunq = int(nunique_dict.get(c, 0))
-                kind = "binary_categorical" if nunq == 2 else "nominal_categorical"
-            
-            feature_transforms.append({
-                "name": c,
-                "inferred_dtype": str(dtypes_dict.get(c, "unknown")),
-                "kind": kind,
-                "drop": False,
-                "impute": "none",
-                "encode": "none",
-                "scale": "none",
-                "notes_md": ""
-            })
-        plan_dict["feature_transforms"] = feature_transforms
-    
-    # Ensure model_candidates exists and is a list
-    if "model_candidates" not in plan_dict or not isinstance(plan_dict["model_candidates"], list):
-        task_type = plan_dict.get("task_type", "regression")
-        if task_type == "regression":
-            plan_dict["model_candidates"] = [
-                {"model_name": "linear_regression", "reason_md": "Baseline linear model.", "params": {}},
-                {"model_name": "random_forest", "reason_md": "Nonlinear baseline.", "params": {}}
-            ]
-        else:
-            plan_dict["model_candidates"] = [
-                {"model_name": "logistic_regression", "reason_md": "Baseline classification model.", "params": {}},
-                {"model_name": "random_forest", "reason_md": "Nonlinear baseline.", "params": {}}
-            ]
-    
-    # Fix feature_transforms: ensure all have required fields
-    if "feature_transforms" in plan_dict:
-        for ft in plan_dict["feature_transforms"]:
-            if not isinstance(ft, dict):
-                continue
-            # Normalize column_name -> name
-            if "column_name" in ft and "name" not in ft:
-                ft["name"] = ft.pop("column_name")
-            # Add defaults for missing fields
-            if "inferred_dtype" not in ft:
-                ft["inferred_dtype"] = "unknown"
-            if "kind" not in ft:
-                ft["kind"] = "unknown"
-            if "drop" not in ft:
-                ft["drop"] = False
-            if "impute" not in ft:
-                ft["impute"] = "none"
-            if "encode" not in ft:
-                ft["encode"] = "none"
-            if "scale" not in ft:
-                ft["scale"] = "none"
-            if "notes_md" not in ft:
-                ft["notes_md"] = ""
-    
-    # Fix model_candidates: ensure all have required fields
-    if "model_candidates" in plan_dict:
-        for mc in plan_dict["model_candidates"]:
-            if not isinstance(mc, dict):
-                continue
-            if "model_name" not in mc:
-                continue  # Skip invalid entries
-            if "reason_md" not in mc:
-                mc["reason_md"] = f"Selected {mc['model_name']} for this task."
-            if "params" not in mc:
-                mc["params"] = {}
-    
-    return plan_dict
 
 
 def _rule_based_plan(profile: Dict[str, Any], requested_target: Optional[str]) -> Dict[str, Any]:

@@ -67,13 +67,16 @@ class LLMInterface:
     def _gemini_cli_generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """
         Generate using a local Gemini CLI (no API key usage from our backend).
-        
+
         This is intentionally generic because Gemini CLI tools vary by installation.
         Configure with env:
           - GEMINI_CLI_CMD (default: "gemini")
           - GEMINI_CLI_ARGS (default: "")
-        
-        We pass a single combined prompt via STDIN and read STDOUT.
+
+        ROOT CAUSE (Windows): We pass the prompt via STDIN, not -p. On Windows, cmd.exe
+        has an 8191-char command-line limit. Passing long prompts via -p truncates them,
+        so the CLI receives garbage/empty input and returns "I'm ready for your first command".
+        Piping via stdin avoids this entirely.
         """
         # Prefer explicit GEMINI_CLI_CMD, else try Homebrew path on macOS, else "gemini"
         default_cmd = "/opt/homebrew/bin/gemini" if os.path.exists("/opt/homebrew/bin/gemini") else "gemini"
@@ -81,15 +84,20 @@ class LLMInterface:
         # Default args: keep empty to avoid requiring experimental flags.
         # Users can set GEMINI_CLI_ARGS if they want extra flags.
         args_str = os.getenv("GEMINI_CLI_ARGS", "").strip()
-        args = shlex.split(args_str) if args_str else []
+        args = shlex.split(args_str, posix=(sys.platform != "win32")) if args_str else []
 
         exe = shutil.which(cmd)
         if not exe and sys.platform == "win32":
+            # Windows: npm global installs to AppData\npm or ProgramFiles\nodejs
             appdata = os.environ.get("APPDATA")
+            localappdata = os.environ.get("LOCALAPPDATA")
             pf = os.environ.get("ProgramFiles")
+            pf86 = os.environ.get("ProgramFiles(x86)")
             for p in [
                 os.path.join(appdata, "npm", "gemini.cmd") if appdata else "",
+                os.path.join(localappdata, "npm", "gemini.cmd") if localappdata else "",
                 os.path.join(pf, "nodejs", "gemini.cmd") if pf else "",
+                os.path.join(pf86, "nodejs", "gemini.cmd") if pf86 else "",
             ]:
                 if p and os.path.isfile(p):
                     exe = p
@@ -111,7 +119,7 @@ class LLMInterface:
         try:
             # Gemini CLI can auth via:
             # - OAuth (your Google account login in the CLI) OR
-            # - API key (GOOGLE_API_KEY)
+            # - API key (GEMINI_API_KEY or GOOGLE_API_KEY)
             #
             # Default: DO NOT inject API keys so OAuth-based CLI sessions work.
             # If you want to force key auth, set GEMINI_CLI_AUTH_MODE=api_key
@@ -126,15 +134,16 @@ class LLMInterface:
             elif auth_mode == "api_key":
                 from utils.api_key_manager import get_api_key
                 gemini_key = get_api_key(provider="gemini") or ""
-                if gemini_key and not child_env.get("GOOGLE_API_KEY"):
-                    child_env["GOOGLE_API_KEY"] = gemini_key
-                if gemini_key and not child_env.get("GEMINI_API_KEY"):
+                if gemini_key:
                     child_env["GEMINI_API_KEY"] = gemini_key
+                    child_env["GOOGLE_API_KEY"] = gemini_key
 
-            # Use -p to ensure one-shot prompt execution (avoid interactive UI)
+            # CRITICAL: Pass prompt via stdin, NOT -p. Windows cmd.exe has 8191-char limit.
+            # Long prompts via -p get truncated → CLI gets empty/garbage → "I'm ready for your first command".
+            # Gemini CLI accepts stdin: echo "prompt" | gemini (headless mode).
             proc = subprocess.run(
-                [exe, *args, "-p", full_prompt],
-                input="",
+                [exe, *args],
+                input=full_prompt,
                 text=True,
                 capture_output=True,
                 env=child_env,

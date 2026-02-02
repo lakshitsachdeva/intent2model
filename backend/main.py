@@ -555,12 +555,30 @@ def _handle_chat_message(user_message: str, session: Dict[str, Any], df: pd.Data
     context = _build_chat_context(session, df)
     user_prompt = f"{context}\n\n---\nUser message: {msg}"
     provider = os.getenv("LLM_PROVIDER", "gemini_cli")
+    # Gemini CLI often returns "I'm ready for your first command" — use API when key exists
+    api_key = get_api_key(provider="gemini")
+    if provider == "gemini_cli" and api_key:
+        provider = "gemini"
+        print("   Using Gemini API for chat (CLI unreliable for context-aware replies)")
     try:
         llm = get_llm_with_custom_key(provider=provider)
         response = llm.generate(user_prompt, CHAT_SYSTEM_PROMPT)
         if not (response and str(response).strip()):
             return "I didn't get a valid response. Please try again or rephrase.", constraints_fallback, False
         response = response.strip()
+
+        # Detect generic Gemini CLI responses (LLM didn't understand context)
+        _generic_phrases = (
+            "i'm ready for your first command", "i am ready for your first command",
+            "ready for your first command", "my setup is complete", "setup is complete",
+        )
+        if any(p in response.lower() for p in _generic_phrases) and "INTENT_JSON" not in response:
+            response = (
+                "I'm an ML agent — I help you train models on your data. "
+                "You can say: **predict X** (set target), **drop Y** (remove a column), **try something stronger** (use XGBoost), "
+                "**why is accuracy low** (explain), or **yes** to train. "
+                "Add GEMINI_API_KEY to .env for better multilingual understanding."
+            )
 
         # Parse LLM intent (INTENT_JSON) — LLM decides target, drop_columns, performance_mode, start_training
         constraints_delta = dict(constraints_fallback) if constraints_fallback else {}
@@ -642,10 +660,12 @@ def _handle_chat_message(user_message: str, session: Dict[str, Any], df: pd.Data
         return f"LLM is unavailable: {err}. Please check your API key or CLI configuration.", constraints_delta, False
 
 
-# CORS middleware
+# CORS: configurable via CORS_ORIGINS (comma-separated), default localhost:3000
+_cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").strip().split(",")
+_cors_origins = [o.strip() for o in _cors_origins if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -667,10 +687,14 @@ def _find_gemini_cli(cmd: str) -> bool:
         return True
     if sys.platform == "win32":
         appdata = os.environ.get("APPDATA")
+        localappdata = os.environ.get("LOCALAPPDATA")
         pf = os.environ.get("ProgramFiles")
+        pf86 = os.environ.get("ProgramFiles(x86)")
         for p in [
             os.path.join(appdata, "npm", "gemini.cmd") if appdata else "",
+            os.path.join(localappdata, "npm", "gemini.cmd") if localappdata else "",
             os.path.join(pf, "nodejs", "gemini.cmd") if pf else "",
+            os.path.join(pf86, "nodejs", "gemini.cmd") if pf86 else "",
         ]:
             if p and os.path.isfile(p):
                 return True
@@ -3115,4 +3139,6 @@ async def download_all_artifacts(run_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.getenv("DRIFT_ENGINE_HOST", "0.0.0.0")
+    port = int(os.getenv("DRIFT_ENGINE_PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)

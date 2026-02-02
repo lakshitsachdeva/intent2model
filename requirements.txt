@@ -17,6 +17,10 @@ google-generativeai>=0.3.0
 # Optional: XGBoost
 # xgboost>=2.0.0
 
+# Testing
+pytest>=7.0.0
+httpx>=0.24.0
+
 # Research dependencies
 jupyter>=1.0.0
 matplotlib>=3.7.0

@@ -4,9 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drift-ml"
-version = "0.2.9"
+version = "0.2.10"
 description = "drift — terminal-first, chat-based AutoML. Open source. No tokens. No auth."
 requires-python = ">=3.10"
+license = "MIT"
 dependencies = [
     "requests>=2.28.0",
 ]
@@ -33,3 +34,10 @@ drift = "drift.__main__:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["drift*"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0", "httpx>=0.24.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["backend"]
