@@ -147,20 +147,38 @@ def ensure_engine() -> bool:
             pass
 
     env = {**os.environ, "DRIFT_ENGINE_PORT": ENGINE_PORT}
-    proc = subprocess.Popen(
-        [str(bin_path)],
-        cwd=str(bin_dir),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    proc.wait()
-    del proc
+    stderr_file = bin_dir / ".engine-stderr.log"
+    proc = None
+    try:
+        with open(stderr_file, "w") as errf:
+            proc = subprocess.Popen(
+                [str(bin_path)],
+                cwd=str(bin_dir),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=errf,
+                start_new_session=True,
+            )
+        try:
+            proc.wait(timeout=3)
+            if proc.returncode and proc.returncode != 0:
+                err = stderr_file.read_text().strip() if stderr_file.exists() else ""
+                print(f"drift: Engine exited with code {proc.returncode}", file=sys.stderr)
+                if err:
+                    print(f"drift: {err[-400:]}", file=sys.stderr)
+                return False
+        except subprocess.TimeoutExpired:
+            pass  # Engine still running
+    except Exception as e:
+        print(f"drift: Engine spawn failed: {e}", file=sys.stderr)
+        return False
 
+    import time
     for _ in range(60):
         if _engine_running():
             return True
-        import time
         time.sleep(0.5)
+    err = stderr_file.read_text().strip() if stderr_file.exists() else ""
+    if err:
+        print(f"drift: Engine log: {err[-400:]}", file=sys.stderr)
     return False
