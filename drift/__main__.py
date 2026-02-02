@@ -10,6 +10,10 @@ from drift.cli.repl import run_repl
 
 
 def main() -> None:
+    if "--version" in sys.argv or "-v" in sys.argv:
+        from importlib.metadata import version
+        print(f"drift-ml {version('drift-ml')}")
+        return
     base_url = os.environ.get("DRIFT_BACKEND_URL")
     if not base_url:
         from drift.engine_launcher import ensure_engine

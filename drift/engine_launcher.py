@@ -61,14 +61,15 @@ def _engine_running() -> bool:
 
 
 def _get_asset_download_url(asset_name: str) -> str:
-    """Resolve GitHub release asset to download URL."""
-    # Direct URL works for public repos, no API rate limits
-    direct_url = f"https://github.com/{GITHUB_REPO}/releases/download/{ENGINE_TAG}/{asset_name}"
-    r = requests.head(direct_url, timeout=10, allow_redirects=True)
-    if r.status_code == 200:
-        return r.url  # follow redirects to final URL
+    """Resolve GitHub release asset to download URL. Prefer direct URL (no API)."""
+    base = os.environ.get("DRIFT_ENGINE_BASE_URL")
+    if base:
+        return f"{base.rstrip('/')}/{asset_name}"
+    return f"https://github.com/{GITHUB_REPO}/releases/download/{ENGINE_TAG}/{asset_name}"
 
-    # Fallback: API (needed for private repos or if direct fails)
+
+def _get_asset_download_url_via_api(asset_name: str) -> str:
+    """Fallback: get URL via GitHub API (for private repos)."""
     token = os.environ.get("DRIFT_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
     headers = {
         "User-Agent": "Drift-Engine-Launcher/1.0",
@@ -93,19 +94,26 @@ def _get_asset_download_url(asset_name: str) -> str:
 
 
 def _download_file(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
     token = os.environ.get("DRIFT_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    headers = {"User-Agent": "Drift-Engine-Launcher/1.0"}
-    # API URLs need Accept: application/octet-stream; browser_download_url works with default
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
     if "api.github.com" in url:
         headers["Accept"] = "application/octet-stream"
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    r = requests.get(url, headers=headers, stream=True, timeout=60)
-    r.raise_for_status()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest, "wb") as f:
-        for chunk in r.iter_content(chunk_size=65536):
-            f.write(chunk)
+    try:
+        r = requests.get(url, headers=headers, stream=True, timeout=60)
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+    except Exception:
+        # Fallback: urllib (stdlib, no deps, works when requests has issues)
+        import urllib.request
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            with open(dest, "wb") as f:
+                f.write(resp.read())
 
 
 def ensure_engine() -> bool:
@@ -133,12 +141,17 @@ def ensure_engine() -> bool:
         ext = ".exe" if platform.system() == "Windows" else ""
         asset = f"drift-engine-{plat}-{arch}{ext}"
         print(f"drift: Downloading engine ({asset})...", file=sys.stderr)
+        url = _get_asset_download_url(asset)
         try:
-            url = _get_asset_download_url(asset)
             _download_file(url, bin_path)
         except Exception as e:
-            print(f"drift: Download failed: {e}", file=sys.stderr)
-            return False
+            try:
+                url = _get_asset_download_url_via_api(asset)
+                _download_file(url, bin_path)
+            except Exception as e2:
+                print(f"drift: Download failed: {e2}", file=sys.stderr)
+                print(f"drift: Try manually: curl -L -o {bin_path} {url}", file=sys.stderr)
+                return False
         if platform.system() != "Windows":
             bin_path.chmod(0o755)
         if platform.system() == "Darwin":
