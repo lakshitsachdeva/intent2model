@@ -101,19 +101,37 @@ def _download_file(url: str, dest: Path) -> None:
         headers["Accept"] = "application/octet-stream"
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    try:
+
+    def try_requests():
         r = requests.get(url, headers=headers, stream=True, timeout=60)
         r.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
                 f.write(chunk)
-    except Exception:
-        # Fallback: urllib (stdlib, no deps, works when requests has issues)
+
+    def try_urllib():
         import urllib.request
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=60) as resp:
             with open(dest, "wb") as f:
                 f.write(resp.read())
+
+    def try_curl():
+        result = subprocess.run(
+            ["curl", "-fsSL", "-o", str(dest), url],
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"curl failed: {result.stderr.decode() or result.returncode}")
+
+    for attempt in [try_curl, try_requests, try_urllib]:
+        try:
+            attempt()
+            return
+        except Exception:
+            continue
+    raise RuntimeError(f"Download failed. Try manually: curl -L -o {dest} {url}")
 
 
 def ensure_engine() -> bool:
@@ -145,13 +163,11 @@ def ensure_engine() -> bool:
         try:
             _download_file(url, bin_path)
         except Exception as e:
-            try:
-                url = _get_asset_download_url_via_api(asset)
-                _download_file(url, bin_path)
-            except Exception as e2:
-                print(f"drift: Download failed: {e2}", file=sys.stderr)
-                print(f"drift: Try manually: curl -L -o {bin_path} {url}", file=sys.stderr)
-                return False
+            print(f"drift: Download failed: {e}", file=sys.stderr)
+            print(f"drift: Run this manually, then try again:", file=sys.stderr)
+            print(f"  mkdir -p ~/.drift/bin && curl -L -o ~/.drift/bin/{asset} {url}", file=sys.stderr)
+            print(f"  chmod +x ~/.drift/bin/{asset}", file=sys.stderr)
+            return False
         if platform.system() != "Windows":
             bin_path.chmod(0o755)
         if platform.system() == "Darwin":
