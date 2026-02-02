@@ -6,6 +6,7 @@ Abstract interface for LLM providers (Gemini, OpenAI, Groq).
 
 from typing import Optional
 import os
+import sys
 import subprocess
 import shlex
 import shutil
@@ -83,6 +84,16 @@ class LLMInterface:
         args = shlex.split(args_str) if args_str else []
 
         exe = shutil.which(cmd)
+        if not exe and sys.platform == "win32":
+            appdata = os.environ.get("APPDATA")
+            pf = os.environ.get("ProgramFiles")
+            for p in [
+                os.path.join(appdata, "npm", "gemini.cmd") if appdata else "",
+                os.path.join(pf, "nodejs", "gemini.cmd") if pf else "",
+            ]:
+                if p and os.path.isfile(p):
+                    exe = p
+                    break
         if not exe:
             raise Exception(
                 f"Gemini CLI not found: '{cmd}'. Install it or set GEMINI_CLI_CMD to the correct binary."

@@ -16,7 +16,7 @@ except ImportError:
     requests = None
 
 GITHUB_REPO = "lakshitsachdeva/intent2model"  # Engine binaries (same repo)
-ENGINE_TAG = "v0.2.8"  # Pinned — direct URL, no API, no rate limits
+ENGINE_TAG = "v0.2.9"  # Pinned — direct URL, no API, no rate limits
 ENGINE_PORT = os.environ.get("DRIFT_ENGINE_PORT", "8000")
 HEALTH_URL = f"http://127.0.0.1:{ENGINE_PORT}/health"
 
@@ -224,4 +224,9 @@ def ensure_engine() -> bool:
     err = stderr_file.read_text().strip() if stderr_file.exists() else ""
     if err:
         print(f"drift: Engine log: {err[-400:]}", file=sys.stderr)
+    if platform.system() == "Windows":
+        print("drift: On Windows, try running the backend manually:", file=sys.stderr)
+        print("  cd backend && python -m uvicorn main:app --host 0.0.0.0 --port 8000", file=sys.stderr)
+        print("  Create .env in project root with GEMINI_API_KEY=... for LLM planning.", file=sys.stderr)
+        print("  Then: set DRIFT_BACKEND_URL=http://localhost:8000", file=sys.stderr)
     return False

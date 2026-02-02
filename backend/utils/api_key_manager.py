@@ -4,12 +4,15 @@ Automatically uses .env file keys by default.
 Custom keys (from UI) override env keys only if explicitly set.
 """
 
+from pathlib import Path
 from typing import Optional
 import os
 from dotenv import load_dotenv
 
-# Load .env file once on module import
-load_dotenv()
+# Load .env from project root (works when running from backend/ on any OS)
+_root = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_root / ".env")
+load_dotenv()  # Also try cwd (e.g. when run from project root)
 
 # In-memory storage for custom API keys (from UI)
 _custom_api_keys = {}
@@ -38,7 +41,7 @@ def get_api_key(provider: str = "gemini") -> Optional[str]:
     # Default: Use .env file key (automatically loaded)
     # This ensures .env is always used unless user explicitly sets a custom key
     if provider == "gemini":
-        key = os.getenv("GEMINI_API_KEY", "")
+        key = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
         if key and key.strip():
             return key.strip()
     elif provider == "openai":

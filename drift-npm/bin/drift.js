@@ -13,7 +13,7 @@ const http = require("http");
 const isWindows = process.platform === "win32";
 const ENGINE_PORT = process.env.DRIFT_ENGINE_PORT || "8000";
 const GITHUB_REPO = "lakshitsachdeva/intent2model";  // Engine binaries (same repo)
-const ENGINE_TAG = "v0.2.8";  // Pinned — direct URL, no API, no rate limits
+const ENGINE_TAG = "v0.2.9";  // Pinned — direct URL, no API, no rate limits
 const ENGINE_BASE_URL = `https://github.com/${GITHUB_REPO}/releases/download/${ENGINE_TAG}`;
 const HEALTH_URL = `http://127.0.0.1:${ENGINE_PORT}/health`;
 const HEALTH_TIMEOUT_MS = 2000;
@@ -301,10 +301,12 @@ async function main() {
           }
           const enginePath = getEnginePath();
           if (isWindows && enginePath) {
-            console.error("drift: On Windows (PowerShell), run manually to see the error:");
-            console.error("  cd $env:USERPROFILE\\.drift\\bin");
-            console.error("  .\\drift-engine-windows-x64.exe");
-            console.error("drift: Also install pipx: pip install pipx && pipx ensurepath, then pipx install drift-ml");
+            console.error("drift: Engine failed on Windows. Try running the backend manually:");
+            console.error("  cd backend");
+            console.error("  python -m uvicorn main:app --host 0.0.0.0 --port 8000");
+            console.error("  (Create .env in project root with GEMINI_API_KEY=... for LLM)");
+            console.error("Then: set DRIFT_BACKEND_URL=http://localhost:8000");
+            console.error("Or run the engine manually: cd %USERPROFILE%\\.drift\\bin && drift-engine-windows-x64.exe");
           }
         }
         process.exit(1);

@@ -43,7 +43,10 @@ import asyncio
 from typing import Set
 import json as json_lib
 
-# Load environment variables from .env file (if it exists)
+# Load .env from project root (works when running from backend/ on Windows/macOS/Linux)
+from pathlib import Path
+_env_root = Path(__file__).resolve().parent.parent
+load_dotenv(_env_root / ".env")
 load_dotenv()
 
 
@@ -716,6 +719,8 @@ else:
     else:
         print("⚠️  No GEMINI_API_KEY found. System will use rule-based fallbacks (still fully functional)")
     print("   To enable LLM: set GEMINI_API_KEY or install Gemini CLI")
+    if sys.platform == "win32":
+        print("   💡 On Windows: Add GEMINI_API_KEY to .env (project root) for reliable AutoML planning.")
 
 # In-memory storage for uploaded datasets (in production, use proper storage)
 dataset_cache = {}

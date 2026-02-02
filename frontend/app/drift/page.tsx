@@ -29,6 +29,9 @@ export default function DriftPage() {
             <Link href="/" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
               Home
             </Link>
+            <Link href="/app" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
+              Web app
+            </Link>
             <Link href="/drift#setup" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
               Setup
             </Link>
@@ -258,9 +261,19 @@ ollama run llama3.2
           </p>
 
           <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-6 space-y-3">
-            <h3 className="text-amber-400 font-semibold">Windows: engine crashes?</h3>
+            <h3 className="text-amber-400 font-semibold">Windows: engine crashes or LLM planning fails?</h3>
             <p className="text-white/70 text-sm">
-              Run the engine manually in PowerShell to see the error:
+              <strong>Option A:</strong> Run the backend manually (skips engine binary):
+            </p>
+            <pre className="bg-black/60 border border-white/20 text-green-400 p-3 rounded-lg overflow-x-auto text-xs sm:text-sm">
+{`cd backend
+python -m uvicorn main:app --host 0.0.0.0 --port 8000`}
+            </pre>
+            <p className="text-white/70 text-sm mt-2">
+              Create <code className="bg-white/10 px-1 rounded">.env</code> in project root with <code className="bg-white/10 px-1 rounded">GEMINI_API_KEY=your-key</code> — fixes &quot;I am ready for your first command&quot; / empty JSON from Gemini CLI.
+            </p>
+            <p className="text-white/70 text-sm mt-2">
+              <strong>Option B:</strong> If engine binary crashes, run it manually to see the error:
             </p>
             <pre className="bg-black/60 border border-white/20 text-green-400 p-3 rounded-lg overflow-x-auto text-xs sm:text-sm">
 {`cd $env:USERPROFILE\\.drift\\bin

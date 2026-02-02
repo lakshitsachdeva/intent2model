@@ -86,10 +86,16 @@ export default function Home() {
 
           <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 justify-center items-center w-full sm:w-auto">
             <Link
-              href="/drift#run-locally"
+              href="/app"
               className="w-full sm:w-auto px-6 sm:px-8 py-3 sm:py-4 bg-white text-black rounded-full text-base sm:text-lg font-semibold hover:bg-white/90 transition-all shadow-2xl active:scale-[0.98]"
             >
-              Try locally
+              Try web app
+            </Link>
+            <Link
+              href="/app"
+              className="w-full sm:w-auto px-6 sm:px-8 py-3 sm:py-4 bg-white/10 border-2 border-white/30 text-white rounded-full text-base sm:text-lg font-medium hover:bg-white/20 transition-all active:scale-[0.98]"
+            >
+              Open web app
             </Link>
             <Link
               href="/drift"

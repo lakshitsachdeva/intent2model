@@ -27,7 +27,13 @@ def plan_automl(df: pd.DataFrame, requested_target: Optional[str] = None, llm_pr
     prompt = _build_prompt(profile, requested_target=requested_target)
     system_prompt = _system_prompt()
 
-    api_key = get_api_key(provider=llm_provider)
+    # Gemini CLI often returns "I am ready..." or {} instead of JSON. Use API when any key is set.
+    api_key = get_api_key(provider="gemini")
+    if llm_provider == "gemini_cli" and api_key:
+        llm_provider = "gemini"
+        print("   Using Gemini API for planning (CLI unreliable for structured JSON)")
+    elif not api_key:
+        api_key = get_api_key(provider=llm_provider)
     llm = LLMInterface(provider=llm_provider, api_key=api_key)
 
     max_retries = 3
@@ -66,6 +72,9 @@ def plan_automl(df: pd.DataFrame, requested_target: Optional[str] = None, llm_pr
 
     # Hard fallback: rule-based minimal plan (marked as low confidence)
     print("⚠️  LLM planning failed after all retries. Using rule-based fallback (low confidence).")
+    import sys
+    if sys.platform == "win32":
+        print("   💡 On Windows: Add GEMINI_API_KEY or GOOGLE_API_KEY to .env (project root) for reliable LLM planning.")
     plan_dict = _rule_based_plan(profile, requested_target=requested_target)
     plan_dict["planning_source"] = "fallback"
     plan_dict["planning_error"] = str(last_error)[:500]
