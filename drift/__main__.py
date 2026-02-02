@@ -19,7 +19,10 @@ def main() -> None:
         from drift.engine_launcher import ensure_engine
 
         if not ensure_engine():
-            print("drift: Failed to start engine. Check ~/.drift/bin/.engine-stderr.log or set DRIFT_BACKEND_URL", file=sys.stderr)
+            print("drift: Failed to start engine.", file=sys.stderr)
+            print("drift: Check ~/.drift/bin/.engine-stderr.log", file=sys.stderr)
+            print("drift: On macOS: System Settings → Privacy & Security → allow drift-engine", file=sys.stderr)
+            print("drift: Or set DRIFT_BACKEND_URL to a running engine", file=sys.stderr)
             sys.exit(1)
         base_url = f"http://127.0.0.1:{os.environ.get('DRIFT_ENGINE_PORT', '8000')}"
     run_repl(base_url=base_url)
