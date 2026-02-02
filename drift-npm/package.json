@@ -1,6 +1,6 @@
 {
   "name": "drift-ml",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "drift — terminal-first, chat-based AutoML. Open source. No tokens. No auth.",
   "bin": {
     "drift": "bin/drift.js"

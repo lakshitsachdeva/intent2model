@@ -1,8 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
-import VisualEditsMessenger from "../components/VisualEditsMessenger";
-import ErrorReporter from "@/components/ErrorReporter";
 import Script from "next/script";
 
 const jetbrainsMono = JetBrains_Mono({
@@ -36,7 +34,6 @@ export default function RootLayout({
           strategy="afterInteractive"
           data-orchids-project-id="df4c67f7-e9df-441d-a8bc-0979c9e8b3e7"
         />
-        <ErrorReporter />
         <Script
           src="https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/object/public/scripts//route-messenger.js"
           strategy="afterInteractive"
@@ -48,7 +45,6 @@ export default function RootLayout({
           data-custom-data='{"appName": "Intent2Model", "version": "1.0.0", "greeting": "hi"}'
         />
         {children}
-        <VisualEditsMessenger />
       </body>
     </html>
   );

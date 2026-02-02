@@ -148,13 +148,26 @@ def ensure_engine() -> bool:
         except Exception:
             pass
 
+    # macOS: use wrapper script via bash to avoid spawn -88
+    if platform.system() == "Darwin":
+        wrapper = bin_dir / "run-engine.sh"
+        port = ENGINE_PORT
+        bin_name = bin_path.name
+        script = f'#!/bin/bash\ncd "$(dirname "$0")"\nexport DRIFT_ENGINE_PORT="{port}"\nexec ./{bin_name}\n'
+        if not wrapper.exists() or wrapper.read_text() != script:
+            wrapper.write_text(script)
+            wrapper.chmod(0o755)
+        launch_cmd = ["/bin/bash", str(wrapper)]
+    else:
+        launch_cmd = [str(bin_path)]
+
     env = {**os.environ, "DRIFT_ENGINE_PORT": ENGINE_PORT}
     stderr_file = bin_dir / ".engine-stderr.log"
     proc = None
     try:
         with open(stderr_file, "w") as errf:
             proc = subprocess.Popen(
-                [str(bin_path)],
+                launch_cmd,
                 cwd=str(bin_dir),
                 env=env,
                 stdout=subprocess.DEVNULL,
@@ -176,7 +189,8 @@ def ensure_engine() -> bool:
         return False
 
     import time
-    for _ in range(60):
+    print("drift: Starting engine (first run may take 30s)...", file=sys.stderr)
+    for i in range(120):  # 60s — PyInstaller binary can take 30+ s to unpack
         if _engine_running():
             return True
         time.sleep(0.5)

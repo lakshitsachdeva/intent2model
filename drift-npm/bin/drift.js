@@ -18,7 +18,7 @@ const ENGINE_BASE_URL = `https://github.com/${GITHUB_REPO}/releases/download/${E
 const HEALTH_URL = `http://127.0.0.1:${ENGINE_PORT}/health`;
 const HEALTH_TIMEOUT_MS = 2000;
 const HEALTH_POLL_MS = 500;
-const HEALTH_POLL_MAX = 60;
+const HEALTH_POLL_MAX = 120;  // 60s — PyInstaller binary can take 30+ s to unpack on first run
 const isMac = process.platform === "darwin";
 
 function getPlatformKey() {
@@ -165,26 +165,37 @@ async function ensureEngine() {
   const absPath = path.resolve(binPath);
   const env = { ...process.env, DRIFT_ENGINE_PORT: ENGINE_PORT };
 
-  function trySpawn(useShell) {
+  // macOS: spawn a wrapper script instead of the binary directly (avoids -88)
+  const binName = path.basename(binPath);
+  const wrapperPath = isMac ? path.join(binDir, "run-engine.sh") : null;
+  if (isMac && wrapperPath) {
+    const wrapperScript = `#!/bin/bash
+cd "$(dirname "$0")"
+export DRIFT_ENGINE_PORT="${ENGINE_PORT}"
+exec ./${binName}
+`;
+    if (!fs.existsSync(wrapperPath) || fs.readFileSync(wrapperPath, "utf8") !== wrapperScript) {
+      fs.writeFileSync(wrapperPath, wrapperScript);
+      fs.chmodSync(wrapperPath, 0o755);
+    }
+  }
+
+  process.stderr.write("drift: Starting engine (first run may take 30s)...\n");
+
+  // On macOS, always use bash to run (wrapper or binary) — avoids spawn -88
+  const toSpawn = (isMac && wrapperPath) ? "/bin/bash" : absPath;
+  const spawnArgs = (isMac && wrapperPath) ? [wrapperPath] : [];
+
+  function trySpawn(cmd, args) {
     return new Promise((resolve, reject) => {
       let child;
       try {
-        if (useShell && isMac) {
-          // macOS spawn -88 workaround: run via shell (often bypasses Gatekeeper)
-          child = spawn("/bin/sh", ["-c", `exec "${absPath}"`], {
-            detached: true,
-            stdio: "ignore",
-            cwd: binDir,
-            env,
-          });
-        } else {
-          child = spawn(absPath, [], {
-            detached: true,
-            stdio: "ignore",
-            cwd: binDir,
-            env,
-          });
-        }
+        child = spawn(cmd, args || [], {
+          detached: true,
+          stdio: "ignore",
+          cwd: binDir,
+          env,
+        });
       } catch (e) {
         reject(e);
         return;
@@ -196,17 +207,23 @@ async function ensureEngine() {
   }
 
   try {
-    return await trySpawn(false);
+    return await trySpawn(toSpawn, spawnArgs);
   } catch (e) {
     const isSpawn88 = (e.errno === -88 || (e.message && String(e.message).includes("-88")));
     if (isMac && isSpawn88) {
-      process.stderr.write("drift: Direct spawn failed (-88). Trying shell fallback...\n");
+      process.stderr.write("drift: Spawn failed (-88). Trying nohup fallback...\n");
       try {
-        return await trySpawn(true);
+        const cmd = (isMac && wrapperPath) ? `"${wrapperPath}"` : `"${absPath}"`;
+        spawnSync("/bin/sh", ["-c", `nohup ${cmd} > /dev/null 2>&1 &`], {
+          cwd: binDir,
+          env: { ...process.env, DRIFT_ENGINE_PORT: ENGINE_PORT },
+          stdio: "pipe",
+        });
+        return await waitForEngine();
       } catch (e2) {
-        console.error("drift: Engine failed to start. On macOS, try:");
-        console.error("  1. Run once: ~/.drift/bin/drift-engine-macos-arm64");
-        console.error("  2. If blocked: System Settings → Privacy & Security → allow it");
+        console.error("drift: Engine failed. Run manually in another terminal:");
+        console.error("  ~/.drift/bin/drift-engine-macos-arm64");
+        console.error("Then run drift again.");
         throw e2;
       }
     }
