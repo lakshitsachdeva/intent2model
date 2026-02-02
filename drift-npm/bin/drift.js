@@ -92,7 +92,6 @@ Then run:
   const result = spawnSync(driftPath, process.argv.slice(2), {
     stdio: "inherit",
     env: process.env,
-    shell: isWindows,
   });
 
   process.exit(result.status === null ? (result.signal ? 128 + 9 : 1) : result.status);
