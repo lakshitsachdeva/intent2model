@@ -17,7 +17,11 @@ const http = require("http");
 const isWindows = process.platform === "win32";
 const ENGINE_PORT = process.env.DRIFT_ENGINE_PORT || "8000";
 // Pinned tag: draft releases are invisible to /releases/latest.
-const ENGINE_BASE_URL = process.env.DRIFT_ENGINE_BASE_URL || "https://github.com/lakshitsachdeva/intent2model/releases/download/v0.1.0";
+const ENGINE_TAG = "v0.1.3";
+const GITHUB_REPO = "lakshitsachdeva/drift";
+const ENGINE_BASE_URL = process.env.DRIFT_ENGINE_BASE_URL || `https://github.com/${GITHUB_REPO}/releases/download/${ENGINE_TAG}`;
+const GITHUB_API_RELEASE = `https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${ENGINE_TAG}`;
+const GITHUB_TOKEN = process.env.DRIFT_GITHUB_TOKEN || process.env.GITHUB_TOKEN;
 const HEALTH_URL = `http://127.0.0.1:${ENGINE_PORT}/health`;
 const HEALTH_TIMEOUT_MS = 2000;
 const HEALTH_POLL_MS = 500;
@@ -62,10 +66,55 @@ function fetchOk(url) {
   });
 }
 
+const API_HEADERS = {
+  "User-Agent": "Drift-Engine-Launcher/1.0",
+  Accept: "application/vnd.github+json",
+  ...(GITHUB_TOKEN && { Authorization: `Bearer ${GITHUB_TOKEN}` }),
+};
+const DOWNLOAD_HEADERS = {
+  "User-Agent": "Drift-Engine-Launcher/1.0",
+  Accept: "application/octet-stream",
+  ...(GITHUB_TOKEN && { Authorization: `Bearer ${GITHUB_TOKEN}` }),
+};
+
+// Resolve GitHub release asset to API download URL (browser_download_url returns 404 for scripts).
+function getGitHubAssetUrl(assetName) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(GITHUB_API_RELEASE, { headers: API_HEADERS }, (res) => {
+      if (res.statusCode === 404) {
+        reject(new Error(
+          "Release not found (404). If the repo is private, set DRIFT_GITHUB_TOKEN with a token that has repo read access."
+        ));
+        return;
+      }
+      if (res.statusCode !== 200) {
+        reject(new Error(`Release not found: ${res.statusCode}`));
+        return;
+      }
+      let body = "";
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          const asset = (data.assets || []).find((a) => a.name === assetName);
+          if (!asset || !asset.url) {
+            reject(new Error(`Asset not found: ${assetName}`));
+            return;
+          }
+          resolve(asset.url);
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on("error", reject);
+  });
+}
+
 function downloadFile(url, destPath) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith("https") ? https : http;
-    const req = client.get(url, (res) => {
+    const req = client.get(url, { headers: DOWNLOAD_HEADERS }, (res) => {
       const redirect = res.statusCode >= 301 && res.statusCode <= 302 && res.headers.location;
       if (redirect) {
         downloadFile(redirect, destPath).then(resolve).catch(reject);
@@ -117,7 +166,10 @@ async function ensureEngine() {
     const { plat, arch } = getPlatformKey();
     const ext = isWindows ? ".exe" : "";
     const asset = `drift-engine-${plat}-${arch}${ext}`;
-    const url = `${ENGINE_BASE_URL.replace(/\/$/, "")}/${asset}`;
+    const isDefaultGitHub = !process.env.DRIFT_ENGINE_BASE_URL;
+    const url = isDefaultGitHub
+      ? await getGitHubAssetUrl(asset)
+      : `${ENGINE_BASE_URL.replace(/\/$/, "")}/${asset}`;
     process.stderr.write(`drift: Downloading engine (${asset})...\n`);
     try {
       await downloadFile(url, binPath);
