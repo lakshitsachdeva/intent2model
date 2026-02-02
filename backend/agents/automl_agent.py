@@ -141,43 +141,71 @@ def _profile_for_llm(df: pd.DataFrame) -> Dict[str, Any]:
 
 def _build_prompt(profile: Dict[str, Any], requested_target: Optional[str]) -> str:
     requested_target = (requested_target or "").strip()
-    return f"""
-You are an AutoML engineer agent.
+    cols = profile.get("columns", [])
+    example_target = requested_target or (cols[-1] if cols else "target_col")
+    # Build example feature_transforms from actual columns (so LLM sees real names)
+    example_transforms = []
+    for c in cols[:6]:
+        is_target = c == example_target
+        is_num = c in profile.get("numeric_cols", [])
+        example_transforms.append({
+            "name": c,
+            "inferred_dtype": str(profile.get("dtypes", {}).get(c, "float64")),
+            "kind": "continuous" if is_num else "nominal",
+            "kind_confidence": 0.9,
+            "drop": is_target,
+            "impute": "median" if is_num else "none",
+            "encode": "none" if is_num else "one_hot",
+            "scale": "standard" if is_num else "none",
+            "notes_md": "",
+            "transform_confidence": 0.8,
+        })
+    example_json = {
+        "plan_schema_version": "v1",
+        "inferred_target": example_target,
+        "target_confidence": 0.95,
+        "alternative_targets": [],
+        "task_type": "multiclass_classification",
+        "task_confidence": 0.9,
+        "task_inference_md": "Target has few unique values; classification task.",
+        "dataset_intelligence_md": "Dataset analyzed. Numeric and categorical columns identified.",
+        "transformation_strategy_md": "StandardScaler for numeric, one_hot for categorical.",
+        "model_selection_md": "Logistic regression baseline, random_forest, gradient_boosting.",
+        "training_validation_md": "Stratified K-fold CV, primary metric f1.",
+        "error_behavior_analysis_md": "Confusion matrix, per-class metrics.",
+        "explainability_md": "Feature importances from tree models.",
+        "primary_metric": "f1",
+        "additional_metrics": ["precision", "recall"],
+        "metric_selection_confidence": 0.9,
+        "feature_transforms": example_transforms,
+        "model_candidates": [
+            {"model_name": "logistic_regression", "reason_md": "Baseline.", "params": {}},
+            {"model_name": "random_forest", "reason_md": "Nonlinear.", "params": {}},
+        ],
+        "model_selection_confidence": 0.8,
+    }
+    return f"""TASK: Analyze the dataset below and output a single JSON object (AutoMLPlan). No other text. No questions. No preamble. Just the JSON.
 
-You MUST follow this workflow:
-STEP 0 Task inference (target + task type) from dataset alone; justify in markdown.
-STEP 1 Dataset intelligence: inspect dtypes, uniques, missingness, distributions; classify each feature kind; detect leakage/id/outliers/skew/imbalance/high-cardinality; write findings in markdown.
-STEP 2 Transformation strategy: per-feature imputation/encoding/scaling/drop decisions; justify WHY.
-STEP 3 Model candidates: choose models based on dataset size/feature types/task/interpretability-performance tradeoffs; justify inclusions/exclusions.
-STEP 4 Training & validation plan: CV default, metrics appropriate to task, overfit checks; justify.
-STEP 5 Error/behavior analysis plan: what plots/analyses to do; justify.
-STEP 6 Explainability plan: how to align post-encoding feature names; justify.
-
-CRITICAL RULES:
-- Do NOT assume scaling/encoding. Decide based on model needs & feature kinds.
-- Do NOT output generic sklearn boilerplate.
-- Output ONLY valid JSON matching the AutoMLPlan schema.
-
-Dataset profile (JSON):
+Dataset profile:
 {json.dumps(profile)[:15000]}
 
-Requested target (may be empty; validate against dataset if provided): {requested_target or "NONE"}
+Requested target: {requested_target or "NONE"}
 
-Output JSON for AutoMLPlan with:
-- inferred_target (must be a column in dataset)
-- task_type in [regression, binary_classification, multiclass_classification]
-- markdown fields task_inference_md, dataset_intelligence_md, transformation_strategy_md, model_selection_md, training_validation_md, error_behavior_analysis_md, explainability_md
-- primary_metric + additional_metrics appropriate for the task
-- feature_transforms: list of FeatureTransform objects, one per column (drop=true for target and for identifiers/leakage)
-- model_candidates: list of ModelCandidate objects with reasons and params (can be empty params)
-""".strip()
+You MUST output a JSON object with these exact keys: plan_schema_version, inferred_target, target_confidence, alternative_targets, task_type, task_confidence, task_inference_md, dataset_intelligence_md, transformation_strategy_md, model_selection_md, training_validation_md, error_behavior_analysis_md, explainability_md, primary_metric, additional_metrics, metric_selection_confidence, feature_transforms, model_candidates, model_selection_confidence.
+
+Example structure (adapt to the actual dataset):
+{json.dumps(example_json, indent=2)[:2000]}
+
+Rules: inferred_target must be a column in the dataset. task_type in [regression, binary_classification, multiclass_classification]. feature_transforms: one object per column with name, inferred_dtype, kind, kind_confidence, drop, impute, encode, scale, notes_md, transform_confidence. model_candidates: list of {{model_name, reason_md, params}}.
+
+Output ONLY the JSON object, nothing else:""".strip()
 
 
 def _system_prompt() -> str:
     return (
-        "You are a senior ML engineer. "
-        "You must be dataset-agnostic and data-driven. "
-        "Return ONLY strict JSON that validates against the AutoMLPlan schema."
+        "You are an AutoML planning agent. Your ONLY job is to output a valid JSON object. "
+        "NEVER ask questions. NEVER say 'I am ready' or 'please provide'. NEVER search for files or schemas. "
+        "The user prompt contains the dataset and a JSON example. Output ONLY the JSON object, no other text."
     )
 
 
