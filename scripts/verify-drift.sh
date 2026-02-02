@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verify drift engine releases. Run from repo root.
 set -e
-REPO="lakshitsachdeva/intent2model"
+REPO="lakshitsachdeva/drift"  # Engine binaries
 API="https://api.github.com/repos/${REPO}/releases"
 
 echo "=== Drift release check ==="
