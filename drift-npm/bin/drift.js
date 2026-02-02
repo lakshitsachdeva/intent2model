@@ -16,11 +16,13 @@ const http = require("http");
 
 const isWindows = process.platform === "win32";
 const ENGINE_PORT = process.env.DRIFT_ENGINE_PORT || "8000";
-const ENGINE_BASE_URL = process.env.DRIFT_ENGINE_BASE_URL || "https://github.com/lakshitsachdeva/intent2model/releases/latest/download";
+// Pinned tag: draft releases are invisible to /releases/latest.
+const ENGINE_BASE_URL = process.env.DRIFT_ENGINE_BASE_URL || "https://github.com/lakshitsachdeva/intent2model/releases/download/v0.1.0";
 const HEALTH_URL = `http://127.0.0.1:${ENGINE_PORT}/health`;
 const HEALTH_TIMEOUT_MS = 2000;
 const HEALTH_POLL_MS = 500;
-const HEALTH_POLL_MAX = 60;
+const HEALTH_POLL_MAX = 60; // 30 seconds total
+const isMac = process.platform === "darwin";
 
 function getPlatformKey() {
   const p = process.platform;
@@ -108,11 +110,14 @@ async function ensureEngine() {
     console.error("drift: Could not resolve engine directory (~/.drift/bin). Set HOME or USERPROFILE.");
     return false;
   }
+  if (!fs.existsSync(binDir)) {
+    fs.mkdirSync(binDir, { recursive: true });
+  }
   if (!fs.existsSync(binPath)) {
     const { plat, arch } = getPlatformKey();
     const ext = isWindows ? ".exe" : "";
     const asset = `drift-engine-${plat}-${arch}${ext}`;
-    const url = `${ENGINE_BASE_URL}/${asset}`;
+    const url = `${ENGINE_BASE_URL.replace(/\/$/, "")}/${asset}`;
     process.stderr.write(`drift: Downloading engine (${asset})...\n`);
     try {
       await downloadFile(url, binPath);
@@ -124,6 +129,18 @@ async function ensureEngine() {
     if (!isWindows) {
       try { fs.chmodSync(binPath, 0o755); } catch (_) {}
     }
+    if (isMac) {
+      try {
+        spawnSync("xattr", ["-dr", "com.apple.quarantine", binPath], { stdio: "pipe" });
+      } catch (_) {}
+    }
+  }
+  // On macOS, always ensure binary is executable and not quarantined before spawn (covers existing binaries).
+  if (isMac && binPath) {
+    try {
+      fs.chmodSync(binPath, 0o755);
+      spawnSync("xattr", ["-dr", "com.apple.quarantine", binPath], { stdio: "pipe" });
+    } catch (_) {}
   }
   const child = spawn(binPath, [], {
     detached: true,
@@ -155,9 +172,13 @@ async function main() {
   if (!userBackend) {
     const already = await engineRunning();
     if (!already) {
-      const started = await ensureEngine().catch(() => false);
+      const started = await ensureEngine().catch((e) => {
+        console.error("drift:", e.message);
+        return false;
+      });
       if (!started) {
-        console.error("drift: Engine did not start. Set DRIFT_BACKEND_URL to a running engine URL.");
+        console.error("Failed to start drift engine.");
+        console.error("Please check permissions or download the engine manually.");
         process.exit(1);
       }
     }
