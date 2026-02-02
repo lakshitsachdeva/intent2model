@@ -39,13 +39,42 @@ On first run, drift downloads and starts the engine automatically. No backend se
 
 ---
 
-## Example
+## Example (CLI)
 
 ```text
 drift › load iris.csv
 drift › predict variety
 drift › try something stronger
 drift › quit
+```
+
+---
+
+## Use as library
+
+```bash
+pip install drift-ml
+```
+
+```python
+from drift import Drift
+
+d = Drift()
+d.load("iris.csv")
+d.chat("predict sepal length")
+result = d.train()
+print(result["metrics"])
+```
+
+Or with an existing engine:
+
+```python
+from drift import Drift
+
+d = Drift(base_url="http://localhost:8000")
+d.load("data.csv")
+reply = d.chat("predict price")
+print(d.get_last_reply(reply))
 ```
 
 ---

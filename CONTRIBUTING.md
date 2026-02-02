@@ -16,8 +16,10 @@ drift is open source. Contributions are welcome.
 git clone https://github.com/lakshitsachdeva/intent2model.git
 cd intent2model
 pip install -r requirements.txt
-pip install -e .  # editable install of drift-ml
+pip install -e .  # editable install of drift-ml (CLI + library)
 ```
+
+Use drift as a library: `from drift import Drift` — see [README](README.md#use-as-library).
 
 For the web UI:
 ```bash

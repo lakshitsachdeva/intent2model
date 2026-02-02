@@ -51,6 +51,9 @@ export default function Home() {
             <Link href="/drift#setup" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
               Docs
             </Link>
+            <Link href="/drift#library" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
+              Library
+            </Link>
           </div>
         </div>
       </nav>

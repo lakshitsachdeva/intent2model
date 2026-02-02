@@ -32,6 +32,9 @@ export default function DriftPage() {
             <Link href="/drift#setup" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
               Setup
             </Link>
+            <Link href="/drift#library" className="text-sm font-medium text-white/80 hover:text-white transition-colors">
+              Library
+            </Link>
           </div>
         </div>
       </nav>
@@ -66,55 +69,103 @@ export default function DriftPage() {
           <span className="text-white/50 text-sm">→</span>
         </a>
 
-        <section className="space-y-4 sm:space-y-6 mb-10 sm:mb-12">
-          <h2 className="text-xl sm:text-2xl font-semibold text-white">Quick start</h2>
-          <div className="space-y-4 text-white/80">
-            <div>
-              <p className="text-white/60 text-sm mb-2">1. Install drift (pick one)</p>
-              <div className="space-y-2">
-                <div>
-                  <p className="text-white/40 text-xs mb-1">via npm</p>
-                  <pre className="bg-black/60 border border-white/20 text-green-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
-npm install -g drift-ml
-                  </pre>
-                </div>
-                <div>
-                  <p className="text-white/40 text-xs mb-1">via pipx (Python) — required for the CLI</p>
-                  <pre className="bg-black/60 border border-white/20 text-green-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
-pip install pipx && pipx ensurepath   # Windows: do this first, restart terminal
-pipx install drift-ml
-                  </pre>
-                  <p className="text-white/50 text-xs mt-1">You need both npm and pipx. Update: <code className="bg-white/10 px-1 rounded">pipx upgrade drift-ml</code></p>
-                </div>
-              </div>
+        <section id="setup" className="space-y-6 sm:space-y-8 mb-10 sm:mb-12 scroll-mt-20">
+          <h2 className="text-xl sm:text-2xl font-semibold text-white">Step-by-step setup</h2>
+          <p className="text-white/70">
+            drift needs <strong>both pipx and npm</strong>. pipx runs the Python CLI (the chat REPL). npm starts the engine and downloads it. Follow in order:
+          </p>
+
+          {/* Step 1: LLM */}
+          <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-6 sm:p-8 space-y-4">
+            <div className="flex items-center gap-2">
+              <span className="flex items-center justify-center w-8 h-8 rounded-full bg-emerald-500/30 text-emerald-400 font-bold text-sm">1</span>
+              <h3 className="text-white font-semibold text-lg">Get a local LLM</h3>
             </div>
-            <div>
-              <p className="text-white/60 text-sm mb-2">2. Run drift</p>
-              <pre className="bg-black/60 border border-white/20 text-green-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
+            <p className="text-white/70 text-sm">
+              drift uses an LLM for planning and training. Pick one <strong>before</strong> installing drift. See options below (Gemini CLI or Ollama).
+            </p>
+          </div>
+
+          {/* Step 2: pipx */}
+          <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-6 sm:p-8 space-y-4">
+            <div className="flex items-center gap-2">
+              <span className="flex items-center justify-center w-8 h-8 rounded-full bg-blue-500/30 text-blue-400 font-bold text-sm">2</span>
+              <h3 className="text-white font-semibold text-lg">Install pipx</h3>
+            </div>
+            <p className="text-white/70 text-sm">
+              pipx runs the Python CLI (the actual drift chat interface). Without it, drift won&apos;t start.
+            </p>
+            <pre className="bg-black/60 border border-white/20 text-green-400 p-3 rounded-lg overflow-x-auto text-xs sm:text-sm">
+{`pip install pipx
+pipx ensurepath`}
+            </pre>
+            <p className="text-white/50 text-xs">Windows: restart PowerShell after ensurepath. macOS/Linux: restart terminal or run <code className="bg-white/10 px-1 rounded">source ~/.zshrc</code></p>
+          </div>
+
+          {/* Step 3: npm */}
+          <div className="bg-purple-500/10 border border-purple-500/30 rounded-xl p-6 sm:p-8 space-y-4">
+            <div className="flex items-center gap-2">
+              <span className="flex items-center justify-center w-8 h-8 rounded-full bg-purple-500/30 text-purple-400 font-bold text-sm">3</span>
+              <h3 className="text-white font-semibold text-lg">Install npm (Node.js)</h3>
+            </div>
+            <p className="text-white/70 text-sm">
+              npm starts the engine, downloads it on first run, and launches the pipx CLI. Get it from <a href="https://nodejs.org" target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:underline">nodejs.org</a>.
+            </p>
+          </div>
+
+          {/* Step 4: drift */}
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-6 sm:p-8 space-y-4">
+            <div className="flex items-center gap-2">
+              <span className="flex items-center justify-center w-8 h-8 rounded-full bg-amber-500/30 text-amber-400 font-bold text-sm">4</span>
+              <h3 className="text-white font-semibold text-lg">Install drift (both)</h3>
+            </div>
+            <p className="text-white/70 text-sm">
+              You need <strong>both</strong> — npm for the engine launcher, pipx for the CLI.
+            </p>
+            <pre className="bg-black/60 border border-white/20 text-green-400 p-3 rounded-lg overflow-x-auto text-xs sm:text-sm">
+{`pipx install drift-ml
+npm install -g drift-ml`}
+            </pre>
+          </div>
+
+          {/* Step 5: Run */}
+          <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-xl p-6 sm:p-8 space-y-4">
+            <div className="flex items-center gap-2">
+              <span className="flex items-center justify-center w-8 h-8 rounded-full bg-cyan-500/30 text-cyan-400 font-bold text-sm">5</span>
+              <h3 className="text-white font-semibold text-lg">Run drift</h3>
+            </div>
+            <pre className="bg-black/60 border border-white/20 text-green-400 p-3 rounded-lg overflow-x-auto text-xs sm:text-sm">
 drift
-              </pre>
-              <p className="text-white/50 text-sm mt-2">
-                First run: downloads engine, starts it locally. Works on any laptop.
-              </p>
-            </div>
-            <div>
-              <p className="text-white/60 text-sm mb-2">3. Install an LLM (required — pick one below)</p>
-            </div>
-            <div>
-              <p className="text-white/60 text-sm mb-2">4. Chat</p>
-              <pre className="bg-black/60 border border-white/20 text-cyan-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
-drift › load data.csv
+            </pre>
+            <p className="text-white/50 text-sm">First run downloads the engine (~100MB). Then:</p>
+            <pre className="bg-black/60 border border-white/20 text-cyan-400 p-3 rounded-lg overflow-x-auto text-xs sm:text-sm">
+{`drift › load data.csv
 drift › predict price
 drift › try something stronger
-drift › why is accuracy capped
-drift › quit
-              </pre>
-            </div>
+drift › quit`}
+            </pre>
           </div>
-        </section>
 
-        <section id="setup" className="space-y-6 sm:space-y-8 mb-10 sm:mb-12 scroll-mt-20">
-          <h2 className="text-xl sm:text-2xl font-semibold text-white">LLM setup — detailed instructions</h2>
+          <section id="library" className="scroll-mt-20 pt-8 space-y-4">
+            <h2 className="text-xl sm:text-2xl font-semibold text-white">Use as library</h2>
+            <p className="text-white/70">
+              Add drift to your Python scripts. <code className="bg-white/10 px-1.5 py-0.5 rounded">pip install drift-ml</code> and import.
+            </p>
+            <pre className="bg-black/60 border border-white/20 text-green-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
+{`from drift import Drift
+
+d = Drift()
+d.load("iris.csv")
+d.chat("predict sepal length")
+result = d.train()
+print(result["metrics"])`}
+            </pre>
+            <p className="text-white/50 text-sm">
+              Or connect to an existing engine: <code className="bg-white/10 px-1 rounded">Drift(base_url="http://localhost:8000")</code>
+            </p>
+          </section>
+
+          <h2 className="text-xl sm:text-2xl font-semibold text-white pt-8">LLM options — pick one</h2>
           <p className="text-white/70">
             Training and planning use an LLM. You need one. Here&apos;s exactly how to install each option:
           </p>
@@ -207,22 +258,16 @@ ollama run llama3.2
           </p>
 
           <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-6 space-y-3">
-            <h3 className="text-amber-400 font-semibold">Windows setup</h3>
+            <h3 className="text-amber-400 font-semibold">Windows: engine crashes?</h3>
             <p className="text-white/70 text-sm">
-              <strong>1. Install pipx</strong> (required — drift needs it): <code className="bg-white/10 px-1 rounded">pip install pipx</code> then <code className="bg-white/10 px-1 rounded">pipx ensurepath</code>. Restart PowerShell.
-            </p>
-            <p className="text-white/70 text-sm">
-              <strong>2. Install drift:</strong> <code className="bg-white/10 px-1 rounded">pipx install drift-ml</code> and <code className="bg-white/10 px-1 rounded">npm install -g drift-ml</code>
-            </p>
-            <p className="text-white/70 text-sm">
-              <strong>3. If engine crashes</strong>, run manually in PowerShell to see the error:
+              Run the engine manually in PowerShell to see the error:
             </p>
             <pre className="bg-black/60 border border-white/20 text-green-400 p-3 rounded-lg overflow-x-auto text-xs sm:text-sm">
 {`cd $env:USERPROFILE\\.drift\\bin
 .\\drift-engine-windows-x64.exe`}
             </pre>
             <p className="text-white/60 text-sm">
-              Common fixes: <a href="https://aka.ms/vs/17/release/vc_redist.x64.exe" target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:underline">Visual C++ Redistributable</a>, Windows Defender exception, or allow port 8000 in firewall.
+              Fixes: <a href="https://aka.ms/vs/17/release/vc_redist.x64.exe" target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:underline">Visual C++ Redistributable</a>, Windows Defender exception, allow port 8000 in firewall.
             </p>
           </div>
         </section>
