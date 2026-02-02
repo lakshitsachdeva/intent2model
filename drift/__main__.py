@@ -1,13 +1,24 @@
 """
 Entry point for `python -m drift` or `drift` command.
-Runs the chat-based REPL.
+Runs the chat-based REPL. If no backend is running, downloads and starts the engine.
 """
+
+import os
+import sys
 
 from drift.cli.repl import run_repl
 
 
 def main() -> None:
-    run_repl()
+    base_url = os.environ.get("DRIFT_BACKEND_URL")
+    if not base_url:
+        from drift.engine_launcher import ensure_engine
+
+        if not ensure_engine():
+            print("drift: Failed to start engine. Set DRIFT_BACKEND_URL or run: npm install -g drift-ml", file=sys.stderr)
+            sys.exit(1)
+        base_url = f"http://127.0.0.1:{os.environ.get('DRIFT_ENGINE_PORT', '8000')}"
+    run_repl(base_url=base_url)
 
 
 if __name__ == "__main__":

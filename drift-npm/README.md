@@ -6,11 +6,11 @@
 
 ## Exactly what to do
 
-1. **Install drift**
+1. **Install drift** (pipx recommended — works standalone)
    ```bash
-   npm install -g drift-ml
+   pipx install drift-ml
    ```
-   Requires Node.js ≥ 18 and Python 3 on your PATH.
+   Or: `npm install -g drift-ml` (requires `pipx install drift-ml` for the CLI).
 
 2. **Run drift**
    ```bash
@@ -40,6 +40,8 @@ That’s it. The engine runs locally. The web app (if you use it) can be hosted 
 - **Local-first** — The engine runs on your machine. Training and planning stay local; you never send data to our servers.
 - **Terminal-first, chat-based** — Same engine as the web app. No commands to memorize; chat in natural language.
 - **Engine** — On first run the CLI downloads and starts the engine from `~/.drift/bin/`. Or set `DRIFT_BACKEND_URL` to a running engine URL.
+
+**Custom / private repo:** Engine binaries are hosted at [lakshitsachdeva/drift](https://github.com/lakshitsachdeva/drift) (public). For a private fork, set `DRIFT_GITHUB_TOKEN` with a token that has repo read access.
 
 ---
 
