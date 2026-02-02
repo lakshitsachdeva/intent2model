@@ -77,37 +77,49 @@ const DOWNLOAD_HEADERS = {
   ...(GITHUB_TOKEN && { Authorization: `Bearer ${GITHUB_TOKEN}` }),
 };
 
-// Resolve GitHub release asset to API download URL (browser_download_url returns 404 for scripts).
+// Resolve download URL. Try direct URL first (no API, no rate limits); fallback to API for private repos.
 function getGitHubAssetUrl(assetName) {
+  const directUrl = `${ENGINE_BASE_URL}/${assetName}`;
   return new Promise((resolve, reject) => {
-    const req = https.get(GITHUB_API_RELEASE, { headers: API_HEADERS }, (res) => {
-      if (res.statusCode === 404) {
-        reject(new Error(
-          "Release not found (404). If the repo is private, set DRIFT_GITHUB_TOKEN with a token that has repo read access."
-        ));
-        return;
-      }
-      if (res.statusCode !== 200) {
-        reject(new Error(`Release not found: ${res.statusCode}`));
-        return;
-      }
-      let body = "";
-      res.on("data", (chunk) => { body += chunk; });
-      res.on("end", () => {
-        try {
-          const data = JSON.parse(body);
-          const asset = (data.assets || []).find((a) => a.name === assetName);
-          if (!asset || !asset.url) {
-            reject(new Error(`Asset not found: ${assetName}`));
-            return;
-          }
-          resolve(asset.url);
-        } catch (e) {
-          reject(e);
+    function tryApi() {
+      https.get(GITHUB_API_RELEASE, { headers: API_HEADERS }, (apiRes) => {
+        if (apiRes.statusCode === 404) {
+          reject(new Error(
+            "Release not found (404). If the repo is private, set DRIFT_GITHUB_TOKEN with a token that has repo read access."
+          ));
+          return;
         }
-      });
+        if (apiRes.statusCode !== 200) {
+          reject(new Error(`Release not found: ${apiRes.statusCode}`));
+          return;
+        }
+        let body = "";
+        apiRes.on("data", (chunk) => { body += chunk; });
+        apiRes.on("end", () => {
+          try {
+            const data = JSON.parse(body);
+            const asset = (data.assets || []).find((a) => a.name === assetName);
+            const url = asset?.browser_download_url || asset?.url;
+            if (!url) {
+              reject(new Error(`Asset not found: ${assetName}`));
+              return;
+            }
+            resolve(url);
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }).on("error", reject);
+    }
+    const req = https.request(directUrl, { method: "HEAD" }, (res) => {
+      if (res.statusCode === 200 || (res.statusCode >= 301 && res.statusCode <= 302)) {
+        resolve(directUrl);
+        return;
+      }
+      tryApi();
     });
-    req.on("error", reject);
+    req.on("error", tryApi);
+    req.end();
   });
 }
 

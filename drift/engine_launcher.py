@@ -62,6 +62,13 @@ def _engine_running() -> bool:
 
 def _get_asset_download_url(asset_name: str) -> str:
     """Resolve GitHub release asset to download URL."""
+    # Direct URL works for public repos, no API rate limits
+    direct_url = f"https://github.com/{GITHUB_REPO}/releases/download/{ENGINE_TAG}/{asset_name}"
+    r = requests.head(direct_url, timeout=10, allow_redirects=True)
+    if r.status_code == 200:
+        return r.url  # follow redirects to final URL
+
+    # Fallback: API (needed for private repos or if direct fails)
     token = os.environ.get("DRIFT_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
     headers = {
         "User-Agent": "Drift-Engine-Launcher/1.0",
@@ -79,14 +86,9 @@ def _get_asset_download_url(asset_name: str) -> str:
     data = r.json()
     for a in data.get("assets", []):
         if a.get("name") == asset_name:
-            # Prefer browser_download_url for public repos (no auth needed)
-            url = a.get("browser_download_url")
+            url = a.get("browser_download_url") or a.get("url")
             if url:
                 return url
-            # API URL requires Accept: application/octet-stream
-            api_url = a.get("url")
-            if api_url:
-                return api_url
     raise RuntimeError(f"Asset {asset_name} not found in release {ENGINE_TAG}")
 
 

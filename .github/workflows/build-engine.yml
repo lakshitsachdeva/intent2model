@@ -84,6 +84,15 @@ jobs:
           find artifacts -type f -exec cp {} release_files/ \;
           ls -la release_files/
 
+      - name: Check DRIFT_RELEASES_TOKEN
+        run: |
+          if [ -z "${{ secrets.DRIFT_RELEASES_TOKEN }}" ]; then
+            echo "::error::DRIFT_RELEASES_TOKEN secret is not set."
+            echo "Add it at: intent2model → Settings → Secrets and variables → Actions"
+            echo "Create a PAT with repo scope for lakshitsachdeva/drift"
+            exit 1
+          fi
+
       - name: Create release in public drift repo
         uses: softprops/action-gh-release@v2
         with:
