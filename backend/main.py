@@ -531,8 +531,14 @@ def _handle_chat_message(user_message: str, session: Dict[str, Any], df: pd.Data
             return "Plan accepted. Say 'train' or 'yes' to confirm and run.", {}, False
         return "Done.", {}, False
 
-    # 2) Fallback constraints from regex (used if LLM intent parsing fails)
-    _, constraints_fallback, _ = _parse_chat_to_constraints(msg, columns)
+    # 2) Parse constraints via regex first — if we get a clear match, use it and skip LLM
+    is_question, constraints_fallback, regex_reply = _parse_chat_to_constraints(msg, columns)
+    if not is_question and regex_reply and constraints_fallback:
+        # Clear regex match (target, drop, performance_mode) — use it, don't let LLM override
+        if "target" in constraints_fallback or "drop_columns" in constraints_fallback or "performance_mode" in constraints_fallback:
+            # User said e.g. "i want to predict sepal.length" or "drop id" — trigger training
+            trigger = bool(constraints_fallback.get("target")) or bool(constraints_fallback.get("drop_columns")) or bool(constraints_fallback.get("performance_mode"))
+            return regex_reply, constraints_fallback, trigger
 
     # 3) Build context and call LLM — LLM understands what the user is saying (any language)
     context = _build_chat_context(session, df)
@@ -643,9 +649,24 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini_cli")
 from utils.api_key_manager import get_api_key
 api_key = get_api_key(provider="gemini")
 
-# For gemini_cli: also check if CLI is on PATH (works with OAuth, no API key needed)
+# For gemini_cli: check if CLI is on PATH (works with OAuth, no API key needed)
+# On Windows, PyInstaller exe may have limited PATH — also check common npm locations
+def _find_gemini_cli(cmd: str) -> bool:
+    if shutil.which(cmd):
+        return True
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        pf = os.environ.get("ProgramFiles")
+        for p in [
+            os.path.join(appdata, "npm", "gemini.cmd") if appdata else "",
+            os.path.join(pf, "nodejs", "gemini.cmd") if pf else "",
+        ]:
+            if p and os.path.isfile(p):
+                return True
+    return False
+
 gemini_cli_cmd = os.getenv("GEMINI_CLI_CMD", "gemini")
-gemini_cli_available = bool(shutil.which(gemini_cli_cmd))
+gemini_cli_available = _find_gemini_cli(gemini_cli_cmd)
 
 if api_key and api_key.strip():
     try:
@@ -1046,9 +1067,8 @@ async def health():
     # Re-check if API key exists (don't test LLM - too slow)
     from utils.api_key_manager import get_api_key
     api_key = get_api_key(provider="gemini")
-    import shutil
     gemini_cli_cmd = os.getenv("GEMINI_CLI_CMD", "gemini")
-    gemini_cli_available = bool(shutil.which(gemini_cli_cmd))
+    gemini_cli_available = _find_gemini_cli(gemini_cli_cmd)
     
     # Update global state if API key changed
     global LLM_AVAILABLE, LLM_RATE_LIMITED, LLM_PROVIDER, current_llm_model, current_llm_reason
