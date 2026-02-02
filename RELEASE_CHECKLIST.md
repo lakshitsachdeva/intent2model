@@ -16,7 +16,8 @@ In `drift/engine_launcher.py` and `drift-npm/bin/drift.js`, set:
 ENGINE_TAG = "v0.2.2"  # match the tag above
 ```
 
-Engine binaries publish to `lakshitsachdeva/drift`.
+Engine binaries publish to `lakshitsachdeva/intent2model` (same repo).
+**macOS fix:** Build uses `upx=False` so the binary can be ad-hoc signed (avoids Gatekeeper "killed").
 
 ## 3. Bump versions
 

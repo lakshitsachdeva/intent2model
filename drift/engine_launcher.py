@@ -15,8 +15,8 @@ try:
 except ImportError:
     requests = None
 
-GITHUB_REPO = "lakshitsachdeva/drift"  # Engine binaries (v0.2.0+ also in intent2model)
-ENGINE_TAG = "v0.2.0"  # Pinned — direct URL, no API, no rate limits
+GITHUB_REPO = "lakshitsachdeva/intent2model"  # Engine binaries (same repo)
+ENGINE_TAG = "v0.2.1"  # Pinned — direct URL, no API, no rate limits
 ENGINE_PORT = os.environ.get("DRIFT_ENGINE_PORT", "8000")
 HEALTH_URL = f"http://127.0.0.1:{ENGINE_PORT}/health"
 
@@ -143,6 +143,8 @@ def ensure_engine() -> bool:
         try:
             bin_path.chmod(0o755)
             subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(bin_path)], check=False, capture_output=True)
+            # Ad-hoc sign so macOS Gatekeeper doesn't kill the binary (requires non-UPX build)
+            subprocess.run(["codesign", "-s", "-", "--force", str(bin_path)], check=False, capture_output=True)
         except Exception:
             pass
 

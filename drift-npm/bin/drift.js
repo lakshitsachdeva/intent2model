@@ -12,8 +12,8 @@ const http = require("http");
 
 const isWindows = process.platform === "win32";
 const ENGINE_PORT = process.env.DRIFT_ENGINE_PORT || "8000";
-const GITHUB_REPO = "lakshitsachdeva/drift";  // Engine binaries
-const ENGINE_TAG = "v0.2.0";  // Pinned — direct URL, no API, no rate limits
+const GITHUB_REPO = "lakshitsachdeva/intent2model";  // Engine binaries (same repo)
+const ENGINE_TAG = "v0.2.1";  // Pinned — direct URL, no API, no rate limits
 const ENGINE_BASE_URL = `https://github.com/${GITHUB_REPO}/releases/download/${ENGINE_TAG}`;
 const HEALTH_URL = `http://127.0.0.1:${ENGINE_PORT}/health`;
 const HEALTH_TIMEOUT_MS = 2000;
@@ -157,16 +157,61 @@ async function ensureEngine() {
     try {
       fs.chmodSync(binPath, 0o755);
       spawnSync("xattr", ["-dr", "com.apple.quarantine", binPath], { stdio: "pipe" });
+      // Ad-hoc sign so macOS Gatekeeper doesn't kill the binary
+      spawnSync("codesign", ["-s", "-", "--force", binPath], { stdio: "pipe" });
     } catch (_) {}
   }
-  const child = spawn(binPath, [], {
-    detached: true,
-    stdio: "ignore",
-    cwd: binDir,
-    env: { ...process.env, DRIFT_ENGINE_PORT: ENGINE_PORT },
-  });
-  child.unref();
-  return waitForEngine();
+
+  const absPath = path.resolve(binPath);
+  const env = { ...process.env, DRIFT_ENGINE_PORT: ENGINE_PORT };
+
+  function trySpawn(useShell) {
+    return new Promise((resolve, reject) => {
+      let child;
+      try {
+        if (useShell && isMac) {
+          // macOS spawn -88 workaround: run via shell (often bypasses Gatekeeper)
+          child = spawn("/bin/sh", ["-c", `exec "${absPath}"`], {
+            detached: true,
+            stdio: "ignore",
+            cwd: binDir,
+            env,
+          });
+        } else {
+          child = spawn(absPath, [], {
+            detached: true,
+            stdio: "ignore",
+            cwd: binDir,
+            env,
+          });
+        }
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      child.on("error", (err) => reject(err));
+      child.unref();
+      waitForEngine().then(resolve);
+    });
+  }
+
+  try {
+    return await trySpawn(false);
+  } catch (e) {
+    const isSpawn88 = (e.errno === -88 || (e.message && String(e.message).includes("-88")));
+    if (isMac && isSpawn88) {
+      process.stderr.write("drift: Direct spawn failed (-88). Trying shell fallback...\n");
+      try {
+        return await trySpawn(true);
+      } catch (e2) {
+        console.error("drift: Engine failed to start. On macOS, try:");
+        console.error("  1. Run once: ~/.drift/bin/drift-engine-macos-arm64");
+        console.error("  2. If blocked: System Settings → Privacy & Security → allow it");
+        throw e2;
+      }
+    }
+    throw e;
+  }
 }
 
 function findPythonDrift() {
