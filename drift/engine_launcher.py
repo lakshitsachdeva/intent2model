@@ -16,7 +16,7 @@ except ImportError:
     requests = None
 
 GITHUB_REPO = "lakshitsachdeva/intent2model"  # Engine binaries (same repo)
-ENGINE_TAG = "v0.2.6"  # Pinned — direct URL, no API, no rate limits
+ENGINE_TAG = "v0.2.7"  # Pinned — direct URL, no API, no rate limits
 ENGINE_PORT = os.environ.get("DRIFT_ENGINE_PORT", "8000")
 HEALTH_URL = f"http://127.0.0.1:{ENGINE_PORT}/health"
 
@@ -119,6 +119,20 @@ def ensure_engine() -> bool:
 
     bin_dir.mkdir(parents=True, exist_ok=True)
 
+    # Re-download if engine tag changed (e.g. after pipx upgrade)
+    version_file = bin_dir / ".engine-tag"
+    if bin_path.exists() and version_file.exists():
+        try:
+            if version_file.read_text().strip() != ENGINE_TAG:
+                bin_path.unlink()
+        except Exception:
+            pass
+    if bin_path.exists() and not version_file.exists():
+        try:
+            bin_path.unlink()
+        except Exception:
+            pass
+
     if not bin_path.exists():
         plat, arch = _get_platform_key()
         ext = ".exe" if platform.system() == "Windows" else ""
@@ -127,6 +141,10 @@ def ensure_engine() -> bool:
         try:
             url = _get_asset_url(asset)
             _download_file(url, bin_path)
+            try:
+                version_file.write_text(ENGINE_TAG)
+            except Exception:
+                pass
         except Exception as e:
             print(f"drift: Download failed: {e}", file=sys.stderr)
             print(f"drift: Run: mkdir -p ~/.drift/bin && curl -L -o ~/.drift/bin/{asset} <url>", file=sys.stderr)

@@ -13,7 +13,7 @@ const http = require("http");
 const isWindows = process.platform === "win32";
 const ENGINE_PORT = process.env.DRIFT_ENGINE_PORT || "8000";
 const GITHUB_REPO = "lakshitsachdeva/intent2model";  // Engine binaries (same repo)
-const ENGINE_TAG = "v0.2.6";  // Pinned — direct URL, no API, no rate limits
+const ENGINE_TAG = "v0.2.7";  // Pinned — direct URL, no API, no rate limits
 const ENGINE_BASE_URL = `https://github.com/${GITHUB_REPO}/releases/download/${ENGINE_TAG}`;
 const HEALTH_URL = `http://127.0.0.1:${ENGINE_PORT}/health`;
 const HEALTH_TIMEOUT_MS = 2000;
@@ -132,6 +132,16 @@ async function ensureEngine() {
   if (!fs.existsSync(binDir)) {
     fs.mkdirSync(binDir, { recursive: true });
   }
+  // Re-download if engine tag changed (e.g. after npm upgrade)
+  const versionFile = path.join(binDir, ".engine-tag");
+  if (fs.existsSync(binPath)) {
+    try {
+      const stored = fs.existsSync(versionFile) ? fs.readFileSync(versionFile, "utf8").trim() : "";
+      if (stored !== ENGINE_TAG) {
+        fs.unlinkSync(binPath);
+      }
+    } catch (_) {}
+  }
   if (!fs.existsSync(binPath)) {
     const { plat, arch } = getPlatformKey();
     const ext = isWindows ? ".exe" : "";
@@ -140,6 +150,9 @@ async function ensureEngine() {
     process.stderr.write(`drift: Downloading engine (${asset})...\n`);
     try {
       await downloadWithCurl(url, binPath).catch(() => downloadFile(url, binPath));
+      try {
+        fs.writeFileSync(versionFile, ENGINE_TAG);
+      } catch (_) {}
     } catch (e) {
       console.error("drift: Download failed.", e.message);
       return false;

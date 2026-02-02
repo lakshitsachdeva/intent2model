@@ -206,11 +206,11 @@ def _parse_chat_to_constraints(message: str, columns: list[str]) -> tuple[bool, 
             delta.setdefault("drop_columns", []).append(raw)
         reply = f"I'll drop {delta['drop_columns'][-1]} from features. Want me to propose a plan and train?"
 
-    # use X as target / this target / target is X / wanna predict X / predict length
+    # use X as target / this target / target is X / wanna predict X / predict length / predict sepal length
     target_match = re.search(
         r"(?:use|set|target is?)\s+([a-zA-Z0-9_.]+)\s+as\s+target|(?:use|set)\s+([a-zA-Z0-9_.]+)\s+as\s+target|"
         r"target\s+is\s+([a-zA-Z0-9_.]+)|this target\s*[:\s]*([a-zA-Z0-9_.]+)|"
-        r"predict\s+([a-zA-Z0-9_.]+)|(?:wanna|want to)\s+predict\s+([a-zA-Z0-9_.]+)|"
+        r"predict\s+([a-zA-Z0-9_.]+)|(?:wanna|want to)\s+predict\s+([a-zA-Z0-9_.\s]+?)(?:\s*$|\s+as|\s+please)|"
         r"(?:i said |the )?target is (\w+)",
         msg,
         re.IGNORECASE,
@@ -223,8 +223,16 @@ def _parse_chat_to_constraints(message: str, columns: list[str]) -> tuple[bool, 
                 resolved = col
                 break
         if not resolved and cand:
+            # "sepal length" -> sepal.length (space to dot)
+            cand_dotted = cand.replace(" ", ".").lower()
+            for col in columns:
+                if col.lower() == cand_dotted:
+                    resolved = col
+                    break
+        if not resolved and cand:
             # Partial match: "length" -> petal.length or sepal.length; pick one that contains cand
-            containing = [c for c in columns if cand.lower() in c.lower()]
+            cand_clean = cand.replace(" ", ".").lower()
+            containing = [c for c in columns if cand_clean in c.lower() or cand.lower().replace(" ", "") in c.lower()]
             if len(containing) == 1:
                 resolved = containing[0]
             elif len(containing) > 1:
