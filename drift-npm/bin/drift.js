@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+//
+// REMOVED: Any pip/pipx/python -m pip install or upgrade logic.
+// WHY: PEP 668 and user envs; we must not modify Python. User installs CLI via pipx once.
+//
+// FINAL FLOW: (1) If no DRIFT_BACKEND_URL, ensure engine at 127.0.0.1:8000 (download + start if needed).
+//             (2) Locate Python drift ONLY in ~/.local/bin (macOS/Linux) or %USERPROFILE%\.local\bin (Windows).
+//             (3) Spawn that binary with DRIFT_BACKEND_URL set; never run drift.cmd/drift.ps1/drift.js (self).
+//
 
 const { spawnSync, spawn } = require("child_process");
 const path = require("path");
@@ -127,60 +135,18 @@ async function ensureEngine() {
   return waitForEngine();
 }
 
-// --- Python drift discovery (unchanged) ---
-function getPipxBinPaths() {
+// Locate Python drift ONLY in pipx bin dir. Never search PATH (avoids running drift.cmd/drift.ps1/drift.js).
+function findPythonDrift() {
   const home = process.env.HOME || process.env.USERPROFILE || "";
-  if (!home) return [];
+  if (!home) return null;
   const localBin = path.join(home, ".local", "bin");
   if (isWindows) {
-    return [
-      path.join(localBin, "drift.exe"),
-      path.join(localBin, "drift"),
-    ];
+    const exe = path.join(localBin, "drift.exe");
+    if (fs.existsSync(exe)) return exe;
+    return null;
   }
-  return [
-    path.join(localBin, "drift"),
-    "/usr/local/bin/drift",
-  ];
-}
-
-function isLikelyUsOrNpmWrapper(filePath, content) {
-  if (!content || typeof content !== "string") return false;
-  const s = content.slice(0, 200);
-  if (s.includes("#!/usr/bin/env node")) return true;
-  if (s.includes("node") && (s.startsWith("@") || s.includes("cmd.exe"))) return true;
-  return false;
-}
-
-function findPythonDrift() {
-  for (const p of getPipxBinPaths()) {
-    if (fs.existsSync(p)) {
-      try {
-        const content = fs.readFileSync(p, "utf8").slice(0, 200);
-        if (!isLikelyUsOrNpmWrapper(p, content)) return p;
-      } catch (_) {
-        return p;
-      }
-    }
-  }
-  const pathEnv = process.env.PATH || "";
-  const dirs = pathEnv.split(path.delimiter);
-  for (const dir of dirs) {
-    const base = path.join(dir, "drift");
-    const candidates = isWindows ? [base + ".exe", base + ".cmd", base] : [base];
-    for (const candidate of candidates) {
-      if (!fs.existsSync(candidate)) continue;
-      const ext = path.extname(candidate).toLowerCase();
-      if (isWindows && (ext === ".cmd" || ext === ".bat" || ext === ".ps1")) continue;
-      try {
-        const content = fs.readFileSync(candidate, "utf8").slice(0, 200);
-        if (isLikelyUsOrNpmWrapper(candidate, content)) continue;
-        return candidate;
-      } catch (_) {
-        return candidate;
-      }
-    }
-  }
+  const unix = path.join(localBin, "drift");
+  if (fs.existsSync(unix)) return unix;
   return null;
 }
 
@@ -202,15 +168,9 @@ async function main() {
     console.error(`
 drift is not installed.
 
-Install the Python CLI first:
+Install it with:
 
-  pip install --user pipx
-  pipx ensurepath
   pipx install drift-ml
-
-Then run:
-
-  drift
 `);
     process.exit(1);
   }
