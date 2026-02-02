@@ -16,7 +16,7 @@ except ImportError:
     requests = None
 
 GITHUB_REPO = "lakshitsachdeva/intent2model"  # Engine binaries (same repo)
-ENGINE_TAG = "v0.2.11"  # Pinned — direct URL, no API, no rate limits
+ENGINE_TAG = "v0.2.12"  # Pinned — direct URL, no API, no rate limits
 ENGINE_PORT = os.environ.get("DRIFT_ENGINE_PORT", "8000")
 HEALTH_URL = f"http://127.0.0.1:{ENGINE_PORT}/health"
 
@@ -184,7 +184,11 @@ def ensure_engine() -> bool:
         script = f'@echo off\ncd /d "%~dp0"\nset DRIFT_ENGINE_PORT={port}\nstart /b "" {bin_name}\n'
         if not bat.exists() or bat.read_text() != script:
             bat.write_text(script)
-        launch_cmd = ["cmd", "/c", str(bat)]
+        # Use full path to cmd.exe — npm/pipx can have limited PATH, "cmd" → ENOENT
+        cmd_exe = os.environ.get("ComSpec") or os.path.join(
+            os.environ.get("SystemRoot", "C:\\Windows"), "System32", "cmd.exe"
+        )
+        launch_cmd = [cmd_exe, "/c", str(bat)]
     else:
         launch_cmd = [str(bin_path)]
 
