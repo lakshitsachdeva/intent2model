@@ -13,7 +13,7 @@ const http = require("http");
 const isWindows = process.platform === "win32";
 const ENGINE_PORT = process.env.DRIFT_ENGINE_PORT || "8000";
 const GITHUB_REPO = "lakshitsachdeva/intent2model";  // Engine binaries (same repo)
-const ENGINE_TAG = "v0.2.7";  // Pinned — direct URL, no API, no rate limits
+const ENGINE_TAG = "v0.2.8";  // Pinned — direct URL, no API, no rate limits
 const ENGINE_BASE_URL = `https://github.com/${GITHUB_REPO}/releases/download/${ENGINE_TAG}`;
 const HEALTH_URL = `http://127.0.0.1:${ENGINE_PORT}/health`;
 const HEALTH_TIMEOUT_MS = 2000;
