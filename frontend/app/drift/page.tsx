@@ -79,11 +79,12 @@ npm install -g drift-ml
                   </pre>
                 </div>
                 <div>
-                  <p className="text-white/40 text-xs mb-1">via pipx (Python) — macOS, Linux, Windows</p>
+                  <p className="text-white/40 text-xs mb-1">via pipx (Python) — required for the CLI</p>
                   <pre className="bg-black/60 border border-white/20 text-green-400 p-3 sm:p-4 rounded-lg overflow-x-auto text-xs sm:text-sm">
+pip install pipx && pipx ensurepath   # Windows: do this first, restart terminal
 pipx install drift-ml
                   </pre>
-                  <p className="text-white/50 text-xs mt-1">Update: <code className="bg-white/10 px-1 rounded">pipx upgrade drift-ml</code></p>
+                  <p className="text-white/50 text-xs mt-1">You need both npm and pipx. Update: <code className="bg-white/10 px-1 rounded">pipx upgrade drift-ml</code></p>
                 </div>
               </div>
             </div>
@@ -204,6 +205,26 @@ ollama run llama3.2
           <p className="text-white/50 text-sm">
             The engine runs planning and training locally. The LLM is the brain; execution is automatic. No data leaves your machine.
           </p>
+
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-6 space-y-3">
+            <h3 className="text-amber-400 font-semibold">Windows setup</h3>
+            <p className="text-white/70 text-sm">
+              <strong>1. Install pipx</strong> (required — drift needs it): <code className="bg-white/10 px-1 rounded">pip install pipx</code> then <code className="bg-white/10 px-1 rounded">pipx ensurepath</code>. Restart PowerShell.
+            </p>
+            <p className="text-white/70 text-sm">
+              <strong>2. Install drift:</strong> <code className="bg-white/10 px-1 rounded">pipx install drift-ml</code> and <code className="bg-white/10 px-1 rounded">npm install -g drift-ml</code>
+            </p>
+            <p className="text-white/70 text-sm">
+              <strong>3. If engine crashes</strong>, run manually in PowerShell to see the error:
+            </p>
+            <pre className="bg-black/60 border border-white/20 text-green-400 p-3 rounded-lg overflow-x-auto text-xs sm:text-sm">
+{`cd $env:USERPROFILE\\.drift\\bin
+.\\drift-engine-windows-x64.exe`}
+            </pre>
+            <p className="text-white/60 text-sm">
+              Common fixes: <a href="https://aka.ms/vs/17/release/vc_redist.x64.exe" target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:underline">Visual C++ Redistributable</a>, Windows Defender exception, or allow port 8000 in firewall.
+            </p>
+          </div>
         </section>
 
         <section id="run-locally" className="space-y-4 sm:space-y-6 mb-10 sm:mb-12 scroll-mt-20">

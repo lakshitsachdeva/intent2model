@@ -13,7 +13,7 @@ const http = require("http");
 const isWindows = process.platform === "win32";
 const ENGINE_PORT = process.env.DRIFT_ENGINE_PORT || "8000";
 const GITHUB_REPO = "lakshitsachdeva/intent2model";  // Engine binaries (same repo)
-const ENGINE_TAG = "v0.2.1";  // Pinned — direct URL, no API, no rate limits
+const ENGINE_TAG = "v0.2.5";  // Pinned — direct URL, no API, no rate limits
 const ENGINE_BASE_URL = `https://github.com/${GITHUB_REPO}/releases/download/${ENGINE_TAG}`;
 const HEALTH_URL = `http://127.0.0.1:${ENGINE_PORT}/health`;
 const HEALTH_TIMEOUT_MS = 2000;
@@ -166,9 +166,13 @@ async function ensureEngine() {
   const env = { ...process.env, DRIFT_ENGINE_PORT: ENGINE_PORT };
 
   // macOS: spawn a wrapper script instead of the binary directly (avoids -88)
+  // Windows: use batch file so engine starts reliably (inherits PATH for gemini etc.)
   const binName = path.basename(binPath);
-  const wrapperPath = isMac ? path.join(binDir, "run-engine.sh") : null;
-  if (isMac && wrapperPath) {
+  let toSpawn = absPath;
+  let spawnArgs = [];
+
+  if (isMac) {
+    const wrapperPath = path.join(binDir, "run-engine.sh");
     const wrapperScript = `#!/bin/bash
 cd "$(dirname "$0")"
 export DRIFT_ENGINE_PORT="${ENGINE_PORT}"
@@ -178,13 +182,32 @@ exec ./${binName}
       fs.writeFileSync(wrapperPath, wrapperScript);
       fs.chmodSync(wrapperPath, 0o755);
     }
+    toSpawn = "/bin/bash";
+    spawnArgs = [wrapperPath];
+  } else if (isWindows) {
+    const batPath = path.join(binDir, "run-engine.bat");
+    const batScript = `@echo off
+cd /d "%~dp0"
+set DRIFT_ENGINE_PORT=${ENGINE_PORT}
+start /b "" ${binName}
+`;
+    if (!fs.existsSync(batPath) || fs.readFileSync(batPath, "utf8") !== batScript) {
+      fs.writeFileSync(batPath, batScript);
+    }
+    toSpawn = "cmd";
+    spawnArgs = ["/c", batPath];
   }
 
   process.stderr.write("drift: Starting engine (first run may take 30s)...\n");
 
-  // On macOS, always use bash to run (wrapper or binary) — avoids spawn -88
-  const toSpawn = (isMac && wrapperPath) ? "/bin/bash" : absPath;
-  const spawnArgs = (isMac && wrapperPath) ? [wrapperPath] : [];
+  const stderrLog = path.join(binDir, ".engine-stderr.log");
+  let stderrFd;
+  try {
+    stderrFd = fs.openSync(stderrLog, "w");
+  } catch (_) {
+    stderrFd = "ignore";
+  }
+  const stdio = stderrFd === "ignore" ? "ignore" : ["ignore", "ignore", stderrFd];
 
   function trySpawn(cmd, args) {
     return new Promise((resolve, reject) => {
@@ -192,7 +215,7 @@ exec ./${binName}
       try {
         child = spawn(cmd, args || [], {
           detached: true,
-          stdio: "ignore",
+          stdio,
           cwd: binDir,
           env,
         });
@@ -256,6 +279,21 @@ async function main() {
       });
       if (!started) {
         console.error("Failed to start drift engine.");
+        const binDir = getEngineDir();
+        if (binDir) {
+          const stderrLog = path.join(binDir, ".engine-stderr.log");
+          if (fs.existsSync(stderrLog)) {
+            const err = fs.readFileSync(stderrLog, "utf8").trim();
+            if (err) console.error("drift: Engine log:", err.slice(-500));
+          }
+          const enginePath = getEnginePath();
+          if (isWindows && enginePath) {
+            console.error("drift: On Windows (PowerShell), run manually to see the error:");
+            console.error("  cd $env:USERPROFILE\\.drift\\bin");
+            console.error("  .\\drift-engine-windows-x64.exe");
+            console.error("drift: Also install pipx: pip install pipx && pipx ensurepath, then pipx install drift-ml");
+          }
+        }
         process.exit(1);
       }
     }
@@ -263,11 +301,13 @@ async function main() {
 
   const driftPath = findPythonDrift();
   if (!driftPath) {
-    console.error(`
-drift is not installed. Install it with:
-
-  pipx install drift-ml
-`);
+    console.error("drift: Python CLI not found. Install with:");
+    if (isWindows) {
+      console.error("  pip install pipx");
+      console.error("  pipx ensurepath");
+      console.error("  (restart PowerShell)");
+    }
+    console.error("  pipx install drift-ml");
     process.exit(1);
   }
 

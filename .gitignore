@@ -33,6 +33,7 @@ Thumbs.db
 # Build
 dist/
 build/
+*.egg-info/
 .next/
 out/
 

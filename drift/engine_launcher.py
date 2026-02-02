@@ -16,7 +16,7 @@ except ImportError:
     requests = None
 
 GITHUB_REPO = "lakshitsachdeva/intent2model"  # Engine binaries (same repo)
-ENGINE_TAG = "v0.2.1"  # Pinned — direct URL, no API, no rate limits
+ENGINE_TAG = "v0.2.5"  # Pinned — direct URL, no API, no rate limits
 ENGINE_PORT = os.environ.get("DRIFT_ENGINE_PORT", "8000")
 HEALTH_URL = f"http://127.0.0.1:{ENGINE_PORT}/health"
 
@@ -149,6 +149,7 @@ def ensure_engine() -> bool:
             pass
 
     # macOS: use wrapper script via bash to avoid spawn -88
+    # Windows: use batch file so engine starts reliably (inherits PATH for gemini etc.)
     if platform.system() == "Darwin":
         wrapper = bin_dir / "run-engine.sh"
         port = ENGINE_PORT
@@ -158,6 +159,14 @@ def ensure_engine() -> bool:
             wrapper.write_text(script)
             wrapper.chmod(0o755)
         launch_cmd = ["/bin/bash", str(wrapper)]
+    elif platform.system() == "Windows":
+        bat = bin_dir / "run-engine.bat"
+        port = ENGINE_PORT
+        bin_name = bin_path.name
+        script = f'@echo off\ncd /d "%~dp0"\nset DRIFT_ENGINE_PORT={port}\nstart /b "" {bin_name}\n'
+        if not bat.exists() or bat.read_text() != script:
+            bat.write_text(script)
+        launch_cmd = ["cmd", "/c", str(bat)]
     else:
         launch_cmd = [str(bin_path)]
 

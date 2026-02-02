@@ -38,6 +38,7 @@ import tempfile
 import base64
 from dotenv import load_dotenv
 import subprocess
+import shutil
 import asyncio
 from typing import Set
 import json as json_lib
@@ -642,6 +643,10 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini_cli")
 from utils.api_key_manager import get_api_key
 api_key = get_api_key(provider="gemini")
 
+# For gemini_cli: also check if CLI is on PATH (works with OAuth, no API key needed)
+gemini_cli_cmd = os.getenv("GEMINI_CLI_CMD", "gemini")
+gemini_cli_available = bool(shutil.which(gemini_cli_cmd))
+
 if api_key and api_key.strip():
     try:
         print(f"🔑 Testing LLM with API key: {api_key[:20]}...")
@@ -662,9 +667,26 @@ if api_key and api_key.strip():
         print(f"⚠️  LLM ({LLM_PROVIDER}) is configured but not available: {err[:200]}")
         print("   System will use rule-based fallbacks (still fully functional)")
         print("   Note: LLM features will be disabled, but all core ML functionality works")
+elif LLM_PROVIDER == "gemini_cli" and gemini_cli_available:
+    try:
+        llm_test = LLMInterface(provider="gemini_cli")
+        test_response = llm_test.generate("Say 'OK'", "You are a test assistant.")
+        if test_response and len(test_response.strip()) > 0:
+            LLM_AVAILABLE = True
+            print(f"✅ LLM enabled - using {gemini_cli_cmd} (cli)")
+            print(f"   Gemini CLI detected (OAuth or API key)")
+        else:
+            print(f"⚠️  Gemini CLI responded but with empty content")
+    except Exception as e:
+        print(f"⚠️  Gemini CLI found but not available: {str(e)[:150]}")
+        print("   Set GEMINI_API_KEY for API mode, or run 'gemini' once to complete OAuth")
 else:
-    print("⚠️  No GEMINI_API_KEY found. System will use rule-based fallbacks (still fully functional)")
-    print("   To enable LLM features, set GEMINI_API_KEY environment variable")
+    if LLM_PROVIDER == "gemini_cli" and not gemini_cli_available:
+        print(f"⚠️  Gemini CLI not found ('{gemini_cli_cmd}' not on PATH)")
+        print("   Install: npm install -g @google/gemini-cli")
+    else:
+        print("⚠️  No GEMINI_API_KEY found. System will use rule-based fallbacks (still fully functional)")
+    print("   To enable LLM: set GEMINI_API_KEY or install Gemini CLI")
 
 # In-memory storage for uploaded datasets (in production, use proper storage)
 dataset_cache = {}
