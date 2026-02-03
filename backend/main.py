@@ -14,6 +14,14 @@ import io
 import sys
 from pathlib import Path
 
+# Windows: avoid UnicodeEncodeError when engine runs as subprocess (cp1252 can't encode ⚠️ etc.)
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent))
 
