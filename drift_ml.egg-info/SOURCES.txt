@@ -3,6 +3,7 @@ README.md
 pyproject.toml
 drift/__init__.py
 drift/__main__.py
+drift/api.py
 drift/engine_launcher.py
 drift/cli/__init__.py
 drift/cli/client.py
@@ -18,3 +19,7 @@ drift_ml.egg-info/dependency_links.txt
 drift_ml.egg-info/entry_points.txt
 drift_ml.egg-info/requires.txt
 drift_ml.egg-info/top_level.txt
+tests/test_api.py
+tests/test_automl_agent.py
+tests/test_evaluator.py
+tests/test_plan_normalizer.py

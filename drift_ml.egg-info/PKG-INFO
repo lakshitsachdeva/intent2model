@@ -1,10 +1,141 @@
 Metadata-Version: 2.4
 Name: drift-ml
-Version: 0.2.3
+Version: 0.2.14
 Summary: drift — terminal-first, chat-based AutoML. Open source. No tokens. No auth.
+License-Expression: MIT
 Project-URL: Homepage, https://github.com/lakshitsachdeva/intent2model
 Project-URL: Repository, https://github.com/lakshitsachdeva/intent2model
+Keywords: automl,ml,machine-learning,cli,chat,local-first
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
 Requires-Python: >=3.10
+Description-Content-Type: text/markdown
 License-File: LICENSE
 Requires-Dist: requests>=2.28.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: httpx>=0.24.0; extra == "dev"
 Dynamic: license-file
+
+# drift
+
+**Terminal-first, chat-based AutoML.** Open source. No tokens. No auth.
+
+---
+
+## Install
+
+```bash
+pipx install drift-ml
+```
+
+Or:
+
+```bash
+npm install -g drift-ml
+```
+
+(Both require `pipx install drift-ml` for the Python CLI.)
+
+---
+
+## Run
+
+```bash
+drift
+```
+
+On first run, drift downloads and starts the engine automatically. No backend setup. No config. No tokens.
+
+---
+
+## How it works
+
+- **Local-first** — Engine runs on your machine. Data never leaves.
+- **Chat-based** — `load data.csv`, `predict price`, `try something stronger`
+- **Auto-start** — Engine downloads and starts in the background. You never start a backend manually.
+- **No auth** — No API keys for drift. (You need an LLM for training: Ollama, Gemini CLI, etc.)
+
+---
+
+## Example (CLI)
+
+```text
+drift › load iris.csv
+drift › predict variety
+drift › try something stronger
+drift › quit
+```
+
+---
+
+## Use as library
+
+```bash
+pip install drift-ml
+```
+
+```python
+from drift import Drift
+
+d = Drift()
+d.load("iris.csv")
+d.chat("predict sepal length")
+result = d.train()
+print(result["metrics"])
+```
+
+Or with an existing engine:
+
+```python
+from drift import Drift
+
+d = Drift(base_url="http://localhost:8000")
+d.load("data.csv")
+reply = d.chat("predict price")
+print(d.get_last_reply(reply))
+```
+
+---
+
+## Windows (npm / pipx)
+
+On Windows, when using `npm` or `pipx`, the engine can inherit a limited PATH — Gemini CLI may not be found. We now auto-prepend npm/pipx bin paths. If you still see "I'm ready for your first command" or planning failures:
+
+1. **Add GEMINI_API_KEY** — Create `.env` in project root with `GEMINI_API_KEY=your-key`. The backend will use the API instead of the CLI.
+2. **Run backend manually** — `cd backend && python -m uvicorn main:app --host 0.0.0.0 --port 8000`, then `set DRIFT_BACKEND_URL=http://localhost:8000`.
+
+---
+
+## Philosophy
+
+drift should feel like `git`, `docker`, `brew` — a tool you trust immediately. Zero friction. Open source.
+
+---
+
+## Web UI (optional)
+
+This repo also includes a web UI. For development:
+
+```bash
+./start.sh
+```
+
+Then open http://localhost:3000
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+## License
+
+MIT
