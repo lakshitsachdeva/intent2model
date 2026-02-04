@@ -16,7 +16,7 @@ Library:
     result = d.train()
 """
 
-__version__ = "0.2.13"
+__version__ = "0.2.14"
 
 from drift.api import Drift
 from drift.cli.client import BackendClient, BackendError

@@ -16,7 +16,7 @@ except ImportError:
     requests = None
 
 GITHUB_REPO = "lakshitsachdeva/intent2model"  # Engine binaries (same repo)
-ENGINE_TAG = "v0.2.13"  # Pinned — direct URL, no API, no rate limits
+ENGINE_TAG = "v0.2.14"  # Pinned — direct URL, no API, no rate limits
 ENGINE_PORT = os.environ.get("DRIFT_ENGINE_PORT", "8000")
 HEALTH_URL = f"http://127.0.0.1:{ENGINE_PORT}/health"
 

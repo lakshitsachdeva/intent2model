@@ -65,21 +65,31 @@ def _build_attempt_based_cells(
     )
     cells: List[Dict[str, Any]] = []
     structural_plan = (config or {}).get("structural_plan") or {}
+    automl_plan = (config or {}).get("automl_plan") or {}
     execution_plans = (config or {}).get("execution_plans") or []
     failure_history = (config or {}).get("failure_history") or []
     refused = (config or {}).get("refused", False)
 
-    # Structural Plan (once) — LLM writes code (Cursor-style); code below is LLM output
+    # Structural Plan (once) — rich narrative so notebook is "crazy good" either way
     if structural_plan and isinstance(structural_plan, dict):
         sp = structural_plan
         body = (
-            "The **code** in this notebook was **written by an LLM** (Cursor-style), not compiled from a plan.\n\n"
+            "This notebook documents **how we approached the problem** and **why** we made each choice. "
+            "You'll see the plan, the code, and how to use the model.\n\n"
             f"**Target:** {sp.get('inferred_target', '—')} (confidence: {sp.get('target_confidence', 0):.2f})\n"
             f"**Task:** {sp.get('task_type', '—')}\n"
             f"**Feature semantics:** {len(sp.get('feature_semantics', {}))} features\n"
         )
+        # Pull in planning narrative so notebook tells the story even without full-LLM
+        for key, label in [
+            ("task_inference_md", "**What we're predicting and why:**"),
+            ("dataset_intelligence_md", "**What the data tells us:**"),
+        ]:
+            md = (automl_plan if isinstance(automl_plan, dict) else {}).get(key) or ""
+            if md and str(md).strip():
+                body += f"\n\n{label}\n\n{str(md).strip()[:1200]}{'...' if len(str(md)) > 1200 else ''}\n"
         if sp.get("leakage_candidates"):
-            body += f"\n**Leakage candidates:** {', '.join(sp['leakage_candidates'][:10])}\n"
+            body += f"\n**Leakage candidates (excluded from features):** {', '.join(sp['leakage_candidates'][:10])}\n"
         cells.append(_md_cell(f"## Structural Plan (What is this dataset?)\n\n{body}\n"))
 
     if not execution_plans:
@@ -108,7 +118,9 @@ def _build_attempt_based_cells(
             f"- primary_metric: {ep_dict.get('primary_metric', '—')}\n"
         )
         if ep_dict.get("reasoning_md"):
-            ep_md += f"\n**Reasoning:** {ep_dict['reasoning_md'][:300]}...\n" if len(ep_dict.get("reasoning_md", "")) > 300 else f"\n**Reasoning:** {ep_dict['reasoning_md']}\n"
+            reasoning = ep_dict["reasoning_md"]
+            # Full reasoning — notebook should tell the full story (no aggressive truncation)
+            ep_md += f"\n**Reasoning:**\n\n{reasoning}\n"
         cells.append(_md_cell(ep_md))
 
         # Code: LLM output (Cursor-style) first; fallback to plan_compiler
@@ -173,10 +185,25 @@ def _build_attempt_based_cells(
             except (IncompleteExecutionPlan, RefuseCodeGeneration, Exception):
                 metrics_src = None
 
-            cells.append(_md_cell(f"### Code (compiler fallback) v{attempt_num}"))
+            # Narrative cells so notebook is "crazy good" even without LLM — explain what and why
+            transform_md = (automl_plan if isinstance(automl_plan, dict) else {}).get("transformation_strategy_md") or ""
+            model_md = (automl_plan if isinstance(automl_plan, dict) else {}).get("model_selection_md") or ""
+            train_md = (automl_plan if isinstance(automl_plan, dict) else {}).get("training_validation_md") or ""
+            cells.append(_md_cell(
+                f"### Preprocessing (Attempt {attempt_num})\n\n"
+                + (transform_md[:1000] + ("..." if len(transform_md) > 1000 else "") if transform_md else "We build a preprocessor from the plan: numeric features (impute + scale), categorical (one-hot). This keeps the pipeline reproducible and avoids data leakage.")
+            ))
             _preproc_lines = preproc_src if isinstance(preproc_src, list) else [preproc_src] if preproc_src else _SAFE_FALLBACK_PREPROC_LINES
             cells.append(_code_cell(_preproc_lines))
+            cells.append(_md_cell(
+                f"### Model choice (Attempt {attempt_num})\n\n"
+                + (model_md[:1000] + ("..." if len(model_md) > 1000 else "") if model_md else f"We use **{model_name}** for this attempt. The plan compared multiple candidates; this was the chosen model.")
+            ))
             cells.append(_code_cell(model_src if isinstance(model_src, list) else [model_src]))
+            cells.append(_md_cell(
+                f"### Pipeline and training (Attempt {attempt_num})\n\n"
+                + (train_md[:800] + ("..." if len(train_md) > 800 else "") if train_md else "We combine preprocessor and model into a single pipeline, fit on the training set, and predict on the test set. This keeps preprocessing and model in one place for deployment.")
+            ))
             cells.append(_code_cell(pipeline_src if isinstance(pipeline_src, list) else [pipeline_src]))
             train_eval_lines = [
                 "pipeline.fit(X_train, y_train)\n",
@@ -192,6 +219,18 @@ def _build_attempt_based_cells(
             else:
                 train_eval_lines.append("# Metrics code not generated\n")
             cells.append(_code_cell(train_eval_lines))
+            # What to watch for / interpretation — makes notebook educational
+            err_md = (automl_plan if isinstance(automl_plan, dict) else {}).get("error_behavior_analysis_md") or ""
+            expl_md = (automl_plan if isinstance(automl_plan, dict) else {}).get("explainability_md") or ""
+            interp_parts = []
+            if err_md:
+                interp_parts.append(err_md[:800] + ("..." if len(err_md) > 800 else ""))
+            if expl_md:
+                interp_parts.append(expl_md[:800] + ("..." if len(expl_md) > 800 else ""))
+            if interp_parts:
+                cells.append(_md_cell("### Interpretation and what to watch for\n\n" + "\n\n".join(interp_parts)))
+            else:
+                cells.append(_md_cell("### Interpretation\n\nCheck the metrics above. For classification, review the classification report; for regression, look at R² and residuals."))
 
         # Metrics / Failure gates (if this attempt failed)
         if i < len(failure_history):
@@ -348,6 +387,14 @@ def generate_notebook(
                     default={},
                 )
                 model_name = best.get("model_name") or "random_forest"
+            # Prefer Gemini API for notebook (CLI often fails for long structured output)
+            nb_provider = os.getenv("LLM_PROVIDER", "gemini_cli")
+            try:
+                from utils.api_key_manager import get_api_key
+                if nb_provider == "gemini_cli" and get_api_key(provider="gemini"):
+                    nb_provider = "gemini"
+            except Exception:
+                pass
             full_llm_notebook_cells = generate_full_notebook_llm(
                 execution_plan=last_ep,
                 structural_plan=structural_plan,
@@ -356,7 +403,7 @@ def generate_notebook(
                 task=task,
                 model_name=model_name,
                 metrics=metrics,
-                llm_provider=os.getenv("LLM_PROVIDER", "gemini_cli"),
+                llm_provider=nb_provider,
             )
         except Exception as _:
             full_llm_notebook_cells = None
@@ -568,11 +615,10 @@ def generate_notebook(
                 "cell_type": "markdown",
                 "metadata": {},
                 "source": [
-                    f"# ML Model Training: Predicting {target}\n",
+                    f"# ML Model Training: Predicting **{target}**\n",
                     f"\n",
-                    f"**Live reasoning surface** — attempt-based execution log.\n",
-                    f"\n",
-                    f"The **code** below was **written by an LLM** (Cursor-style), not compiled.\n",
+                    f"This notebook walks you through **what we did and why** — the plan, the code, and how to use the model. "
+                    f"You can run it top to bottom; the dataset is embedded so it works standalone.\n",
                     f"\n",
                     f"**Task:** {task} | **Target:** {target}\n"
                 ]
@@ -580,9 +626,9 @@ def generate_notebook(
             *([
                 {"cell_type": "markdown", "metadata": {}, "source": [f"## {title}\n\n{body}\n"]}
                 for title, body in md_sections
-                if body and str(body).strip() and not use_attempt_based
+                if body and str(body).strip()
             ]),
-            {"cell_type": "markdown", "metadata": {}, "source": ["## 1. Import Libraries"]},
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 1. Import Libraries\n\nStandard ML stack: pandas, sklearn (preprocessing, models, metrics), and plotting."]},
             {
                 "cell_type": "code",
                 "execution_count": None,
@@ -606,9 +652,9 @@ def generate_notebook(
                     "plt.rcParams['figure.figsize'] = (12, 6)\n",
                 ]
             },
-            {"cell_type": "markdown", "metadata": {}, "source": ["## 2. Load Data"]},
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 2. Load Data\n\nThe dataset is embedded below so this notebook runs without external files."]},
             _embed_data_cell(df),
-            {"cell_type": "markdown", "metadata": {}, "source": ["## 3. Prepare Data"]},
+            {"cell_type": "markdown", "metadata": {}, "source": ["## 3. Prepare Data\n\nWe separate features (X) and target (y), then split into train/test. For classification we label-encode the target."]},
             {
                 "cell_type": "code",
                 "execution_count": None,
@@ -652,13 +698,16 @@ def generate_notebook(
                 "No Save Model or Make Predictions cells — this is not a successful run."
             ))
         else:
-            base_cells.append(_md_cell("## Outcome: Success\n\nFinal model was trained and passed error gates."))
-            base_cells.append(_md_cell("### Save Model"))
+            base_cells.append(_md_cell(
+                "## Outcome: Success\n\n"
+                "The model was trained and passed validation. Below: how to save it and run predictions."
+            ))
+            base_cells.append(_md_cell("### Save Model\n\nSave the pipeline (and label encoder for classification) so you can load and use it later."))
             base_cells.append(_code_cell([
                 "with open('model.pkl', 'wb') as f:\n",
                 "    pickle.dump(pipeline, f)\n",
             ] + (["\n", "with open('label_encoder.pkl', 'wb') as f:\n", "    pickle.dump(le, f)\n"] if task == "classification" else []) + ["\n", "print('Model saved.')\n"]))
-            base_cells.append(_md_cell("### Make Predictions"))
+            base_cells.append(_md_cell("### Make Predictions\n\nExample: predict on one row. For your own data, build a DataFrame with the same feature columns and call `pipeline.predict(...)`."))
             base_cells.append(_code_cell([
                 "# Runnable example: first test row\n",
                 "sample = X_test.iloc[[0]]\n",
