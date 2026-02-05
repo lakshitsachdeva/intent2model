@@ -12,6 +12,11 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "drift — Local-first AutoML",
   description: "Terminal-first, chat-based AutoML. Same engine as the web app. No commands to memorize.",
+  icons: {
+    icon: "/icon.png",
+    shortcut: "/icon.png",
+    apple: "/icon.png",
+  },
 };
 
 export const viewport: Viewport = {
